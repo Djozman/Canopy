@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import CryptoKit
+import Network
 
 @Observable
 final class TorrentHandle: Identifiable {
@@ -14,6 +15,7 @@ final class TorrentHandle: Identifiable {
     var uploadSpeed: Int64 = 0
     var state: TorrentState = .stopped
     var peersCount: Int = 0
+    var seedsCount: Int = 0
     var eta: Int = 0
     var statusMessage: String = ""
 
@@ -39,12 +41,22 @@ final class TorrentHandle: Identifiable {
         Task { await engine?.stop() }
     }
 
+    func stopAndWait() async {
+        state = .stopped
+        await engine?.stop()
+    }
+
+    func acceptInbound(_ connection: NWConnection, remoteSupportsExt: Bool) {
+        Task { await engine?.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt) }
+    }
+
     @MainActor
-    func update(progress: Double, dlSpeed: Int64, ulSpeed: Int64, peers: Int, state: TorrentState, eta: Int, status: String = "") {
+    func update(progress: Double, dlSpeed: Int64, ulSpeed: Int64, peers: Int, seeds: Int, state: TorrentState, eta: Int, status: String = "") {
         self.progress = progress
         self.downloadSpeed = dlSpeed
         self.uploadSpeed = ulSpeed
         self.peersCount = peers
+        self.seedsCount = seeds
         self.statusMessage = status
         self.state = state
         self.eta = eta
@@ -94,18 +106,20 @@ actor TorrentEngine_: PeerDelegate {
     private var metadataPieces: [Int: Data] = [:]
     private var metadataSize: Int = 0
 
-    private let peerId: Data
+    let peerId: Data
     private weak var handle: TorrentHandle?
 
-    static let maxPeers = 80
+    static let maxPeers = 200
     static let port: UInt16 = 6881
-    static let pipeline = 25
+    static let pipeline = 200
     static let endgameThreshold = 20
 
-    // Per-peer in-flight tracking: peer identity -> set of "piece:offset" keys.
-    // When a peer disconnects we only remove ITS keys, leaving other peers' requests intact.
-    private var peerInFlight: [ObjectIdentifier: Set<String>] = [:]
-    private var globalInFlight: Set<String> = []   // union of all peerInFlight sets
+    // Per-peer in-flight tracking: packed UInt64 key = (piece << 32) | blockIndex
+    private var peerInFlight: [ObjectIdentifier: Set<UInt64>] = [:]
+    private var globalInFlight: Set<UInt64> = []
+
+    private var trackerTasks: [Task<Void, Never>] = []
+    private var rarityDirty = true
 
     private var trackerStatus = ""
     private var trackerInterval = 1800  // seconds; updated from tracker response
@@ -133,10 +147,23 @@ actor TorrentEngine_: PeerDelegate {
 
     func stop() async {
         isRunning = false
+        trackerTasks.forEach { $0.cancel() }
+        trackerTasks = []
         DHTBus.shared.unregister(infoHash: meta.infoHash)
         for peer in peers { await peer.disconnect() }
         peers = []
         await store.closeAll()
+    }
+
+    func acceptInbound(_ connection: NWConnection, remoteSupportsExt: Bool) async {
+        let peer = PeerConnection(incomingConnection: connection, infoHash: meta.infoHash, peerId: peerId, totalPieces: meta.pieces.count)
+        guard peers.count < Self.maxPeers else {
+            await peer.disconnect()
+            return
+        }
+        peers.append(peer)
+        await peer.setDelegate(self)
+        await peer.acceptInbound(remoteSupportsExt: remoteSupportsExt)
     }
 
     // MARK: - Tracker
@@ -150,13 +177,17 @@ actor TorrentEngine_: PeerDelegate {
         // don't block waiting for slow/dead trackers.
         for urlString in trackerURLs {
             guard let url = URL(string: urlString) else { continue }
-            Task {
+            let t = Task { [weak self] in
+                guard let self else { return }
                 let resp: TrackerResponse?
                 if url.scheme == "udp" {
                     let client = UDPTrackerClient(url: url)
                     let peers = try? await client.announce(
                         infoHash: self.meta.infoHash, peerId: self.peerId,
-                        port: Self.port, event: event ?? ""
+                        port: Self.port, event: event ?? "",
+                        downloaded: self.bytesDownloaded,
+                        left: left,
+                        uploaded: self.bytesUploaded
                     )
                     print("[Canopy] UDP \(urlString): \(peers?.count ?? 0) peers")
                     resp = peers.map { TrackerResponse(interval: 1800, peers: $0) }
@@ -181,10 +212,11 @@ actor TorrentEngine_: PeerDelegate {
                 let interval = max(60, r.interval)
                 await self.connectToPeers(r.peers)
                 await self.updateTrackerStatus(added: r.peers.count)
-                // Schedule re-announce on this tracker's interval
                 try? await Task.sleep(for: .seconds(interval))
-                if await self.isRunning { await self.announceAndConnect() }
+                guard !Task.isCancelled, await self.isRunning else { return }
+                await self.announceAndConnect()
             }
+            trackerTasks.append(t)
         }
     }
 
@@ -291,6 +323,11 @@ actor TorrentEngine_: PeerDelegate {
     }
 
     private func scheduleRequests(for peer: PeerConnection) async {
+        if rarityDirty {
+            await refreshRarityOrder()
+            rarityDirty = false
+        }
+
         guard await !peer.peerChoking else { return }
 
         let pid = ObjectIdentifier(peer)
@@ -304,7 +341,6 @@ actor TorrentEngine_: PeerDelegate {
         let peerBitfield = await peer.bitfield
         guard !peerBitfield.isEmpty else { return }
 
-        // Single actor hop to PieceStore — replaces O(pieces) individual calls
         let blocks = await store.blocksToRequest(
             orderedPieces: orderedPieces,
             peerBitfield: peerBitfield,
@@ -316,40 +352,44 @@ actor TorrentEngine_: PeerDelegate {
 
         var myInFlight = peerInFlight[pid] ?? []
         for b in blocks {
-            let key = "\(b.piece):\(b.offset)"
+            let key = PieceStore.inFlightKey(piece: b.piece, blockIndex: b.offset / PieceStore.blockSize)
             myInFlight.insert(key)
             globalInFlight.insert(key)
         }
         peerInFlight[pid] = myInFlight
 
-        // Single actor hop to PeerConnection — sends all requests in one TCP write
         await peer.requestBlocks(blocks)
     }
 
     // MARK: - PeerDelegate
 
+    private func clearInFlight(for peer: PeerConnection) {
+        let pid = ObjectIdentifier(peer)
+        if let inFlight = peerInFlight[pid] {
+            for k in inFlight { globalInFlight.remove(k) }
+            peerInFlight.removeValue(forKey: pid)
+        }
+    }
+
     func peerDidDisconnect(_ peer: PeerConnection) async {
         let key = "\(peer.host):\(peer.port)"
         print("[Canopy] Peer disconnected: \(key), pool now \(peers.count - 1)")
         peers.removeAll { $0 === peer }
-        // Only remove THIS peer's in-flight keys — other peers' requests stay tracked
-        let pid = ObjectIdentifier(peer)
-        if let keys = peerInFlight.removeValue(forKey: pid) {
-            globalInFlight.subtract(keys)
-        }
+        
+        clearInFlight(for: peer)
         pexDropped.append((peer.host, peer.port))
-
+        
         guard !blacklist.contains(key) else { return }
-
-        // Track cumulative attempts across all sessions to drive backoff
+        
         let attempts = (peerAttempts[key] ?? 0) + 1
         peerAttempts[key] = attempts
-
+        
         if attempts > 6 {
             blacklist.insert(key)
             peerAttempts.removeValue(forKey: key)
             return
         }
+        
         // Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s
         let delay = pow(2.0, Double(attempts - 1)) * 5.0
         // Remove any stale entry for this peer before adding the new one
@@ -361,20 +401,35 @@ actor TorrentEngine_: PeerDelegate {
         ))
     }
 
+    func peerChokedUs(_ peer: PeerConnection) async {
+        clearInFlight(for: peer)
+    }
+
     func peerUnchokedUs(_ peer: PeerConnection) async {
         await scheduleRequests(for: peer)
     }
 
     func peerSentBitfield(_ peer: PeerConnection) async {
+        rarityDirty = true
+        
+        let isPeerSeed = await peer.bitfield.allSatisfy { $0 }
+        let amISeed = await store.progress >= 1.0
+        
+        if isPeerSeed && amISeed {
+            await peer.disconnect()
+            return
+        }
+        
         await scheduleRequests(for: peer)
     }
 
     func peerSentHave(_ peer: PeerConnection) async {
+        rarityDirty = true
         await scheduleRequests(for: peer)
     }
 
     func peerSentBlock(_ peer: PeerConnection, piece: Int, offset: Int, data: Data) async {
-        let key = "\(piece):\(offset)"
+        let key = PieceStore.inFlightKey(piece: piece, blockIndex: offset / PieceStore.blockSize)
         let pid = ObjectIdentifier(peer)
         globalInFlight.remove(key)
         peerInFlight[pid]?.remove(key)
@@ -385,15 +440,15 @@ actor TorrentEngine_: PeerDelegate {
         do {
             try await store.receiveBlock(piece: piece, offset: offset, data: data)
             if await store.hasPiece(piece) {
+                rarityDirty = true
                 let missing = await store.missingPieces()
                 let isEndgame = missing.count <= Self.endgameThreshold
-                // Clear all in-flight keys for this completed piece
-                let prefix = "\(piece):"
+                let pieceHigh = UInt64(piece)
                 for (k, var keys) in peerInFlight {
-                    keys = keys.filter { !$0.hasPrefix(prefix) }
+                    keys = keys.filter { $0 >> 32 != pieceHigh }
                     peerInFlight[k] = keys
                 }
-                globalInFlight = globalInFlight.filter { !$0.hasPrefix(prefix) }
+                globalInFlight = globalInFlight.filter { $0 >> 32 != pieceHigh }
                 for p in peers {
                     await p.sendHave(piece: piece)
                     if isEndgame {
@@ -450,11 +505,18 @@ actor TorrentEngine_: PeerDelegate {
     }
 
     func peerRequestedBlock(_ peer: PeerConnection, piece: Int, offset: Int, length: Int) async {
-        if let data = try? await store.readBlock(piece: piece, offset: offset, length: length) {
+        let store = self.store
+        Task { [weak self] in
+            guard let data = try? await store.readBlock(piece: piece, offset: offset, length: length) else { return }
             await peer.sendPiece(index: piece, begin: offset, block: data)
-            bytesUploaded += Int64(data.count)
-            speedUlAccum += Int64(data.count)
+            await peer.recordUploaded(bytes: Int64(data.count))
+            await self?.recordUpload(bytes: Int64(data.count))
         }
+    }
+
+    private func recordUpload(bytes: Int64) {
+        bytesUploaded += bytes
+        speedUlAccum += bytes
     }
 
     func peerConnected(_ peer: PeerConnection, supportsExtensions: Bool) async {
@@ -476,12 +538,27 @@ actor TorrentEngine_: PeerDelegate {
         Task {
             while isRunning {
                 try? await Task.sleep(for: .seconds(1))
-                await refreshRarityOrder()
+                let now = Date.now
                 for peer in peers {
+                    if now.timeIntervalSince(await peer.lastMessageReceivedTime) > 120 {
+                        await peer.disconnect()
+                        continue
+                    }
+                    
+                    // Cancel stalled block requests if no data received in 15s
+                    if now.timeIntervalSince(await peer.lastBlockReceivedTime) > 15 {
+                        let pid = ObjectIdentifier(peer)
+                        if !(peerInFlight[pid]?.isEmpty ?? true) {
+                            clearInFlight(for: peer)
+                        }
+                    }
+                    
+                    await peer.sendKeepAliveIfNeeded()
                     await peer.updateStats()
                     await scheduleRequests(for: peer)
                 }
-                await choker.update(peers: peers)
+                let isSeeding = await store.progress >= 1.0
+                await choker.update(peers: peers, isSeeding: isSeeding)
                 await broadcastPEX()
                 await processRetryQueue()
                 await pushStats()
@@ -517,13 +594,26 @@ actor TorrentEngine_: PeerDelegate {
         let left = meta.totalSize - Int64(done) * Int64(meta.pieceLength)
         let eta = displayDlSpeed > 0 ? Int(left / max(displayDlSpeed, 1)) : 0
         let retryInfo = retryQueue.isEmpty ? "" : " (\(retryQueue.count) retrying)"
-        let status = peers.isEmpty
-            ? trackerStatus + retryInfo
-            : "\(peers.count) peer\(peers.count == 1 ? "" : "s") connected"
+        
+        var seedCount = 0
+        for p in peers {
+            let bf = await p.bitfield
+            if !bf.isEmpty && bf.allSatisfy({ $0 }) {
+                seedCount += 1
+            }
+        }
+        let pCount = peers.count - seedCount
+        
+        let status: String
+        if peers.isEmpty {
+            status = trackerStatus + retryInfo
+        } else {
+            status = "\(seedCount) seed\(seedCount == 1 ? "" : "s"), \(pCount) peer\(pCount == 1 ? "" : "s") connected"
+        }
 
         await handle?.update(
             progress: progress, dlSpeed: displayDlSpeed, ulSpeed: displayUlSpeed,
-            peers: peers.count, state: newState, eta: eta, status: status
+            peers: pCount, seeds: seedCount, state: newState, eta: eta, status: status
         )
     }
 

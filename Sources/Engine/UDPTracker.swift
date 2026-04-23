@@ -11,11 +11,12 @@ actor UDPTrackerClient {
         self.url = url
     }
     
-    func announce(infoHash: Data, peerId: Data, port: UInt16, event: String = "") async throws -> [TrackerPeer] {
+    func announce(infoHash: Data, peerId: Data, port: UInt16, event: String = "",
+                  downloaded: Int64 = 0, left: Int64 = 0, uploaded: Int64 = 0) async throws -> [TrackerPeer] {
         guard let host = url.host, let portVal = url.port else { return [] }
-        
+
         let connId = try await getConnectionId(host: host, port: UInt16(portVal))
-        
+
         var packet = Data()
         packet.appendUInt64(connId)
         packet.appendUInt32(1) // Action: Announce
@@ -23,9 +24,9 @@ actor UDPTrackerClient {
         packet.appendUInt32(txId)
         packet.append(infoHash)
         packet.append(peerId)
-        packet.appendUInt64(0) // Downloaded
-        packet.appendUInt64(0) // Left
-        packet.appendUInt64(0) // Uploaded
+        packet.appendUInt64(UInt64(bitPattern: downloaded))
+        packet.appendUInt64(UInt64(bitPattern: left))
+        packet.appendUInt64(UInt64(bitPattern: uploaded))
         
         let eventType: UInt32 = {
             switch event {

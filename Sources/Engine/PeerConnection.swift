@@ -8,6 +8,8 @@ actor PeerConnection {
     private let connection: NWConnection
     private(set) var state: State = .connecting
     private var receiveBuffer = Data()
+    private var outboundBuffer = Data()
+    private var isSending = false
 
     private(set) var peerChoking = true
     private(set) var peerInterested = false
@@ -18,6 +20,11 @@ actor PeerConnection {
     
     private(set) var downloadSpeed: Int64 = 0
     private var bytesDownloaded: Int64 = 0
+    private(set) var uploadSpeed: Int64 = 0
+    private var bytesUploaded: Int64 = 0
+    private(set) var lastBlockReceivedTime: Date = .distantPast
+    private(set) var lastMessageReceivedTime: Date = .now
+    private var lastMessageSentTime: Date = .now
     private var lastSpeedSample: Date = .now
 
     // BEP 10 — extension IDs advertised by the remote peer
@@ -50,11 +57,43 @@ actor PeerConnection {
         connection = NWConnection(to: endpoint, using: .tcp)
     }
 
+    init(incomingConnection: NWConnection, infoHash: Data, peerId: Data, totalPieces: Int) {
+        self.connection = incomingConnection
+        self.infoHash = infoHash
+        self.peerId = peerId
+        self.totalPieces = totalPieces
+        if case .hostPort(let h, let p) = incomingConnection.endpoint {
+            self.host = h.debugDescription
+            self.port = p.rawValue
+        } else {
+            self.host = "unknown"
+            self.port = 0
+        }
+    }
+
     func connect() {
         connection.stateUpdateHandler = { [weak self] s in
             Task { await self?.handleStateChange(s) }
         }
         connection.start(queue: .global(qos: .utility))
+    }
+
+    func acceptInbound(remoteSupportsExt: Bool) async {
+        self.state = .active
+        self.bitfield = Array(repeating: false, count: totalPieces)
+        
+        connection.stateUpdateHandler = { [weak self] s in
+            if case .failed = s { Task { await self?.disconnect() } }
+            if case .cancelled = s { Task { await self?.disconnect() } }
+        }
+        connection.start(queue: .global(qos: .utility))
+        
+        sendHandshake()
+        sendExtensionHandshake()
+        sendInterested()
+        
+        await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+        receiveLoop()
     }
 
     func disconnect() {
@@ -101,7 +140,8 @@ actor PeerConnection {
             combined.append(p)
         }
         let data = encryption?.encrypt(combined) ?? combined
-        connection.send(content: data, completion: .idempotent)
+        outboundBuffer.append(data)
+        drainOutbound()
     }
 
     func sendPiece(index: Int, begin: Int, block: Data) {
@@ -117,15 +157,33 @@ actor PeerConnection {
         let elapsed = now.timeIntervalSince(lastSpeedSample)
         if elapsed >= 1 {
             downloadSpeed = Int64(Double(bytesDownloaded) / elapsed)
+            uploadSpeed = Int64(Double(bytesUploaded) / elapsed)
             bytesDownloaded = 0
+            bytesUploaded = 0
             lastSpeedSample = now
         }
+    }
+    
+    func recordUploaded(bytes: Int64) {
+        bytesUploaded += bytes
     }
 
     func sendHave(piece: Int) {
         var p = Data()
         p.appendUInt32(UInt32(piece))
         sendFrame(id: 4, payload: p)
+    }
+
+    func sendKeepAliveIfNeeded() {
+        let now = Date.now
+        if now.timeIntervalSince(lastMessageSentTime) >= 60 {
+            // Keep-alive is just 4 bytes of zeroes (length 0)
+            let keepAlive = Data([0, 0, 0, 0])
+            let data = encryption?.encrypt(keepAlive) ?? keepAlive
+            outboundBuffer.append(data)
+            drainOutbound()
+            lastMessageSentTime = now
+        }
     }
     
     func sendCancel(piece: Int, offset: Int, length: Int) {
@@ -236,7 +294,8 @@ actor PeerConnection {
         hs.append(peerId)
         
         let data = encryption?.encrypt(hs) ?? hs
-        connection.send(content: data, completion: .idempotent)
+        outboundBuffer.append(data)
+        drainOutbound()
     }
 
     // Extension handshake — sent right after main handshake (BEP 10)
@@ -308,11 +367,16 @@ actor PeerConnection {
     private func tryParseMessages() async {
         while receiveBuffer.count >= 4 {
             let len = receiveBuffer.readUInt32(at: 0)
-            if len == 0 { receiveBuffer = Data(receiveBuffer.dropFirst(4)); continue }
+            if len == 0 { 
+                receiveBuffer = Data(receiveBuffer.dropFirst(4))
+                lastMessageReceivedTime = .now
+                continue 
+            }
             guard receiveBuffer.count >= 4 + Int(len) else { return }
             let id      = receiveBuffer[receiveBuffer.startIndex + 4]
             let payload = Data(receiveBuffer[(receiveBuffer.startIndex + 5)..<(receiveBuffer.startIndex + 4 + Int(len))])
             receiveBuffer = Data(receiveBuffer.dropFirst(4 + Int(len)))
+            lastMessageReceivedTime = .now
             await handleMessage(id: id, payload: payload)
         }
     }
@@ -321,6 +385,7 @@ actor PeerConnection {
         switch id {
         case 0:  // choke
             peerChoking = true
+            await delegate?.peerChokedUs(self)
         case 1:  // unchoke
             peerChoking = false
             await delegate?.peerUnchokedUs(self)
@@ -353,6 +418,7 @@ actor PeerConnection {
             let piece  = Int(payload.readUInt32(at: 0))
             let offset = Int(payload.readUInt32(at: 4))
             let block  = Data(payload.dropFirst(8))
+            lastBlockReceivedTime = .now
             await delegate?.peerSentBlock(self, piece: piece, offset: offset, data: block)
         case 8:  // cancel
             guard payload.count == 12 else { return }
@@ -435,7 +501,33 @@ actor PeerConnection {
         frame.append(payload)
         
         let data = encryption?.encrypt(frame) ?? frame
-        connection.send(content: data, completion: .idempotent)
+        outboundBuffer.append(data)
+        drainOutbound()
+        lastMessageSentTime = .now
+    }
+
+    private func drainOutbound() {
+        guard !isSending, !outboundBuffer.isEmpty else { return }
+        isSending = true
+        
+        let chunk = outboundBuffer.prefix(65536)
+        outboundBuffer.removeFirst(chunk.count)
+        
+        connection.send(content: Data(chunk), completion: .contentProcessed({ [weak self] error in
+            Task {
+                guard let self else { return }
+                await self.didSendChunk(error: error)
+            }
+        }))
+    }
+
+    private func didSendChunk(error: NWError?) {
+        isSending = false
+        if error == nil {
+            drainOutbound()
+        } else {
+            disconnect()
+        }
     }
 
     private func parseIPv4(_ s: String) -> [UInt8]? {
@@ -449,6 +541,7 @@ actor PeerConnection {
 protocol PeerDelegate: AnyObject {
     func peerConnected(_ peer: PeerConnection, supportsExtensions: Bool) async
     func peerDidDisconnect(_ peer: PeerConnection) async
+    func peerChokedUs(_ peer: PeerConnection) async
     func peerUnchokedUs(_ peer: PeerConnection) async
     func peerSentBitfield(_ peer: PeerConnection) async
     func peerSentHave(_ peer: PeerConnection) async

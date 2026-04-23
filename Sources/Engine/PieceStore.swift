@@ -12,11 +12,18 @@ actor PieceStore {
     private var pendingBlocks: [Int: [Int: Data]] = [:]  // [pieceIndex: [blockOffset: data]]
     private var fileHandles: [URL: FileHandle] = [:]
     private var stateURL: URL
+    private var isClosed = false
 
     var completedPieces: Int { bitfield.filter { $0 }.count }
     var totalPieces: Int { meta.pieces.count }
     var progress: Double { totalPieces == 0 ? 0 : Double(completedPieces) / Double(totalPieces) }
-    var downloaded: Int64 { Int64(completedPieces) * Int64(meta.pieceLength) }
+    var downloaded: Int64 {
+        guard completedPieces > 0 else { return 0 }
+        let lastPiece = meta.pieces.count - 1
+        let fullCount = bitfield.indices.filter { $0 != lastPiece && bitfield[$0] }.count
+        let lastBytes = bitfield[lastPiece] ? pieceLength(for: lastPiece) : 0
+        return Int64(fullCount) * Int64(meta.pieceLength) + Int64(lastBytes)
+    }
 
     init(meta: Metainfo, saveDir: URL) throws {
         self.meta = meta
@@ -43,6 +50,7 @@ actor PieceStore {
     }
     
     private func saveState() {
+        guard !isClosed else { return }
         if let data = try? JSONEncoder().encode(bitfield) {
             try? data.write(to: stateURL)
         }
@@ -86,7 +94,8 @@ actor PieceStore {
 
     // Receive a block from a peer
     func receiveBlock(piece: Int, offset: Int, data: Data) throws {
-        guard piece < meta.pieces.count, !bitfield[piece] else { return }
+        guard !isClosed else { return }
+        guard piece >= 0 && piece < meta.pieces.count, !bitfield[piece] else { return }
         pendingBlocks[piece, default: [:]][offset] = data
         try assembleIfComplete(piece: piece)
     }
@@ -134,7 +143,7 @@ actor PieceStore {
     func blocksToRequest(
         orderedPieces: [Int],
         peerBitfield: [Bool],
-        excluding: Set<String>,
+        excluding: Set<UInt64>,
         endgame: Bool,
         maxBlocks: Int
     ) -> [(piece: Int, offset: Int, length: Int)] {
@@ -146,7 +155,7 @@ actor PieceStore {
             var off = 0
             while off < len {
                 if existing[off] == nil {
-                    let key = "\(piece):\(off)"
+                    let key = Self.inFlightKey(piece: piece, blockIndex: off / Self.blockSize)
                     if endgame || !excluding.contains(key) {
                         result.append((piece, off, min(Self.blockSize, len - off)))
                         if result.count >= maxBlocks { return result }
@@ -156,6 +165,10 @@ actor PieceStore {
             }
         }
         return result
+    }
+
+    static func inFlightKey(piece: Int, blockIndex: Int) -> UInt64 {
+        (UInt64(piece) << 32) | UInt64(blockIndex)
     }
 
     // All blocks for a piece regardless of what we have (for sending CANCELs)
@@ -261,14 +274,16 @@ actor PieceStore {
     }
 
     private func fileHandle(for url: URL, writing: Bool = true) throws -> FileHandle {
+        guard !isClosed else { throw NSError(domain: "PieceStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "Store is closed"]) }
         if let fh = fileHandles[url] { return fh }
-        let fh = writing ? try FileHandle(forWritingTo: url) : try FileHandle(forReadingFrom: url)
+        let fh = try FileHandle(forUpdating: url)
         fileHandles[url] = fh
         return fh
     }
 
     func closeAll() {
         saveState()
+        isClosed = true
         fileHandles.values.forEach { try? $0.close() }
         fileHandles.removeAll()
     }

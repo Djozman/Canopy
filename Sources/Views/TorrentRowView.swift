@@ -17,16 +17,15 @@ struct TorrentRowView: View {
                 .tint(progressTint)
 
             HStack(spacing: 12) {
-                Text(formatSize(torrent.totalSize))
+                let downloadedSize = Int64(torrent.progress * Double(torrent.totalSize))
+                Text("\(formatSize(downloadedSize)) of \(formatSize(torrent.totalSize))")
                     .foregroundStyle(.secondary)
                 if torrent.downloadSpeed > 0 {
                     Label(formatSpeed(torrent.downloadSpeed), systemImage: "arrow.down")
                         .foregroundStyle(.blue)
                 }
-                if torrent.uploadSpeed > 0 {
-                    Label(formatSpeed(torrent.uploadSpeed), systemImage: "arrow.up")
-                        .foregroundStyle(.green)
-                }
+                Label(formatSpeed(torrent.uploadSpeed), systemImage: "arrow.up")
+                    .foregroundStyle(.green)
                 if torrent.state == .downloading, torrent.eta > 0 {
                     Text(formatETA(torrent.eta)).foregroundStyle(.secondary)
                 }

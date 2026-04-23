@@ -14,6 +14,9 @@ mkdir -p "$BUNDLE/MacOS" "$BUNDLE/Resources"
 # Copy binary
 cp .build/release/Canopy "$BUNDLE/MacOS/Canopy"
 
+# App icon
+cp Sources/Resources/AppIcon.icns "$BUNDLE/Resources/AppIcon.icns"
+
 # Info.plist
 cat > "$BUNDLE/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +37,8 @@ cat > "$BUNDLE/Info.plist" << 'EOF'
     <string>APPL</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
