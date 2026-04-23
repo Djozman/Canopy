@@ -1,0 +1,6 @@
+.build/
+*.o
+*.d
+Canopy.app/
+.DS_Store
+/tmp/

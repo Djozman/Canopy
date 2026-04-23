@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift build *)",
+      "Bash(/Users/amm/Canopy/.build/debug/Canopy)",
+      "Bash(chmod +x /Users/amm/Canopy/build.sh)",
+      "Bash(./build.sh)",
+      "Bash(bash build.sh)",
+      "Bash(gh auth *)"
+    ]
+  }
+}
