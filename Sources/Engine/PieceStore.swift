@@ -11,8 +11,10 @@ actor PieceStore {
     private var bitfield: [Bool]           // true = piece complete & verified
     private var pendingBlocks: [Int: [Int: Data]] = [:]  // [pieceIndex: [blockOffset: data]]
     private var fileHandles: [URL: FileHandle] = [:]
+    private var fileOffsets: [String: Int64] = [:]  // precomputed cumulative byte offsets
     private var stateURL: URL
     private var isClosed = false
+    private var lastSaveTime: Date = .distantPast
 
     var completedPieces: Int { bitfield.filter { $0 }.count }
     var totalPieces: Int { meta.pieces.count }
@@ -25,14 +27,22 @@ actor PieceStore {
         return Int64(fullCount) * Int64(meta.pieceLength) + Int64(lastBytes)
     }
 
-    init(meta: Metainfo, saveDir: URL) throws {
+    init(meta: Metainfo, saveDir: URL, skippedFiles: Set<Int> = []) throws {
         self.meta = meta
         self.saveDir = saveDir
+        self.skippedFiles = skippedFiles
         self.bitfield = Array(repeating: false, count: meta.pieces.count)
         self.stateURL = saveDir.appendingPathComponent(".canopy_state_\(meta.infoHash.map { String(format: "%02x", $0) }.joined())")
         
+        // Precompute cumulative file offsets once — O(1) lookup in read/write hot paths
+        var cum: Int64 = 0
+        for file in meta.files {
+            fileOffsets[file.path.joined(separator: "/")] = cum
+            cum += file.length
+        }
+
         try Self.createLayout(meta: meta, dir: saveDir)
-        
+
         if let data = try? Data(contentsOf: stateURL),
            let savedBitfield = try? JSONDecoder().decode([Bool].self, from: data),
            savedBitfield.count == bitfield.count {
@@ -49,8 +59,11 @@ actor PieceStore {
         self.bitfield = savedBitfield
     }
     
-    private func saveState() {
+    private func saveState(force: Bool = false) {
         guard !isClosed else { return }
+        let now = Date.now
+        guard force || now.timeIntervalSince(lastSaveTime) >= 5 else { return }
+        lastSaveTime = now
         if let data = try? JSONEncoder().encode(bitfield) {
             try? data.write(to: stateURL)
         }
@@ -102,8 +115,29 @@ actor PieceStore {
 
     func hasPiece(_ index: Int) -> Bool { bitfield[index] }
 
+    var skippedFiles: Set<Int> = []
+
+    func updateSkippedFiles(_ skipped: Set<Int>) { skippedFiles = skipped }
+
     func missingPieces() -> [Int] {
         bitfield.indices.filter { !bitfield[$0] }
+    }
+
+    // Like missingPieces() but excluding pieces that fall entirely within skipped files.
+    func wantedPieces() -> [Int] {
+        missingPieces().filter { isWanted(piece: $0) }
+    }
+
+    private func isWanted(piece: Int) -> Bool {
+        guard !skippedFiles.isEmpty else { return true }
+        let pieceStart = Int64(piece) * Int64(meta.pieceLength)
+        let pieceEnd   = pieceStart + Int64(pieceLength(for: piece))
+        for (idx, file) in meta.files.enumerated() {
+            guard !skippedFiles.contains(idx) else { continue }
+            let fs = fileOffset(for: file); let fe = fs + file.length
+            if fs < pieceEnd && fe > pieceStart { return true }
+        }
+        return false
     }
     
     func getBitfield() -> [Bool] { bitfield }
@@ -256,12 +290,7 @@ actor PieceStore {
     }
 
     private func fileOffset(for file: FileEntry) -> Int64 {
-        var offset: Int64 = 0
-        for f in meta.files {
-            if f.path == file.path { break }
-            offset += f.length
-        }
-        return offset
+        fileOffsets[file.path.joined(separator: "/")] ?? 0
     }
 
     private func fileURL(for file: FileEntry) -> URL {
@@ -282,7 +311,7 @@ actor PieceStore {
     }
 
     func closeAll() {
-        saveState()
+        saveState(force: true)
         isClosed = true
         fileHandles.values.forEach { try? $0.close() }
         fileHandles.removeAll()

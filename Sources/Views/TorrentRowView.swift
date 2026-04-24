@@ -55,7 +55,7 @@ struct TorrentRowView: View {
         switch torrent.state {
         case .downloading: .blue
         case .seeding: .green
-        case .connecting: .orange
+        case .connecting, .metadata: .orange
         case .error: .red
         case .stopped, .checking: .secondary
         }

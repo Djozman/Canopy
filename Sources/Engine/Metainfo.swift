@@ -80,6 +80,35 @@ struct Metainfo {
     
     // Synthesized init will be used
 
+    // Construct Metainfo from raw BEP 9 info-dict bytes (already SHA1-verified by caller).
+    static func fromInfoDict(_ infoBytes: Data, infoHash: Data, trackers: [[String]]) throws -> Metainfo {
+        let info = try Bencode.decode(infoBytes)
+        guard let name       = info["name"]?       .string,
+              let pieceLenVal = info["piece length"]?.int,
+              let piecesData  = info["pieces"]?     .data
+        else { throw MetainfoError.missingField }
+
+        guard piecesData.count % 20 == 0 else { throw MetainfoError.invalidPieces }
+        let pieces = stride(from: 0, to: piecesData.count, by: 20).map { Data(piecesData[$0..<($0+20)]) }
+
+        let files: [FileEntry]
+        if let fileList = info["files"]?.list {
+            files = try fileList.map { f in
+                guard let len = f["length"]?.int, let pathList = f["path"]?.list else { throw MetainfoError.missingField }
+                return FileEntry(path: pathList.compactMap(\.string), length: Int64(len))
+            }
+        } else if let len = info["length"]?.int {
+            files = [FileEntry(path: [name], length: Int64(len))]
+        } else { throw MetainfoError.missingField }
+
+        return Metainfo(
+            name: name, infoHash: infoHash,
+            pieceLength: pieceLenVal, pieces: pieces,
+            files: files, announceList: trackers,
+            totalSize: files.reduce(0) { $0 + $1.length }
+        )
+    }
+
     static func forMagnet(infoHash: Data, name: String = "Unknown", trackers: [String] = []) -> Metainfo {
         return Metainfo(
             name: name,

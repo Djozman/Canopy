@@ -7,7 +7,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Canopy",
-            path: "Sources"
+            path: "Sources",
+            linkerSettings: [
+                .linkedFramework("SystemConfiguration")
+            ]
         )
     ]
 )

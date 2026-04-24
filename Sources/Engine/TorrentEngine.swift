@@ -9,7 +9,7 @@ final class TorrentEngine {
     var torrents: [TorrentHandle] = []
     var saveDirectory: URL
     private var listener: NWListener?
-    
+
     private var torrentsDir: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent("Canopy/torrents")
@@ -27,10 +27,11 @@ final class TorrentEngine {
            let url = URL(string: saved) {
             saveDirectory = url
         }
-        
+
         Task { await DHT.shared.start() }
         loadPersistedTorrents()
         startListener()
+        Task { await PortForwarder(port: 6881).start() }
     }
 
     private func startListener() {
@@ -56,22 +57,21 @@ final class TorrentEngine {
                 connection.cancel()
                 return
             }
-            
-            // Validate BitTorrent handshake prefix
+
             guard data[0] == 19,
                   String(data: data[1..<20], encoding: .utf8) == "BitTorrent protocol" else {
                 connection.cancel()
                 return
             }
-            
+
             let remoteSupportsExt = (data[25] & 0x10) != 0
             let infoHash = data[28..<48]
-            
+
             Task { @MainActor in
                 if let handle = self.torrents.first(where: { $0.meta.infoHash == infoHash }) {
                     handle.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt)
                 } else {
-                    connection.cancel() // Not a torrent we are active on
+                    connection.cancel()
                 }
             }
         }
@@ -81,61 +81,102 @@ final class TorrentEngine {
         let fm = FileManager.default
         let dir = torrentsDir
         guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
-        for file in files where file.pathExtension == "torrent" {
-            if let data = try? Data(contentsOf: file) {
-                try? add(torrentFileData: data, persist: false)
+
+        for file in files {
+            let hashStr = file.deletingPathExtension().lastPathComponent
+            let saveDir = perTorrentSaveDir(hashStr: hashStr)
+            let fileSel = perTorrentFileSelections(hashStr: hashStr)
+
+            if file.pathExtension == "torrent" {
+                guard let data = try? Data(contentsOf: file) else { continue }
+                try? add(torrentFileData: data, saveDirectory: saveDir, fileSelections: fileSel, persist: false)
+            } else if file.pathExtension == "info" {
+                // Magnet-resolved info-dict
+                guard let rawInfo = try? Data(contentsOf: file),
+                      let infoHash = Data(hex: hashStr) else { continue }
+                let trackers = (UserDefaults.standard.array(forKey: "canopy.torrent.\(hashStr).trackers") as? [String]) ?? []
+                guard let meta = try? Metainfo.fromInfoDict(rawInfo, infoHash: infoHash,
+                                                            trackers: trackers.isEmpty ? [] : [trackers]) else { continue }
+                guard !torrents.contains(where: { $0.meta.infoHash == meta.infoHash }) else { continue }
+                let handle = TorrentHandle(meta: meta, saveDir: saveDir ?? saveDirectory,
+                                          fileSelections: fileSel,
+                                          persistCallback: makePersistCallback(hashStr: hashStr))
+                torrents.append(handle)
+                handle.start()
             }
         }
     }
 
     // MARK: - Public API
 
-    func add(torrentFileData: Data, persist: Bool = true) throws {
+    func add(torrentFileData: Data, saveDirectory: URL? = nil, fileSelections: [Bool]? = nil,
+             persist: Bool = true) throws {
         let meta = try Metainfo.parse(torrentFileData)
         guard !torrents.contains(where: { $0.meta.infoHash == meta.infoHash }) else { return }
-        
+
+        let dir = saveDirectory ?? self.saveDirectory
+        let hashStr = meta.infoHash.map { String(format: "%02x", $0) }.joined()
+
         if persist {
-            let hashStr = meta.infoHash.map { String(format: "%02x", $0) }.joined()
             let file = torrentsDir.appendingPathComponent("\(hashStr).torrent")
             try? torrentFileData.write(to: file)
+            if let dir = saveDirectory {
+                UserDefaults.standard.set(dir.absoluteString, forKey: "canopy.torrent.\(hashStr).saveDir")
+            }
+            if let sel = fileSelections, let data = try? JSONEncoder().encode(sel) {
+                UserDefaults.standard.set(data, forKey: "canopy.torrent.\(hashStr).fileSelections")
+            }
         }
-        
-        let handle = TorrentHandle(meta: meta, saveDir: saveDirectory)
+
+        let handle = TorrentHandle(meta: meta, saveDir: dir, fileSelections: fileSelections)
+        torrents.append(handle)
+        handle.start()
+    }
+
+    func addMagnet(_ uri: String, saveDirectory: URL? = nil) throws {
+        guard let magnet = Magnet.parse(uri) else {
+            throw NSError(domain: "Canopy", code: 0,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid magnet link"])
+        }
+        guard !torrents.contains(where: { $0.meta.infoHash == magnet.infoHash }) else { return }
+
+        let dir = saveDirectory ?? self.saveDirectory
+        let hashStr = magnet.infoHash.map { String(format: "%02x", $0) }.joined()
+        let magnetMeta = Metainfo.forMagnet(infoHash: magnet.infoHash,
+                                            name: magnet.name ?? "Unknown",
+                                            trackers: magnet.trackers)
+        let handle = TorrentHandle(meta: magnetMeta, saveDir: dir, fileSelections: nil,
+                                   persistCallback: makePersistCallback(hashStr: hashStr))
         torrents.append(handle)
         handle.start()
     }
 
     func remove(_ handle: TorrentHandle, deleteFiles: Bool = false) {
         torrents.removeAll { $0.id == handle.id }
-        
+
         Task {
             await handle.stopAndWait()
-            
+
             if deleteFiles {
-                let dir = saveDirectory.appendingPathComponent(handle.meta.name)
-                do { try FileManager.default.removeItem(at: dir) } catch { print("[Canopy] Failed to remove dir/file: \(error)") }
-                
-                let file = saveDirectory.appendingPathComponent(handle.meta.name)
-                do { try FileManager.default.removeItem(at: file) } catch { print("[Canopy] Failed to remove file: \(error)") }
-                
+                let dir = handle.saveDirectory.appendingPathComponent(handle.meta.name)
+                try? FileManager.default.removeItem(at: dir)
+                let file = handle.saveDirectory.appendingPathComponent(handle.meta.name)
+                try? FileManager.default.removeItem(at: file)
                 let hashStr = handle.meta.infoHash.map { String(format: "%02x", $0) }.joined()
-                let stateFile = saveDirectory.appendingPathComponent(".canopy_state_\(hashStr)")
-                do { 
-                    try FileManager.default.removeItem(at: stateFile) 
-                    print("[Canopy] Successfully deleted state file: \(stateFile.path)")
-                } catch { 
-                    print("[Canopy] Failed to delete state file: \(error)") 
-                }
+                let stateFile = handle.saveDirectory.appendingPathComponent(".canopy_state_\(hashStr)")
+                try? FileManager.default.removeItem(at: stateFile)
             }
-            
+
             let hashStr = handle.meta.infoHash.map { String(format: "%02x", $0) }.joined()
-            let torrentFile = torrentsDir.appendingPathComponent("\(hashStr).torrent")
-            try? FileManager.default.removeItem(at: torrentFile)
+            try? FileManager.default.removeItem(at: torrentsDir.appendingPathComponent("\(hashStr).torrent"))
+            try? FileManager.default.removeItem(at: torrentsDir.appendingPathComponent("\(hashStr).info"))
+            UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).saveDir")
+            UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).fileSelections")
+            UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).trackers")
         }
     }
 
     func pause(_ handle: TorrentHandle) { handle.stop() }
-
     func resume(_ handle: TorrentHandle) { handle.start() }
 
     func setSaveDirectory(_ url: URL) {
@@ -147,4 +188,28 @@ final class TorrentEngine {
 
     var totalDownloadSpeed: Int64 { torrents.reduce(0) { $0 + $1.downloadSpeed } }
     var totalUploadSpeed: Int64 { torrents.reduce(0) { $0 + $1.uploadSpeed } }
+
+    // MARK: - Helpers
+
+    private func perTorrentSaveDir(hashStr: String) -> URL? {
+        guard let str = UserDefaults.standard.string(forKey: "canopy.torrent.\(hashStr).saveDir") else { return nil }
+        return URL(string: str)
+    }
+
+    private func perTorrentFileSelections(hashStr: String) -> [Bool]? {
+        guard let data = UserDefaults.standard.data(forKey: "canopy.torrent.\(hashStr).fileSelections") else { return nil }
+        return try? JSONDecoder().decode([Bool].self, from: data)
+    }
+
+    private func makePersistCallback(hashStr: String) -> (Data, Metainfo) -> Void {
+        { [weak self] rawInfo, newMeta in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let file = self.torrentsDir.appendingPathComponent("\(hashStr).info")
+                try? rawInfo.write(to: file)
+                let trackers = newMeta.announceList.flatMap { $0 }
+                UserDefaults.standard.set(trackers, forKey: "canopy.torrent.\(hashStr).trackers")
+            }
+        }
+    }
 }

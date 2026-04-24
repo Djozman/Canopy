@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Environment(TorrentEngine.self) private var engine
     @State private var showAdd = false
+    @State private var showMagnet = false
     @State private var selection: Set<UUID> = []
     @State private var isTargeted = false
     @State private var addError: String?
@@ -16,6 +17,10 @@ struct ContentView: View {
         .toolbar { toolbarContent }
         .sheet(isPresented: $showAdd) {
             AddTorrentView()
+                .environment(engine)
+        }
+        .sheet(isPresented: $showMagnet) {
+            MagnetView()
                 .environment(engine)
         }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
@@ -92,6 +97,12 @@ struct ContentView: View {
                 Label("Add Torrent", systemImage: "plus")
             }
             .keyboardShortcut("o")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button { showMagnet = true } label: {
+                Label("Add Magnet", systemImage: "link.badge.plus")
+            }
+            .keyboardShortcut("m")
         }
         ToolbarItem {
             if !selection.isEmpty {
