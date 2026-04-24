@@ -34,6 +34,8 @@ final class TorrentEngine {
         Task { await PortForwarder(port: 6881).start() }
     }
 
+    private var udpListener: NWListener?
+
     private func startListener() {
         guard let port = NWEndpoint.Port(rawValue: 6881) else { return }
         do {
@@ -44,7 +46,17 @@ final class TorrentEngine {
                 }
             }
             listener?.start(queue: .global())
-            print("[Canopy] Listening for inbound peers on port 6881")
+            
+            let udpOpts = NWParameters.udp
+            udpListener = try NWListener(using: udpOpts, on: port)
+            udpListener?.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor [weak self] in
+                    self?.handleInboundUTPConnection(connection)
+                }
+            }
+            udpListener?.start(queue: .global())
+            
+            print("[Canopy] Listening for inbound TCP and uTP peers on port 6881")
         } catch {
             print("[Canopy] Failed to start NWListener on port 6881: \(error)")
         }
@@ -69,12 +81,30 @@ final class TorrentEngine {
 
             Task { @MainActor in
                 if let handle = self.torrents.first(where: { $0.meta.infoHash == infoHash }) {
-                    handle.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt)
+                    await handle.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt)
                 } else {
                     connection.cancel()
                 }
             }
         }
+    }
+
+    private var pendingUTPConnections: [UTPConnection] = []
+
+    private func handleInboundUTPConnection(_ connection: NWConnection) {
+        let utp = UTPConnection(incomingConnection: connection)
+        utp.onInboundHandshake = { [weak self, weak utp] infoHash, supportsExt in
+            guard let self = self, let utp = utp else { return false }
+            return await MainActor.run {
+                if let handle = self.torrents.first(where: { $0.meta.infoHash == infoHash }) {
+                    handle.acceptInboundUTP(utp, remoteSupportsExt: supportsExt)
+                    return true
+                }
+                return false
+            }
+        }
+        pendingUTPConnections.append(utp)
+        Task { await utp.connect() }
     }
 
     private func loadPersistedTorrents() {
@@ -101,6 +131,17 @@ final class TorrentEngine {
                 let handle = TorrentHandle(meta: meta, saveDir: saveDir ?? saveDirectory,
                                           fileSelections: fileSel,
                                           persistCallback: makePersistCallback(hashStr: hashStr))
+                torrents.append(handle)
+                handle.start()
+            } else if file.pathExtension == "magnet" {
+                guard let uri = try? String(contentsOf: file, encoding: .utf8),
+                      let magnet = Magnet.parse(uri) else { continue }
+                guard !torrents.contains(where: { $0.meta.infoHash == magnet.infoHash }) else { continue }
+                let magnetMeta = Metainfo.forMagnet(infoHash: magnet.infoHash,
+                                                    name: magnet.name ?? "Unknown",
+                                                    trackers: magnet.trackers)
+                let handle = TorrentHandle(meta: magnetMeta, saveDir: saveDirectory,
+                                           persistCallback: makePersistCallback(hashStr: hashStr))
                 torrents.append(handle)
                 handle.start()
             }
@@ -133,12 +174,15 @@ final class TorrentEngine {
         handle.start()
     }
 
-    func addMagnet(_ uri: String, saveDirectory: URL? = nil) throws {
+    @discardableResult
+    func addMagnet(_ uri: String, saveDirectory: URL? = nil) throws -> UUID {
         guard let magnet = Magnet.parse(uri) else {
             throw NSError(domain: "Canopy", code: 0,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid magnet link"])
         }
-        guard !torrents.contains(where: { $0.meta.infoHash == magnet.infoHash }) else { return }
+        if let existing = torrents.first(where: { $0.meta.infoHash == magnet.infoHash }) {
+            return existing.id
+        }
 
         let dir = saveDirectory ?? self.saveDirectory
         let hashStr = magnet.infoHash.map { String(format: "%02x", $0) }.joined()
@@ -148,7 +192,13 @@ final class TorrentEngine {
         let handle = TorrentHandle(meta: magnetMeta, saveDir: dir, fileSelections: nil,
                                    persistCallback: makePersistCallback(hashStr: hashStr))
         torrents.append(handle)
+        
+        // Persist the magnet link so it survives restarts
+        let file = torrentsDir.appendingPathComponent("\(hashStr).magnet")
+        try? uri.write(to: file, atomically: true, encoding: .utf8)
+        
         handle.start()
+        return handle.id
     }
 
     func remove(_ handle: TorrentHandle, deleteFiles: Bool = false) {
@@ -170,6 +220,7 @@ final class TorrentEngine {
             let hashStr = handle.meta.infoHash.map { String(format: "%02x", $0) }.joined()
             try? FileManager.default.removeItem(at: torrentsDir.appendingPathComponent("\(hashStr).torrent"))
             try? FileManager.default.removeItem(at: torrentsDir.appendingPathComponent("\(hashStr).info"))
+            try? FileManager.default.removeItem(at: torrentsDir.appendingPathComponent("\(hashStr).magnet"))
             UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).saveDir")
             UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).fileSelections")
             UserDefaults.standard.removeObject(forKey: "canopy.torrent.\(hashStr).trackers")
@@ -207,6 +258,7 @@ final class TorrentEngine {
                 guard let self else { return }
                 let file = self.torrentsDir.appendingPathComponent("\(hashStr).info")
                 try? rawInfo.write(to: file)
+                try? FileManager.default.removeItem(at: self.torrentsDir.appendingPathComponent("\(hashStr).magnet"))
                 let trackers = newMeta.announceList.flatMap { $0 }
                 UserDefaults.standard.set(trackers, forKey: "canopy.torrent.\(hashStr).trackers")
             }

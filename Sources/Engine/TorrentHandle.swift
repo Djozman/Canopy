@@ -6,6 +6,7 @@ import Network
 @Observable
 final class TorrentHandle: Identifiable {
     let id: UUID = .init()
+    let dateAdded: Date = .init()
     var meta: Metainfo              // updated when magnet resolves
     var fileSelections: [Bool]      // one entry per meta.files; true = download this file
     var saveDirectory: URL
@@ -20,11 +21,24 @@ final class TorrentHandle: Identifiable {
     var seedsCount: Int = 0
     var eta: Int = 0
     var statusMessage: String = ""
+    var pieces: [Bool] = []
+    var metadataPiecesCount: Int = 0
+    var metadataTotalPieces: Int = 0
+    var handshakedPeersCount: Int = 0
 
     enum TorrentState: String {
         case stopped, connecting, downloading, seeding, checking, error, metadata
-        var label: String {
-            self == .metadata ? "Fetching Metadata…" : rawValue.capitalized
+    }
+
+    var stateLabel: String {
+        switch state {
+        case .metadata:
+            if metadataTotalPieces > 0 {
+                return "Metadata (\(metadataPiecesCount)/\(metadataTotalPieces) pieces)"
+            } else {
+                return "Metadata (\(peersCount) peers)"
+            }
+        default: return state.rawValue.capitalized
         }
     }
 
@@ -55,8 +69,19 @@ final class TorrentHandle: Identifiable {
         await engine?.stop()
     }
 
+    func updateFileSelection(at index: Int, selected: Bool) {
+        guard index < fileSelections.count else { return }
+        fileSelections[index] = selected
+        let skipped = Set(meta.files.indices.filter { !fileSelections[$0] })
+        Task { await engine?.updateSkippedFiles(skipped) }
+    }
+
     func acceptInbound(_ connection: NWConnection, remoteSupportsExt: Bool) {
         Task { await engine?.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt) }
+    }
+
+    func acceptInboundUTP(_ peer: UTPConnection, remoteSupportsExt: Bool) {
+        Task { await engine?.acceptInboundUTP(peer, remoteSupportsExt: remoteSupportsExt) }
     }
 
     // Called by TorrentEngine_ when a magnet link resolves to full metadata.
@@ -170,11 +195,23 @@ actor TorrentEngine_: PeerDelegate {
 
         await announceAndConnect(event: "started")
 
-        DHTBus.shared.register(infoHash: meta.infoHash) { [weak self] peers in
-            Task { await self?.connectToPeers(peers.map { TrackerPeer(ip: $0.0, port: $0.1) }) }
+        if !meta.isPrivate {
+            DHTBus.shared.register(infoHash: meta.infoHash) { [weak self] peers in
+                Task { await self?.connectToPeers(peers.map { TrackerPeer(ip: $0.0, port: $0.1) }) }
+            }
+            Task {
+                await DHT.shared.findPeers(infoHash: meta.infoHash)
+                if isMagnetMode {
+                    await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881)
+                }
+            }
         }
-        Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
         startStatsLoop()
+    }
+
+    func updateSkippedFiles(_ skipped: Set<Int>) async {
+        self.skippedFiles = skipped
+        await store?.updateSkippedFiles(skipped)
     }
 
     func stop() async {
@@ -189,7 +226,15 @@ actor TorrentEngine_: PeerDelegate {
 
     func acceptInbound(_ connection: NWConnection, remoteSupportsExt: Bool) async {
         let peer = PeerConnection(incomingConnection: connection, infoHash: meta.infoHash,
-                                  peerId: peerId, totalPieces: meta.pieces.count)
+                                  peerId: peerId, totalPieces: meta.pieces.count, isPrivate: meta.isPrivate)
+        guard peers.count < Self.maxPeers else { await peer.disconnect(); return }
+        peers.append(peer)
+        await peer.setDelegateInternal(self)
+        await peer.acceptInbound(remoteSupportsExt: remoteSupportsExt)
+    }
+
+    func acceptInboundUTP(_ peer: UTPConnection, remoteSupportsExt: Bool) async {
+        await peer.bindInbound(infoHash: meta.infoHash, peerId: peerId, totalPieces: meta.pieces.count, isPrivate: meta.isPrivate)
         guard peers.count < Self.maxPeers else { await peer.disconnect(); return }
         peers.append(peer)
         await peer.setDelegateInternal(self)
@@ -273,10 +318,10 @@ actor TorrentEngine_: PeerDelegate {
         useUTPNext.toggle()
         if useUTPNext {
             return UTPConnection(host: host, port: port,
-                                 infoHash: meta.infoHash, peerId: peerId, totalPieces: totalPieces)
+                                 infoHash: meta.infoHash, peerId: peerId, totalPieces: totalPieces, isPrivate: meta.isPrivate)
         } else {
             return PeerConnection(host: host, port: port,
-                                  infoHash: meta.infoHash, peerId: peerId, totalPieces: totalPieces)
+                                  infoHash: meta.infoHash, peerId: peerId, totalPieces: totalPieces, isPrivate: meta.isPrivate)
         }
     }
 
@@ -436,6 +481,7 @@ actor TorrentEngine_: PeerDelegate {
     }
 
     func peerSentPEX(_ peer: any AnyPeer, peers newPeers: [(String, UInt16)]) async {
+        guard !meta.isPrivate else { return }
         var toConnect: [TrackerPeer] = []
         for p in newPeers {
             let key = "\(p.0):\(p.1)"
@@ -459,7 +505,13 @@ actor TorrentEngine_: PeerDelegate {
         guard isMagnetMode else { return }
         guard metadataTotalSize == 0 || metadataTotalSize == totalSize else { return }
         metadataTotalSize = totalSize
-        metadataPieces[piece] = data
+        let pieceSize = min(16384, totalSize - (piece * 16384))
+        guard data.count >= pieceSize else { 
+            print("[Canopy] BEP9: received truncated piece \(piece) (\(data.count) < \(pieceSize))")
+            return 
+        }
+        metadataPieces[piece] = data.prefix(pieceSize)
+        print("[Canopy] BEP9: received piece \(piece)/\( (totalSize + 16383) / 16384 ) from \(peer.host)")
 
         let expectedPieces = (totalSize + 16383) / 16384
         let nextPiece = (0..<expectedPieces).first { metadataPieces[$0] == nil }
@@ -476,6 +528,10 @@ actor TorrentEngine_: PeerDelegate {
             let newMeta = try Metainfo.fromInfoDict(fullMetadata, infoHash: meta.infoHash, trackers: meta.announceList)
             await magnetResolved(newMeta: newMeta, rawInfo: fullMetadata)
         } catch { print("[Canopy] BEP9: failed to parse metadata: \(error)") }
+    }
+
+    func peerRejectedMetadata(_ peer: any AnyPeer, piece: Int) async {
+        print("[Canopy] BEP9: peer \(peer.host) rejected metadata request for piece \(piece)")
     }
 
     // BEP 9 — peer requested a metadata piece from us
@@ -526,6 +582,39 @@ actor TorrentEngine_: PeerDelegate {
                     await peer.updateStats()
                     await scheduleRequests(for: peer)
                 }
+                
+                // Prune unresponsive peers
+                for p in peers {
+                    let connectedAt = await p.lastHandshakeReceivedTime
+                    let idleTime = now.timeIntervalSince(await p.lastMessageReceivedTime)
+                    if connectedAt == .distantPast && idleTime > 5 {
+                        await p.disconnect()
+                    } else if idleTime > 120 {
+                        await p.disconnect()
+                    }
+                }
+
+                if isMagnetMode && Int(now.timeIntervalSince1970) % 2 == 0 {
+                    let expected = metadataTotalSize > 0 ? (metadataTotalSize + 16383) / 16384 : 1
+                    var candidates: [any AnyPeer] = []
+                    for p in peers { if await p.extMetadata != nil { candidates.append(p) } }
+
+                    if !candidates.isEmpty {
+                        for i in 0..<expected where metadataPieces[i] == nil {
+                            // Request each missing piece from up to 3 different peers in parallel
+                            for j in 0..<min(3, candidates.count) {
+                                let peer = candidates[(i + j) % candidates.count]
+                                await peer.requestMetadataPiece(i)
+                            }
+                        }
+                    }
+                }
+
+                if isMagnetMode && Int(now.timeIntervalSince1970) % 30 == 0 {
+                    Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
+                    Task { await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881) }
+                }
+
                 let isSeeding = await (store?.progress ?? 0) >= 1.0
                 await choker.update(peers: peers, isSeeding: isSeeding)
                 await broadcastPEX()
@@ -543,40 +632,78 @@ actor TorrentEngine_: PeerDelegate {
             displayUlSpeed = Int64(Double(speedUlAccum) / elapsed)
             speedDlAccum = 0; speedUlAccum = 0; lastSpeedSample = now
         }
-
-        let progress = await store?.progress ?? 0
+        
+        let dlSpeed = displayDlSpeed
+        let ulSpeed = displayUlSpeed
+        let progressValue = await store?.progress ?? 0
         let done = await store?.completedPieces ?? 0
+        
+        var seedCount = 0
+        for p in peers { 
+            let bf = await p.bitfield
+            if !bf.isEmpty && bf.allSatisfy({ $0 }) { seedCount += 1 } 
+        }
+        let pCount = peers.count - seedCount
+        
         let newState: TorrentHandle.TorrentState
         if isMagnetMode        { newState = .metadata }
-        else if progress >= 1  { newState = .seeding }
+        else if progressValue >= 1 { newState = .seeding }
         else if !peers.isEmpty { newState = .downloading }
         else                   { newState = .connecting }
 
-        let left = meta.totalSize - Int64(done) * Int64(meta.pieceLength)
-        let eta = displayDlSpeed > 0 ? Int(left / max(displayDlSpeed, 1)) : 0
+        let left = max(0, meta.totalSize - Int64(done) * Int64(meta.pieceLength))
+        let eta = dlSpeed > 0 ? Int(left / max(dlSpeed, 1)) : 0
         let retryInfo = retryQueue.isEmpty ? "" : " (\(retryQueue.count) retrying)"
+        
+        var hCount = 0
+        for p in peers { if await p.lastHandshakeReceivedTime != .distantPast { hCount += 1 } }
 
-        var seedCount = 0
-        for p in peers { let bf = await p.bitfield; if !bf.isEmpty && bf.allSatisfy({ $0 }) { seedCount += 1 } }
-        let pCount = peers.count - seedCount
         let status: String
-        if isMagnetMode        { status = "Connecting to peers to fetch metadata…" }
+        if isMagnetMode {
+            let mCount = metadataPieces.count
+            let mTotal = metadataTotalSize > 0 ? (metadataTotalSize + 16383) / 16384 : 0
+            if mTotal > 0 {
+                status = "Fetching metadata... (\(mCount)/\(mTotal) pieces)"
+            } else {
+                status = "Searching for metadata... (\(peers.count) connected, \(hCount) handshaked)"
+            }
+        }
         else if peers.isEmpty  { status = trackerStatus + retryInfo }
         else                   { status = "\(seedCount) seed\(seedCount == 1 ? "" : "s"), \(pCount) peer\(pCount == 1 ? "" : "s") connected" }
+        
+        let pMap = await store?.bitfieldCopy ?? []
+        
+        let finalSeedCount = seedCount
+        let finalPCount = pCount
+        let finalStatus = status
+        let finalEta = eta
+        
+        let mCount = metadataPieces.count
+        let mTotal = (metadataTotalSize + 16383) / 16384
+        let h = self.handle
 
-        await handle?.update(progress: progress, dlSpeed: displayDlSpeed, ulSpeed: displayUlSpeed,
-                             peers: pCount, seeds: seedCount, state: newState, eta: eta, status: status)
+        await MainActor.run { [weak h] in
+            guard let handle = h else { return }
+            handle.progress = progressValue
+            handle.downloadSpeed = dlSpeed
+            handle.uploadSpeed = ulSpeed
+            handle.peersCount = finalPCount
+            handle.seedsCount = finalSeedCount
+            handle.statusMessage = finalStatus
+            handle.pieces = pMap
+            handle.state = newState
+            handle.eta = finalEta
+            handle.metadataPiecesCount = mCount
+            handle.metadataTotalPieces = mTotal
+            handle.handshakedPeersCount = hCount
+        }
     }
 
     // MARK: - Helpers
 
     private static func makePeerId() -> Data {
-        var id = Data("-CN0001-".utf8)
+        var id = Data("-qB4500-".utf8)
         while id.count < 20 { id.append(UInt8.random(in: 0...255)) }
         return id
     }
-}
-
-private extension Data {
-    var hexString: String { map { String(format: "%02x", $0) }.joined() }
 }

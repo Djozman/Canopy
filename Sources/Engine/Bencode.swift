@@ -68,6 +68,12 @@ struct Bencode {
         return try parse(data, &idx)
     }
 
+    static func decodeWithOffset(_ data: Data) throws -> (value: BValue, bytesConsumed: Int) {
+        var idx = data.startIndex
+        let val = try parse(data, &idx)
+        return (val, idx - data.startIndex)
+    }
+
     // Returns raw bytes of the "info" dictionary for hash computation
     static func infoBytes(_ data: Data) -> Data? {
         guard let infoRange = findInfoRange(in: data) else { return nil }

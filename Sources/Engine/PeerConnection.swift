@@ -11,10 +11,13 @@ protocol AnyPeer: AnyObject, Sendable {
     var peerInterested: Bool { get async }
     var amChoking: Bool { get async }
     var bitfield: [Bool] { get async }
+    var extMetadata: UInt8? { get async }
     var downloadSpeed: Int64 { get async }
     var uploadSpeed: Int64 { get async }
     var lastBlockReceivedTime: Date { get async }
     var lastMessageReceivedTime: Date { get async }
+    var lastHandshakeReceivedTime: Date { get async }
+    var state: PeerConnection.PeerState { get async }
     var isClosed: Bool { get async }
     // Lifecycle
     func connect() async
@@ -48,16 +51,17 @@ protocol PeerDelegate: AnyObject {
     func peerSentPEX(_ peer: any AnyPeer, peers: [(String, UInt16)]) async
     func peerSentMetadata(_ peer: any AnyPeer, piece: Int, totalSize: Int, data: Data) async
     func peerRequestedMetadata(_ peer: any AnyPeer, piece: Int) async
+    func peerRejectedMetadata(_ peer: any AnyPeer, piece: Int) async
     func peerSentExtHandshake(_ peer: any AnyPeer, metadataSize: Int) async
 }
 
 // MARK: - TCP peer connection
 
 actor PeerConnection: @preconcurrency AnyPeer {
-    enum State { case connecting, handshaking, active, closed }
+    enum PeerState: String { case connecting, handshaking, active, closed, mseHandshake }
 
     private let connection: NWConnection
-    private(set) var state: State = .connecting
+    private(set) var state: PeerState = .connecting
     private var receiveBuffer = Data()
 
     // Write path state is accessed from two executors simultaneously:
@@ -85,8 +89,9 @@ actor PeerConnection: @preconcurrency AnyPeer {
 
     var isClosed: Bool { state == .closed }
 
+    private(set) var lastHandshakeReceivedTime: Date = .distantPast
     private var extPEX: UInt8?
-    private var extMetadata: UInt8?
+    private(set) var extMetadata: UInt8?
     private var encryption: MSEncryption?
 
     weak var delegate: PeerDelegate?
@@ -97,11 +102,13 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private let infoHash: Data
     private let peerId: Data
     private let totalPieces: Int
+    private let isPrivate: Bool
+    private var mseDH: MSEDH?
 
     private static let localPEXId: UInt8 = 1
     private static let localMetadataId: UInt8 = 2
 
-    init(host: String, port: UInt16, infoHash: Data, peerId: Data, totalPieces: Int) {
+    init(host: String, port: UInt16, infoHash: Data, peerId: Data, totalPieces: Int, isPrivate: Bool) {
         self.host = host
         self.port = port
         self.infoHash = infoHash
@@ -112,12 +119,14 @@ actor PeerConnection: @preconcurrency AnyPeer {
             port: NWEndpoint.Port(rawValue: port)!
         )
         connection = NWConnection(to: endpoint, using: .tcp)
+        self.isPrivate = isPrivate
     }
 
-    init(incomingConnection: NWConnection, infoHash: Data, peerId: Data, totalPieces: Int) {
+    init(incomingConnection: NWConnection, infoHash: Data, peerId: Data, totalPieces: Int, isPrivate: Bool) {
         self.infoHash = infoHash
         self.peerId = peerId
         self.totalPieces = totalPieces
+        self.isPrivate = isPrivate
         connection = incomingConnection
         if case let .hostPort(h, p) = incomingConnection.endpoint {
             host = "\(h)"; port = p.rawValue
@@ -155,11 +164,12 @@ actor PeerConnection: @preconcurrency AnyPeer {
     // MARK: - Write coalescing
     // nonisolated so it's safe to call from any executor without an actor hop.
 
-    nonisolated private func enqueueSend(_ data: Data) {
+    private func enqueueSend(_ data: Data) {
+        let toSend = encryption?.encrypt(data) ?? data
         var shouldFlush = false
         sendLock.withLock {
             guard !_closed else { return }
-            _writeBuffer.append(data)
+            _writeBuffer.append(toSend)
             if !_isSending { _isSending = true; shouldFlush = true }
         }
         if shouldFlush { flushWriteBuffer() }
@@ -283,21 +293,79 @@ actor PeerConnection: @preconcurrency AnyPeer {
         enqueueSend(Data([0, 0, 0, 0]))
     }
 
-    private func handleStateChange(_ s: NWConnection.State) {
+    private func handleStateChange(_ s: NWConnection.State) async {
         switch s {
         case .ready:
-            state = .handshaking
-            sendHandshake()
-            receiveLoop()
+            await performMSEHandshake()
         case .failed, .cancelled:
             state = .closed
-            Task { await delegate?.peerDidDisconnect(self) }
         default: break
         }
     }
 
-    private func sendHandshake() {
-        var hs = Data()
+    private func performMSEHandshake() async {
+        // FORCED FALLBACK: Disable MSE for now to debug "0 handshaked" issue
+        await self.switchToPlaintext()
+        return;
+        
+        state = .mseHandshake
+        let dh = MSEDH()
+        self.mseDH = dh
+        enqueueSend(dh.publicKeyData)
+        
+        // Wait for first byte to distinguish between MSE and Plaintext
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 96) { [weak self] data, _, _, error in
+            Task {
+                guard let self = self, let data = data, error == nil else {
+                    await self?.disconnect(); return
+                }
+                
+                if data[0] == 19 {
+                    // Standard BitTorrent handshake received! Skip MSE.
+                    self.receiveBuffer.append(data)
+                    await self.switchToPlaintext()
+                } else if data.count == 96 {
+                    await self.completeMSEHandshake(remotePublicKey: data)
+                } else {
+                    // Partial data, wait for the rest of the 96 bytes
+                    await self.waitForRemainingMSE(current: data)
+                }
+            }
+        }
+    }
+
+    private func waitForRemainingMSE(current: Data) async {
+        let remaining = 96 - current.count
+        connection.receive(minimumIncompleteLength: remaining, maximumLength: remaining) { [weak self] data, _, _, error in
+            Task {
+                guard let self = self, let data = data, error == nil else {
+                    await self?.disconnect(); return
+                }
+                var full = current
+                full.append(data)
+                await self.completeMSEHandshake(remotePublicKey: full)
+            }
+        }
+    }
+
+    private func switchToPlaintext() {
+        self.state = .handshaking
+        self.sendBTHandshake()
+        self.receiveLoop()
+    }
+
+    private func completeMSEHandshake(remotePublicKey: Data) async {
+        guard let dh = mseDH else { return }
+        let secret = dh.computeSharedSecret(remotePublicKeyData: remotePublicKey)
+        self.encryption = MSEncryption(sharedSecret: secret, infoHash: infoHash)
+        
+        state = .handshaking
+        sendBTHandshake()
+        receiveLoop()
+    }
+
+    private func sendBTHandshake() {
+        var hs = Data(capacity: 68)
         hs.append(19)
         hs.append(contentsOf: "BitTorrent protocol".utf8)
         var reserved = [UInt8](repeating: 0, count: 8)
@@ -307,20 +375,25 @@ actor PeerConnection: @preconcurrency AnyPeer {
         hs.append(contentsOf: reserved)
         hs.append(infoHash)
         hs.append(peerId)
-        enqueueSend(encryption?.encrypt(hs) ?? hs)
+        enqueueSend(hs)
     }
 
     private func sendExtensionHandshake() {
+        var mDict: [(String, BValue)] = [
+            ("ut_metadata", .int(Int(Self.localMetadataId)))
+        ]
+        
+        if !isPrivate {
+            mDict.append(("ut_pex", .int(Int(Self.localPEXId))))
+        }
+        
         let dict = BValue.dict([
-            ("m", .dict([
-                ("ut_pex",      .int(Int(Self.localPEXId))),
-                ("ut_metadata", .int(Int(Self.localMetadataId)))
-            ])),
-            ("p",    .int(6881)),
+            ("m", .dict(mDict)),
+            ("p", .int(6881)),
             ("reqq", .int(500)),
-            ("v",    .bytes(Data("Canopy/1.0".utf8)))
+            ("v", .bytes(Data("Canopy/1.0".utf8)))
         ])
-        var payload = Data([0])
+        var payload = Data([0]) // msg ID 0 = handshake
         payload.append(Bencode.encode(dict))
         sendFrame(id: 20, payload: payload)
     }
@@ -373,10 +446,14 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private func tryParseHandshake() async {
         guard receiveBuffer.count >= 68 else { return }
         let b = receiveBuffer.startIndex
+        let protocolString = Data("BitTorrent protocol".utf8)
         guard receiveBuffer[b] == 19,
-              String(data: receiveBuffer[(b+1)..<(b+20)], encoding: .utf8) == "BitTorrent protocol",
+              receiveBuffer[(b+1)..<(b+20)] == protocolString,
               receiveBuffer[(b+28)..<(b+48)] == infoHash
-        else { disconnect(); return }
+        else { 
+            print("[Canopy] Handshake mismatch from \(host). Expected hash: \(infoHash.hexString)")
+            disconnect(); return 
+        }
 
         let remoteSupportsExt = (receiveBuffer[b+25] & 0x10) != 0
 
@@ -456,12 +533,15 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private func handleExtended(extId: UInt8, payload: Data) async {
         guard let msg = try? Bencode.decode(payload) else { return }
         if extId == 0 {
+            lastHandshakeReceivedTime = .now
             if let m = msg["m"], case .dict(let pairs) = m {
                 for (name, val) in pairs {
                     guard let id = val.int else { continue }
                     switch name {
                     case "ut_pex":      extPEX      = UInt8(id)
-                    case "ut_metadata": extMetadata = UInt8(id)
+                    case "ut_metadata":
+                        extMetadata = UInt8(id)
+                        requestMetadataPiece(0)
                     default: break
                     }
                 }
@@ -477,9 +557,11 @@ actor PeerConnection: @preconcurrency AnyPeer {
             if msgType == 0 {
                 await delegate?.peerRequestedMetadata(self, piece: piece)
             } else if msgType == 1 {
-                let encoded = Bencode.encode(msg)
+                guard let res = try? Bencode.decodeWithOffset(payload) else { return }
                 await delegate?.peerSentMetadata(self, piece: piece, totalSize: totalSize,
-                                                 data: Data(payload.dropFirst(encoded.count)))
+                                                 data: Data(payload.dropFirst(res.bytesConsumed)))
+            } else if msgType == 2 {
+                await delegate?.peerRejectedMetadata(self, piece: piece)
             }
         } else if extId == Self.localPEXId {
             var newPeers: [(String, UInt16)] = []

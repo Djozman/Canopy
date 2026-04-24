@@ -19,6 +19,8 @@ actor PieceStore {
     var completedPieces: Int { bitfield.filter { $0 }.count }
     var totalPieces: Int { meta.pieces.count }
     var progress: Double { totalPieces == 0 ? 0 : Double(completedPieces) / Double(totalPieces) }
+    var bitfieldCopy: [Bool] { bitfield }
+    
     var downloaded: Int64 {
         guard completedPieces > 0 else { return 0 }
         let lastPiece = meta.pieces.count - 1
@@ -233,7 +235,7 @@ actor PieceStore {
         return result
     }
 
-    // MARK: - Private
+    // MARK: - Reading & Writing
 
     private func pieceLength(for index: Int) -> Int {
         let last = meta.pieces.count - 1

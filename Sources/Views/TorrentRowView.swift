@@ -6,9 +6,16 @@ struct TorrentRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(torrent.name)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(torrent.name)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    if torrent.name == "Unknown" || torrent.meta.pieces.isEmpty {
+                        Text(torrent.meta.infoHash.map { String(format: "%02x", $0) }.joined())
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 stateLabel
             }
@@ -42,7 +49,7 @@ struct TorrentRowView: View {
     }
 
     private var stateLabel: some View {
-        Text(torrent.state.label)
+        Text(torrent.stateLabel)
             .font(.caption)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)

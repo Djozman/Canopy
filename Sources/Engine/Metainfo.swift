@@ -16,6 +16,7 @@ struct Metainfo {
     let files: [FileEntry]
     let announceList: [[String]]
     let totalSize: Int64
+    let isPrivate: Bool
 
     var isSingleFile: Bool { files.count == 1 && files[0].path.count == 1 }
 
@@ -67,6 +68,8 @@ struct Metainfo {
             announceList = [[single]]
         }
 
+        let isPrivate = info["private"]?.int == 1
+
         return Metainfo(
             name: name,
             infoHash: infoHash,
@@ -74,7 +77,8 @@ struct Metainfo {
             pieces: pieces.map { Data($0) },
             files: files,
             announceList: announceList,
-            totalSize: totalSize
+            totalSize: totalSize,
+            isPrivate: isPrivate
         )
     }
     
@@ -105,7 +109,8 @@ struct Metainfo {
             name: name, infoHash: infoHash,
             pieceLength: pieceLenVal, pieces: pieces,
             files: files, announceList: trackers,
-            totalSize: files.reduce(0) { $0 + $1.length }
+            totalSize: files.reduce(0) { $0 + $1.length },
+            isPrivate: false
         )
     }
 
@@ -117,7 +122,8 @@ struct Metainfo {
             pieces: [],
             files: [],
             announceList: trackers.isEmpty ? [] : [trackers],
-            totalSize: 0
+            totalSize: 0,
+            isPrivate: false
         )
     }
 }
@@ -128,8 +134,15 @@ struct Magnet {
     let trackers: [String]
     
     static func parse(_ uri: String) -> Magnet? {
-        guard uri.hasPrefix("magnet:?") else { return nil }
-        let params = uri.dropFirst(8).split(separator: "&")
+        let clean = uri.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.lowercased().hasPrefix("magnet:") else { return nil }
+        
+        // Strip magnet: and any leading ?
+        let body = clean.dropFirst(7).trimmingCharacters(in: CharacterSet(charactersIn: "?"))
+        
+        // Split by & or ;
+        let params = body.components(separatedBy: CharacterSet(charactersIn: "&;"))
+        
         var hash: Data?
         var name: String?
         var trackers: [String] = []
@@ -138,11 +151,15 @@ struct Magnet {
             let parts = param.split(separator: "=", maxSplits: 1)
             guard parts.count == 2 else { continue }
             let key = parts[0]
-            let val = String(parts[1]).replacingOccurrences(of: "%20", with: " ")
+            let val = String(parts[1]).removingPercentEncoding ?? String(parts[1])
             
             if key == "xt" && val.hasPrefix("urn:btih:") {
-                let hex = val.dropFirst(9)
-                hash = Data(hex: String(hex))
+                let hashStr = val.dropFirst(9)
+                if hashStr.count == 40 {
+                    hash = Data(hex: String(hashStr))
+                } else if hashStr.count == 32 {
+                    hash = Data(base32: String(hashStr))
+                }
             } else if key == "dn" {
                 name = val
             } else if key == "tr" {
@@ -156,6 +173,25 @@ struct Magnet {
 }
 
 extension Data {
+    init?(base32: String) {
+        let alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+        let s = base32.lowercased()
+        var bits = 0
+        var val = 0
+        var bytes = Data()
+        for char in s {
+            guard let i = alphabet.firstIndex(of: char) else { return nil }
+            let index = alphabet.distance(from: alphabet.startIndex, to: i)
+            val = (val << 5) | index
+            bits += 5
+            if bits >= 8 {
+                bytes.append(UInt8((val >> (bits - 8)) & 0xFF))
+                bits -= 8
+            }
+        }
+        self = bytes
+    }
+
     init?(hex: String) {
         let len = hex.count / 2
         var data = Data(capacity: len)

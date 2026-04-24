@@ -34,6 +34,14 @@ actor UTPConnection: @preconcurrency AnyPeer {
     // MARK: - uTP state machine
     private enum UTPState { case idle, synSent, connected, closing, closed }
     private var utpState: UTPState = .idle
+    
+    var state: PeerConnection.PeerState {
+        switch utpState {
+        case .idle, .synSent: return .connecting
+        case .connected:     return .active
+        case .closing, .closed: return .closed
+        }
+    }
 
     // BEP 29 §2.2 — connection IDs
     private let connIdRecv: UInt16
@@ -84,7 +92,8 @@ actor UTPConnection: @preconcurrency AnyPeer {
     private var wireBuffer = Data()
     private var btHandshakeDone = false
     private var extPEX: UInt8?
-    private var extMetadata: UInt8?
+    private(set) var extMetadata: UInt8?
+    private(set) var lastHandshakeReceivedTime: Date = .distantPast
 
     // Speed accumulators (raw UDP payload bytes)
     private var dlAccum: Int64 = 0
@@ -92,22 +101,26 @@ actor UTPConnection: @preconcurrency AnyPeer {
     private var lastSpeedSample: Date = .now
 
     // MARK: - Identity / config
-    private let infoHash: Data
-    private let peerId: Data
-    private let totalPieces: Int
+    private(set) var infoHash: Data
+    private(set) var peerId: Data
+    private(set) var totalPieces: Int
+    private(set) var isPrivate: Bool
     private static let localPEXId: UInt8 = 1
     private static let localMetadataId: UInt8 = 2
 
     private let connection: NWConnection
+    nonisolated(unsafe) var onInboundHandshake: (@Sendable (Data, Bool) async -> Bool)?
 
     // MARK: - Init
 
-    init(host: String, port: UInt16, infoHash: Data, peerId: Data, totalPieces: Int) {
+    init(host: String, port: UInt16, infoHash: Data, peerId: Data, totalPieces: Int, isPrivate: Bool) {
         self.host = host
         self.port = port
         self.infoHash = infoHash
         self.peerId = peerId
         self.totalPieces = totalPieces
+        self.isPrivate = isPrivate
+        self.onInboundHandshake = nil
 
         let baseId = UInt16.random(in: 1...65534)
         connIdRecv = baseId
@@ -118,6 +131,38 @@ actor UTPConnection: @preconcurrency AnyPeer {
             port: NWEndpoint.Port(rawValue: port)!
         )
         connection = NWConnection(to: endpoint, using: .udp)
+    }
+
+    init(incomingConnection: NWConnection) {
+        self.infoHash = Data()
+        self.peerId = Data()
+        self.totalPieces = 0
+        self.isPrivate = false
+        self.onInboundHandshake = nil
+        self.connection = incomingConnection
+        if case let .hostPort(h, p) = incomingConnection.endpoint {
+            self.host = "\(h)"; self.port = p.rawValue
+        } else {
+            self.host = "unknown"; self.port = 0
+        }
+        
+        let baseId = UInt16.random(in: 1...65534)
+        self.connIdRecv = baseId
+        self.connIdSend = baseId &+ 1
+    }
+
+    func bindInbound(infoHash: Data, peerId: Data, totalPieces: Int, isPrivate: Bool) {
+        self.infoHash = infoHash
+        self.peerId = peerId
+        self.totalPieces = totalPieces
+        self.isPrivate = isPrivate
+    }
+
+    func acceptInbound(remoteSupportsExt: Bool) async {
+        utpState = .connected
+        bitfield = Array(repeating: false, count: totalPieces)
+        if remoteSupportsExt { sendExtHandshake() }
+        sendBTFrame(id: 2, payload: Data()) // INTERESTED
     }
 
     // MARK: - AnyPeer lifecycle
@@ -421,17 +466,31 @@ actor UTPConnection: @preconcurrency AnyPeer {
             guard wireBuffer.count >= 68 else { return }
             let b = wireBuffer.startIndex
             guard wireBuffer[b] == 19,
-                  String(data: wireBuffer[(b+1)..<(b+20)], encoding: .utf8) == "BitTorrent protocol",
-                  wireBuffer[(b+28)..<(b+48)] == infoHash
+                  String(data: wireBuffer[(b+1)..<(b+20)], encoding: .utf8) == "BitTorrent protocol"
             else { await teardown(); return }
 
-            let supportsExt = (wireBuffer[b+25] & 0x10) != 0
+            let remoteSupportsExt = (wireBuffer[b+25] & 0x10) != 0
+            let remoteInfoHash = wireBuffer[(b+28)..<(b+48)]
+            
+            if let onInboundHandshake = onInboundHandshake {
+                if !self.infoHash.isEmpty && self.infoHash != remoteInfoHash {
+                    await teardown(); return
+                }
+                
+                let bound = await onInboundHandshake(Data(remoteInfoHash), remoteSupportsExt)
+                if !bound { await teardown(); return }
+                
+                // Once bound, send our handshake back
+                sendBTHandshake()
+            } else {
+                guard wireBuffer[(b+28)..<(b+48)] == self.infoHash else { await teardown(); return }
+            }
             wireBuffer = Data(wireBuffer.dropFirst(68))
             btHandshakeDone = true
             bitfield = Array(repeating: false, count: totalPieces)
             sendExtHandshake()
             sendBTFrame(id: 2, payload: Data())  // INTERESTED
-            await delegate?.peerConnected(self, supportsExtensions: supportsExt)
+            await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
         }
 
         while wireBuffer.count >= 4 {
@@ -604,11 +663,14 @@ actor UTPConnection: @preconcurrency AnyPeer {
     }
 
     private func sendExtHandshake() {
+        var mDict: [(String, BValue)] = [
+            ("ut_metadata", .int(Int(Self.localMetadataId)))
+        ]
+        if !isPrivate {
+            mDict.append(("ut_pex", .int(Int(Self.localPEXId))))
+        }
         let dict = BValue.dict([
-            ("m", .dict([
-                ("ut_pex",      .int(Int(Self.localPEXId))),
-                ("ut_metadata", .int(Int(Self.localMetadataId)))
-            ])),
+            ("m", .dict(mDict)),
             ("p",    .int(6881)),
             ("reqq", .int(500)),
             ("v",    .bytes(Data("Canopy/1.0".utf8)))
@@ -636,6 +698,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
     }
 
     private func handleExtended(extId: UInt8, payload: Data) async {
+        lastHandshakeReceivedTime = .now
         guard let msg = try? Bencode.decode(payload) else { return }
         if extId == 0 {
             if let m = msg["m"], case .dict(let pairs) = m {
@@ -643,7 +706,9 @@ actor UTPConnection: @preconcurrency AnyPeer {
                     guard let id = val.int else { continue }
                     switch name {
                     case "ut_pex":      extPEX      = UInt8(id)
-                    case "ut_metadata": extMetadata = UInt8(id)
+                    case "ut_metadata":
+                        extMetadata = UInt8(id)
+                        requestMetadataPiece(0)
                     default: break
                     }
                 }
@@ -658,9 +723,11 @@ actor UTPConnection: @preconcurrency AnyPeer {
             if msgType == 0 {
                 await delegate?.peerRequestedMetadata(self, piece: piece)
             } else if msgType == 1 {
-                let headerLen = Bencode.encode(msg).count
+                guard let res = try? Bencode.decodeWithOffset(payload) else { return }
                 await delegate?.peerSentMetadata(self, piece: piece, totalSize: totalSize,
-                                                 data: Data(payload.dropFirst(headerLen)))
+                                                 data: Data(payload.dropFirst(res.bytesConsumed)))
+            } else if msgType == 2 {
+                await delegate?.peerRejectedMetadata(self, piece: piece)
             }
         } else if extId == Self.localPEXId {
             var newPeers: [(String, UInt16)] = []

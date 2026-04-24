@@ -1,8 +1,52 @@
 import Foundation
 import CryptoKit
+import BigInt
 
 /// BEP 10 / Message Stream Encryption (MSE) / Protocol Encryption (PE).
 /// Provides a way to obfuscate BitTorrent traffic to avoid ISP throttling.
+
+final class MSEDH {
+    private static let pHex = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A3620FFFFFFFFFFFFFFFF"
+    private static let P = BigUInt(pHex, radix: 16)!
+    private static let G = BigUInt(2)
+
+    private let privateKey: BigUInt
+    let publicKeyData: Data
+
+    init() {
+        // Generate a 160-bit random private key
+        var rand = [UInt8](repeating: 0, count: 20)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 20, &rand)
+        self.privateKey = BigUInt(Data(rand))
+
+        // Ya = G^a mod P
+        let ya = Self.G.power(self.privateKey, modulus: Self.P)
+        
+        // Pad to 96 bytes (768 bits)
+        var yaData = ya.serialize()
+        if yaData.count < 96 {
+            yaData = Data(repeating: 0, count: 96 - yaData.count) + yaData
+        } else if yaData.count > 96 {
+            yaData = yaData.suffix(96)
+        }
+        self.publicKeyData = yaData
+    }
+
+    func computeSharedSecret(remotePublicKeyData: Data) -> Data {
+        let Yb = BigUInt(remotePublicKeyData)
+        let S = Yb.power(privateKey, modulus: Self.P)
+        
+        // Pad to 96 bytes
+        var sData = S.serialize()
+        if sData.count < 96 {
+            sData = Data(repeating: 0, count: 96 - sData.count) + sData
+        } else if sData.count > 96 {
+            sData = sData.suffix(96)
+        }
+        return sData
+    }
+}
+
 final class MSEncryption {
     private var s_key: Data     // Shared secret
     private var encryptor: RC4?

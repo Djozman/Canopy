@@ -18,11 +18,12 @@ actor DHT {
     private static let alpha = 3      // concurrency parameter
     private static let maxNodes = 500
     private static let port: UInt16 = 6881
-
-    static let bootstrapNodes: [(String, UInt16)] = [
+    private static let bootstrapNodes: [(String, UInt16)] = [
         ("router.bittorrent.com",  6881),
         ("router.utorrent.com",    6881),
         ("dht.transmissionbt.com", 6881),
+        ("router.bitcomet.com",    6881),
+        ("dht.aelitis.com",        6881),
     ]
 
     var onPeersFound: ((_ infoHash: Data, _ peers: [(String, UInt16)]) -> Void)?

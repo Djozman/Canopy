@@ -38,4 +38,6 @@ extension Data {
         var be = v.bigEndian
         Swift.withUnsafeBytes(of: &be) { append(contentsOf: $0) }
     }
+
+    var hexString: String { map { String(format: "%02x", $0) }.joined() }
 }

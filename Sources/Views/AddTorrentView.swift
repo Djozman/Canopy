@@ -231,6 +231,8 @@ struct AddTorrentView: View {
 struct MagnetView: View {
     @Environment(TorrentEngine.self) private var engine
     @Environment(\.dismiss) private var dismiss
+    
+    var onAdd: (UUID) -> Void = { _ in }
 
     @State private var magnetText = ""
     @State private var error: String?
@@ -243,6 +245,13 @@ struct MagnetView: View {
             TextField("magnet:?xt=urn:btih:…", text: $magnetText)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
+                .onAppear {
+                    if let str = NSPasteboard.general.string(forType: .string),
+                       str.lowercased().hasPrefix("magnet:"),
+                       Magnet.parse(str) != nil {
+                        magnetText = str
+                    }
+                }
 
             if let error {
                 Text(error).foregroundStyle(.red).font(.callout)
@@ -264,7 +273,8 @@ struct MagnetView: View {
     private func addMagnet() {
         let uri = magnetText.trimmingCharacters(in: .whitespaces)
         do {
-            try engine.addMagnet(uri)
+            let id = try engine.addMagnet(uri)
+            onAdd(id)
             dismiss()
         } catch {
             self.error = error.localizedDescription

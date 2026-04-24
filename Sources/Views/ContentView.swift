@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(TorrentEngine.self) private var engine
+    @State private var searchText = ""
     @State private var showAdd = false
     @State private var showMagnet = false
     @State private var selection: Set<UUID> = []
@@ -10,17 +11,28 @@ struct ContentView: View {
     @State private var addError: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            torrentList
-            statusBar
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                torrentList
+                statusBar
+            }
+            .navigationTitle("Canopy")
+            .toolbar { toolbarContent }
+        } detail: {
+            if let firstId = selection.first,
+               let torrent = engine.torrents.first(where: { $0.id == firstId }) {
+                TorrentDetailView(torrent: torrent)
+            } else {
+                Text("Select a torrent to view details")
+                    .foregroundStyle(.secondary)
+            }
         }
-        .toolbar { toolbarContent }
         .sheet(isPresented: $showAdd) {
             AddTorrentView()
                 .environment(engine)
         }
         .sheet(isPresented: $showMagnet) {
-            MagnetView()
+            MagnetView(onAdd: { id in selection = [id] })
                 .environment(engine)
         }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
@@ -49,14 +61,40 @@ struct ContentView: View {
             if engine.torrents.isEmpty {
                 emptyState
             } else {
-                List(engine.torrents, selection: $selection) { torrent in
-                    TorrentRowView(torrent: torrent)
-                        .contextMenu { contextMenu(for: torrent) }
+                VStack(spacing: 0) {
+                    List(filteredTorrents, selection: $selection) { torrent in
+                        TorrentRowView(torrent: torrent)
+                            .tag(torrent.id)
+                            .contextMenu { contextMenu(for: torrent) }
+                    }
+                    .listStyle(.inset)
+                    .searchable(text: $searchText, placement: .sidebar, prompt: "Search torrents…")
+                    
+                    Divider()
+                    HStack {
+                        Text("\(engine.torrents.count) torrents")
+                        Spacer()
+                        if !searchText.isEmpty {
+                            Text("\(filteredTorrents.count) found")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.inset)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var filteredTorrents: [TorrentHandle] {
+        let sorted = engine.torrents.sorted(by: { $0.dateAdded > $1.dateAdded })
+        if searchText.isEmpty { return sorted }
+        return sorted.filter { 
+            $0.name.localizedCaseInsensitiveContains(searchText) ||
+            $0.meta.infoHash.map { String(format: "%02x", $0) }.joined().localizedCaseInsensitiveContains(searchText)
+        }
     }
 
     private var emptyState: some View {
