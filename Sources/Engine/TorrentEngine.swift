@@ -205,13 +205,21 @@ final class TorrentEngine {
         torrents.removeAll { $0.id == handle.id }
 
         Task {
-            await handle.stopAndWait()
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            } catch {}
+
+            await handle.closeFileHandles()
 
             if deleteFiles {
-                let dir = handle.saveDirectory.appendingPathComponent(handle.meta.name)
-                try? FileManager.default.removeItem(at: dir)
-                let file = handle.saveDirectory.appendingPathComponent(handle.meta.name)
-                try? FileManager.default.removeItem(at: file)
+                let path = handle.saveDirectory.appendingPathComponent(handle.meta.name)
+                do {
+                    try FileManager.default.removeItem(at: path)
+                    print("[Canopy] Deleted: \(path.lastPathComponent)")
+                } catch {
+                    print("[Canopy] Failed to delete \(path.lastPathComponent): \(error)")
+                }
+                
                 let hashStr = handle.meta.infoHash.map { String(format: "%02x", $0) }.joined()
                 let stateFile = handle.saveDirectory.appendingPathComponent(".canopy_state_\(hashStr)")
                 try? FileManager.default.removeItem(at: stateFile)
