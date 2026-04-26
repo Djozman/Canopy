@@ -6,6 +6,7 @@ import Network
 protocol AnyPeer: AnyObject, Sendable {
     var host: String { get }
     var port: UInt16 { get }
+    var transportName: String { get }   // "TCP" or "uTP" — nonisolated constant
     // BT state — actor-isolated; callers always await
     var peerChoking: Bool { get async }
     var peerInterested: Bool { get async }
@@ -43,6 +44,7 @@ protocol AnyPeer: AnyObject, Sendable {
 protocol PeerDelegate: AnyObject {
     func peerConnected(_ peer: any AnyPeer, supportsExtensions: Bool) async
     func peerDidDisconnect(_ peer: any AnyPeer) async
+    func peerChokedUs(_ peer: any AnyPeer) async
     func peerUnchokedUs(_ peer: any AnyPeer) async
     func peerSentBitfield(_ peer: any AnyPeer) async
     func peerSentHave(_ peer: any AnyPeer) async
@@ -99,6 +101,7 @@ actor PeerConnection: @preconcurrency AnyPeer {
 
     let host: String
     let port: UInt16
+    let transportName: String = "TCP"
     private let infoHash: Data
     private let peerId: Data
     private let totalPieces: Int
@@ -305,7 +308,7 @@ actor PeerConnection: @preconcurrency AnyPeer {
 
     private func performMSEHandshake() async {
         // FORCED FALLBACK: Disable MSE for now to debug "0 handshaked" issue
-        await self.switchToPlaintext()
+        self.switchToPlaintext()
         return;
         
         state = .mseHandshake
@@ -322,7 +325,7 @@ actor PeerConnection: @preconcurrency AnyPeer {
                 
                 if data[0] == 19 {
                     // Standard BitTorrent handshake received! Skip MSE.
-                    self.receiveBuffer.append(data)
+                    await self.appendToReceiveBuffer(data)
                     await self.switchToPlaintext()
                 } else if data.count == 96 {
                     await self.completeMSEHandshake(remotePublicKey: data)
@@ -369,13 +372,13 @@ actor PeerConnection: @preconcurrency AnyPeer {
         hs.append(19)
         hs.append(contentsOf: "BitTorrent protocol".utf8)
         var reserved = [UInt8](repeating: 0, count: 8)
-        reserved[5] |= 0x10  // BEP 10
+        reserved[5] |= 0x10  // BEP 10 extension protocol
         reserved[7] |= 0x01  // DHT
-        reserved[7] |= 0x04  // BEP 6 Fast Extension
         hs.append(contentsOf: reserved)
         hs.append(infoHash)
         hs.append(peerId)
         enqueueSend(hs)
+        sendInterested()
     }
 
     private func sendExtensionHandshake() {
@@ -429,6 +432,10 @@ actor PeerConnection: @preconcurrency AnyPeer {
         }
     }
 
+    func appendToReceiveBuffer(_ data: Data) {
+        receiveBuffer.append(data)
+    }
+
     private func received(_ data: Data) async {
         let decrypted = encryption?.decrypt(data) ?? data
         dlAccum += Int64(decrypted.count)
@@ -462,7 +469,6 @@ actor PeerConnection: @preconcurrency AnyPeer {
         bitfield = Array(repeating: false, count: totalPieces)
 
         sendExtensionHandshake()
-        sendInterested()
         await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
         await tryParseMessages()
     }
@@ -483,7 +489,9 @@ actor PeerConnection: @preconcurrency AnyPeer {
 
     private func handleMessage(id: UInt8, payload: Data) async {
         switch id {
-        case 0:  peerChoking = true
+        case 0:
+            peerChoking = true
+            await delegate?.peerChokedUs(self)
         case 1:
             peerChoking = false
             await delegate?.peerUnchokedUs(self)

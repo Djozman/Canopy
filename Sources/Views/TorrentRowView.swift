@@ -28,10 +28,10 @@ struct TorrentRowView: View {
                 Text("\(formatSize(downloadedSize)) of \(formatSize(torrent.totalSize))")
                     .foregroundStyle(.secondary)
                 if torrent.downloadSpeed > 0 {
-                    Label(formatSpeed(torrent.downloadSpeed), systemImage: "arrow.down")
+                    Text("↓ \(formatSpeed(torrent.downloadSpeed))")
                         .foregroundStyle(.blue)
                 }
-                Label(formatSpeed(torrent.uploadSpeed), systemImage: "arrow.up")
+                Text("↑ \(formatSpeed(torrent.uploadSpeed))")
                     .foregroundStyle(.green)
                 if torrent.state == .downloading, torrent.eta > 0 {
                     Text(formatETA(torrent.eta)).foregroundStyle(.secondary)

@@ -49,6 +49,7 @@ actor PortForwarder {
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(gateway), port: 5351)
         let conn = NWConnection(to: endpoint, using: .udp)
 
+        let finalReq = req
         return await withCheckedContinuation { cont in
             var done = false
             let finish = { (ok: Bool) in
@@ -59,7 +60,7 @@ actor PortForwarder {
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    conn.send(content: req, completion: .contentProcessed { _ in
+                    conn.send(content: finalReq, completion: .contentProcessed { _ in
                         conn.receiveMessage { data, _, _, _ in
                             // Response layout: [0]ver [1]op+128 [2-3]result [4-7]epoch
                             //                  [8-9]internal [10-11]external [12-15]lifetime

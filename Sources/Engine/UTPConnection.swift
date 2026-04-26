@@ -16,6 +16,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
     // MARK: - AnyPeer identity
     let host: String
     let port: UInt16
+    let transportName: String = "uTP"
 
     // MARK: - AnyPeer BT state
     private(set) var peerChoking: Bool = true
@@ -29,7 +30,10 @@ actor UTPConnection: @preconcurrency AnyPeer {
     var isClosed: Bool { utpState == .closed }
 
     weak var delegate: PeerDelegate?
-    func setDelegateInternal(_ d: PeerDelegate) { delegate = d }
+    nonisolated func setDelegateInternal(_ d: PeerDelegate) {
+        Task { [weak self] in await self?._setDelegate(d) }
+    }
+    private func _setDelegate(_ d: PeerDelegate) { delegate = d }
 
     // MARK: - uTP state machine
     private enum UTPState { case idle, synSent, connected, closing, closed }
@@ -43,9 +47,11 @@ actor UTPConnection: @preconcurrency AnyPeer {
         }
     }
 
-    // BEP 29 §2.2 — connection IDs
-    private let connIdRecv: UInt16
-    private let connIdSend: UInt16
+    // BEP 29 §2.2 — connection IDs (var because inbound SYN overwrites them)
+    private var connIdRecv: UInt16
+    private var connIdSend: UInt16
+    // True for connections accepted from the inbound UDP listener
+    private var isInbound: Bool = false
 
     // Sequence / ACK numbers (wrapping uint16)
     private var seqNr: UInt16 = 1
@@ -69,11 +75,11 @@ actor UTPConnection: @preconcurrency AnyPeer {
 
     // MARK: - Congestion / flow control (LEDBAT)
 
-    private static let targetDelay: UInt32 = 25_000     // 25 ms in µs
+    private static let targetDelay: UInt32 = 100_000    // 100 ms in µs (more aggressive for LAN/fast paths)
     private static let maxPayload      = 1_350           // MTU-safe payload bytes
     private static let minCwnd         = maxPayload      // floor
 
-    private var cwnd: Int = 4 * maxPayload              // congestion window (bytes)
+    private var cwnd: Int = 16 * maxPayload             // congestion window (bytes) — start with 16 segments
     private var remoteWindow: UInt32 = 65_536           // remote's advertised window
     private var baseDelay: UInt32 = .max                // minimum observed one-way delay
     private var windowSize: UInt32 = 1_048_576          // our advertised recv window (1 MiB)
@@ -140,12 +146,13 @@ actor UTPConnection: @preconcurrency AnyPeer {
         self.isPrivate = false
         self.onInboundHandshake = nil
         self.connection = incomingConnection
+        self.isInbound = true
         if case let .hostPort(h, p) = incomingConnection.endpoint {
             self.host = "\(h)"; self.port = p.rawValue
         } else {
             self.host = "unknown"; self.port = 0
         }
-        
+        // Placeholder IDs — overwritten when we receive the remote's ST_SYN
         let baseId = UInt16.random(in: 1...65534)
         self.connIdRecv = baseId
         self.connIdSend = baseId &+ 1
@@ -159,18 +166,30 @@ actor UTPConnection: @preconcurrency AnyPeer {
     }
 
     func acceptInbound(remoteSupportsExt: Bool) async {
+        // For inbound uTP, processBTBuffer has already called sendBTHandshake() and
+        // sendExtHandshake() after onInboundHandshake returned.  We only need to
+        // initialise the bitfield here; all handshake frames are handled elsewhere.
         utpState = .connected
         bitfield = Array(repeating: false, count: totalPieces)
-        if remoteSupportsExt { sendExtHandshake() }
-        sendBTFrame(id: 2, payload: Data()) // INTERESTED
     }
 
     // MARK: - AnyPeer lifecycle
 
-    func connect() {
+    nonisolated func connect() {
+        Task { [weak self] in await self?._connect() }
+    }
+    private func _connect() {
         connection.stateUpdateHandler = { [weak self] s in
             switch s {
-            case .ready:             Task { await self?.sendSyn() }
+            case .ready:
+                Task { [weak self] in
+                    guard let self else { return }
+                    if await self.isInbound {
+                        // Inbound: wait for the remote's ST_SYN before doing anything
+                    } else {
+                        await self.sendSyn()
+                    }
+                }
             case .failed, .cancelled: Task { await self?.teardown() }
             default: break
             }
@@ -179,7 +198,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
         receiveLoop()
     }
 
-    func disconnect() { Task { await teardown() } }
+    nonisolated func disconnect() { Task { [weak self] in await self?.teardown() } }
 
     private func teardown() async {
         guard utpState != .closed else { return }
@@ -305,8 +324,18 @@ actor UTPConnection: @preconcurrency AnyPeer {
         }
 
         switch type {
-        case 4: // ST_SYN — inbound; outbound-only for v1.1
-            break
+        case 4: // ST_SYN — remote is initiating a connection to us
+            guard utpState == .idle, isInbound else { break }
+            // Per BEP 29: SYN.connId = remote's recv ID; we reply with connId = SYN.connId.
+            // Remote will send data with connId = SYN.connId + 1, which becomes our recv ID.
+            let synConnId = rawData.readUInt16(at: 2)
+            connIdSend = synConnId          // we send STATE/DATA using their recv ID
+            connIdRecv = synConnId &+ 1    // we expect their DATA with this ID
+            ackNr = seq
+            utpState = .connected
+            seqNr = UInt16.random(in: 1...65535)
+            sendStateAck()
+            startRetransmit()
 
         case 2: // ST_STATE — ACK to our SYN, or pure ACK
             if utpState == .synSent {
@@ -457,6 +486,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
         hs.append(infoHash)
         hs.append(peerId)
         sendData(hs)
+        sendBTFrame(id: 2, payload: Data()) // INTERESTED
     }
 
     // MARK: - BitTorrent message reassembly
@@ -489,7 +519,6 @@ actor UTPConnection: @preconcurrency AnyPeer {
             btHandshakeDone = true
             bitfield = Array(repeating: false, count: totalPieces)
             sendExtHandshake()
-            sendBTFrame(id: 2, payload: Data())  // INTERESTED
             await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
         }
 
@@ -506,7 +535,9 @@ actor UTPConnection: @preconcurrency AnyPeer {
 
     private func handleBTMessage(id: UInt8, payload: Data) async {
         switch id {
-        case 0: peerChoking = true
+        case 0:
+            peerChoking = true
+            await delegate?.peerChokedUs(self)
         case 1:
             peerChoking = false
             await delegate?.peerUnchokedUs(self)
@@ -572,26 +603,44 @@ actor UTPConnection: @preconcurrency AnyPeer {
     }
 
     // MARK: - AnyPeer outbound BT messages
+    // All public methods are nonisolated wrappers that dispatch a Task to the actor's own
+    // executor. This is necessary because @preconcurrency AnyPeer lets callers invoke these
+    // methods without hopping to our executor — causing concurrent mutations of nagleBuffer,
+    // sendQueue, seqNr and other state that is also touched by the receive path and Nagle
+    // timer Task running on our executor. The wrappers eliminate the race at zero cost:
+    // sends are fire-and-forget by nature and the Tasks serialize correctly.
 
-    func sendBitfield(_ bits: [Bool]) {
+    nonisolated func sendBitfield(_ bits: [Bool]) {
+        Task { [weak self] in await self?._sendBitfield(bits) }
+    }
+    private func _sendBitfield(_ bits: [Bool]) {
         guard !bits.isEmpty else { return }
         var payload = Data(count: (bits.count + 7) / 8)
         for (i, has) in bits.enumerated() where has { payload[i/8] |= (0x80 >> (i%8)) }
         sendBTFrame(id: 5, payload: payload)
     }
 
-    func sendHave(piece: Int) {
+    nonisolated func sendHave(piece: Int) {
+        Task { [weak self] in await self?._sendHave(piece: piece) }
+    }
+    private func _sendHave(piece: Int) {
         var p = Data(); p.appendUInt32(UInt32(piece))
         sendBTFrame(id: 4, payload: p)
     }
 
-    func sendCancel(piece: Int, offset: Int, length: Int) {
+    nonisolated func sendCancel(piece: Int, offset: Int, length: Int) {
+        Task { [weak self] in await self?._sendCancel(piece: piece, offset: offset, length: length) }
+    }
+    private func _sendCancel(piece: Int, offset: Int, length: Int) {
         var p = Data()
         p.appendUInt32(UInt32(piece)); p.appendUInt32(UInt32(offset)); p.appendUInt32(UInt32(length))
         sendBTFrame(id: 8, payload: p)
     }
 
-    func requestBlocks(_ requests: [(piece: Int, offset: Int, length: Int)]) {
+    nonisolated func requestBlocks(_ requests: [(piece: Int, offset: Int, length: Int)]) {
+        Task { [weak self] in await self?._requestBlocks(requests) }
+    }
+    private func _requestBlocks(_ requests: [(piece: Int, offset: Int, length: Int)]) {
         // All request messages combined into one sendData call — single window debit
         var combined = Data(capacity: requests.count * 17)
         for r in requests {
@@ -603,14 +652,20 @@ actor UTPConnection: @preconcurrency AnyPeer {
         sendData(combined)
     }
 
-    func sendPiece(index: Int, begin: Int, block: Data) {
+    nonisolated func sendPiece(index: Int, begin: Int, block: Data) {
+        Task { [weak self] in await self?._sendPiece(index: index, begin: begin, block: block) }
+    }
+    private func _sendPiece(index: Int, begin: Int, block: Data) {
         var p = Data()
         p.appendUInt32(UInt32(index)); p.appendUInt32(UInt32(begin)); p.append(block)
         ulAccum += Int64(block.count)
         sendBTFrame(id: 7, payload: p)
     }
 
-    func sendPEX(added: [(String, UInt16)], dropped: [(String, UInt16)]) {
+    nonisolated func sendPEX(added: [(String, UInt16)], dropped: [(String, UInt16)]) {
+        Task { [weak self] in await self?._sendPEX(added: added, dropped: dropped) }
+    }
+    private func _sendPEX(added: [(String, UInt16)], dropped: [(String, UInt16)]) {
         guard let extId = extPEX else { return }
         var addedData = Data()
         for (ip, pt) in added.prefix(50) {
@@ -626,17 +681,24 @@ actor UTPConnection: @preconcurrency AnyPeer {
         sendBTFrame(id: 20, payload: payload)
     }
 
-    func sendUnchoke() { amChoking = false; sendBTFrame(id: 1, payload: Data()) }
-    func sendChoke()   { amChoking = true;  sendBTFrame(id: 0, payload: Data()) }
+    nonisolated func sendUnchoke() { Task { [weak self] in await self?._sendUnchoke() } }
+    private func _sendUnchoke() { amChoking = false; sendBTFrame(id: 1, payload: Data()) }
 
-    func sendKeepAliveIfNeeded() {
+    nonisolated func sendChoke() { Task { [weak self] in await self?._sendChoke() } }
+    private func _sendChoke() { amChoking = true; sendBTFrame(id: 0, payload: Data()) }
+
+    nonisolated func sendKeepAliveIfNeeded() {
+        Task { [weak self] in await self?._sendKeepAliveIfNeeded() }
+    }
+    private func _sendKeepAliveIfNeeded() {
         guard utpState == .connected,
               Date.now.timeIntervalSince(lastMessageReceivedTime) > 100 else { return }
         flushNagle()
         sendData(Data([0, 0, 0, 0]))
     }
 
-    func updateStats() {
+    nonisolated func updateStats() { Task { [weak self] in await self?._updateStats() } }
+    private func _updateStats() {
         let now = Date.now
         let elapsed = now.timeIntervalSince(lastSpeedSample)
         guard elapsed >= 1 else { return }
@@ -679,14 +741,20 @@ actor UTPConnection: @preconcurrency AnyPeer {
         sendBTFrame(id: 20, payload: payload)
     }
 
-    func requestMetadataPiece(_ piece: Int) {
+    nonisolated func requestMetadataPiece(_ piece: Int) {
+        Task { [weak self] in await self?._requestMetadataPiece(piece) }
+    }
+    private func _requestMetadataPiece(_ piece: Int) {
         guard let extId = extMetadata else { return }
         let dict = BValue.dict([("msg_type", .int(0)), ("piece", .int(piece))])
         var payload = Data([extId]); payload.append(Bencode.encode(dict))
         sendBTFrame(id: 20, payload: payload)
     }
 
-    func sendMetadataPiece(_ piece: Int, totalSize: Int, data: Data) {
+    nonisolated func sendMetadataPiece(_ piece: Int, totalSize: Int, data: Data) {
+        Task { [weak self] in await self?._sendMetadataPiece(piece, totalSize: totalSize, data: data) }
+    }
+    private func _sendMetadataPiece(_ piece: Int, totalSize: Int, data: Data) {
         guard let extId = extMetadata else { return }
         let dict = BValue.dict([
             ("msg_type",   .int(1)),

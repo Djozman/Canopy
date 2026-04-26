@@ -14,8 +14,11 @@ struct TorrentDetailView: View {
                 pieceMap
                     .tabItem { Label("Piece Map", systemImage: "square.grid.3x3") }
                 
-                Text("Peers (Coming Soon)")
+                peersTab
                     .tabItem { Label("Peers", systemImage: "person.3") }
+
+                trackersTab
+                    .tabItem { Label("Trackers", systemImage: "antenna.radiowaves.left.and.right") }
             }
             .padding()
         }
@@ -74,6 +77,96 @@ struct TorrentDetailView: View {
         }
     }
     
+    private var peersTab: some View {
+        Group {
+            if torrent.peerInfos.isEmpty {
+                ContentUnavailableView("No Peers", systemImage: "person.3",
+                    description: Text("Peers will appear here once connections are established."))
+            } else {
+                Table(torrent.peerInfos) {
+                    TableColumn("Address") { row in
+                        HStack(spacing: 4) {
+                            Text(row.transport)
+                                .font(.caption2.monospaced())
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(row.transport == "TCP"
+                                    ? Color.blue.opacity(0.15)
+                                    : Color.purple.opacity(0.15))
+                                .foregroundStyle(row.transport == "TCP" ? .blue : .purple)
+                                .clipShape(.capsule)
+                            Text("\(row.host):\(row.port)")
+                                .font(.system(.body, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                    }
+                    TableColumn("Status") { row in
+                        Text(row.state.capitalized)
+                            .foregroundStyle(row.state == "active" ? .primary : .secondary)
+                    }
+                    TableColumn("↓") { row in
+                        Text(row.dlSpeed > 0 ? formatSpeed(row.dlSpeed) : "—")
+                            .foregroundStyle(row.dlSpeed > 0 ? .blue : .secondary)
+                            .monospacedDigit()
+                    }
+                    TableColumn("↑") { row in
+                        Text(row.ulSpeed > 0 ? formatSpeed(row.ulSpeed) : "—")
+                            .foregroundStyle(row.ulSpeed > 0 ? .green : .secondary)
+                            .monospacedDigit()
+                    }
+                    TableColumn("Pieces") { row in
+                        Text(row.totalPieces > 0
+                             ? "\(row.piecesHeld) / \(row.totalPieces)"
+                             : "—")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    TableColumn("Flags") { row in
+                        Text(row.flags)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var trackersTab: some View {
+        let allTrackers = torrent.meta.announceList.flatMap { $0 }
+        return Group {
+            if allTrackers.isEmpty {
+                ContentUnavailableView("No Trackers", systemImage: "antenna.radiowaves.left.and.right",
+                    description: Text("This torrent has no trackers (DHT / PEX only)."))
+            } else {
+                List(allTrackers, id: \.self) { url in
+                    HStack(spacing: 8) {
+                        // Protocol badge
+                        let scheme = URL(string: url)?.scheme?.uppercased() ?? "?"
+                        Text(scheme)
+                            .font(.caption2.monospaced())
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(schemeColor(scheme).opacity(0.15))
+                            .foregroundStyle(schemeColor(scheme))
+                            .clipShape(.capsule)
+                        Text(url)
+                            .font(.system(.body, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+        }
+    }
+
+    private func schemeColor(_ scheme: String) -> Color {
+        switch scheme {
+        case "UDP":   return .purple
+        case "HTTP":  return .blue
+        case "HTTPS": return .green
+        default:      return .secondary
+        }
+    }
+
     private var stateColor: Color {
         switch torrent.state {
         case .downloading: .blue

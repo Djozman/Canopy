@@ -1,0 +1,78 @@
+Building for production...
+[0/2] Write swift-version--1AB21518FC5DEDBE.txt
+[2/3] Compiling Canopy CanopyApp.swift
+/Users/amm/Canopy/Sources/Engine/PeerConnection.swift:156:9: error: expression is 'async' but is not marked with 'await'
+154 |         bitfield = Array(repeating: false, count: totalPieces)
+155 |         sendExtensionHandshake()
+156 |         sendInterested()
+    |         |- error: expression is 'async' but is not marked with 'await'
+    |         `- note: call is 'async'
+157 |         await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+158 |         receiveLoop()
+
+/Users/amm/Canopy/Sources/Engine/PeerConnection.swift:161:32: warning: no 'async' operations occur within 'await' expression
+159 |     }
+160 | 
+161 |     func disconnect() { Task { await teardown() } }
+    |                                `- warning: no 'async' operations occur within 'await' expression
+162 | 
+163 |     private func teardown() {
+
+/Users/amm/Canopy/Sources/Engine/PeerConnection.swift:337:26: warning: actor-isolated property 'receiveBuffer' can not be mutated from a nonisolated context
+ 67 |     private let isInitiator: Bool
+ 68 |     private(set) var state: PeerState = .connecting
+ 69 |     private var receiveBuffer = Data()
+    |                 `- note: mutation of this property is only permitted within the actor
+ 70 | 
+ 71 |     // Write path state is accessed from two executors simultaneously:
+    :
+335 |                 if data[0] == 19 {
+336 |                     // Standard BitTorrent handshake received! Skip MSE.
+337 |                     self.receiveBuffer.append(data)
+    |                          |- warning: actor-isolated property 'receiveBuffer' can not be mutated from a nonisolated context
+    |                          `- note: consider declaring an isolated method on 'PeerConnection' to perform the mutation
+338 |                     await self.switchToPlaintext()
+339 |                 } else if data.count == 96 {
+
+/Users/amm/Canopy/Sources/Engine/PeerConnection.swift:320:9: warning: no 'async' operations occur within 'await' expression
+318 |     private func performMSEHandshake() async {
+319 |         // FORCED FALLBACK: Disable MSE for now to debug "0 handshaked" issue
+320 |         await self.switchToPlaintext()
+    |         `- warning: no 'async' operations occur within 'await' expression
+321 |         return;
+322 |         
+
+/Users/amm/Canopy/Sources/Engine/PeerConnection.swift:483:9: error: expression is 'async' but is not marked with 'await'
+481 | 
+482 |         sendExtensionHandshake()
+483 |         sendInterested()
+    |         |- error: expression is 'async' but is not marked with 'await'
+    |         `- note: call is 'async'
+484 |         await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+485 |         await tryParseMessages()
+
+/Users/amm/Canopy/Sources/Engine/PortForwarder.swift:62:40: warning: reference to captured var 'req' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+ 60 |                 switch state {
+ 61 |                 case .ready:
+ 62 |                     conn.send(content: req, completion: .contentProcessed { _ in
+    |                                        `- warning: reference to captured var 'req' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+ 63 |                         conn.receiveMessage { data, _, _, _ in
+ 64 |                             // Response layout: [0]ver [1]op+128 [2-3]result [4-7]epoch
+
+/Users/amm/Canopy/Sources/Engine/TorrentEngine.swift:84:21: warning: no 'async' operations occur within 'await' expression
+ 82 |             Task { @MainActor in
+ 83 |                 if let handle = self.torrents.first(where: { $0.meta.infoHash == infoHash }) {
+ 84 |                     await handle.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt)
+    |                     `- warning: no 'async' operations occur within 'await' expression
+ 85 |                 } else {
+ 86 |                     connection.cancel()
+
+/Users/amm/Canopy/Sources/Engine/TorrentHandle.swift:744:43: warning: reference to captured var 'hCount' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+742 |             handle.metadataPiecesCount = mCount
+743 |             handle.metadataTotalPieces = mTotal
+744 |             handle.handshakedPeersCount = hCount
+    |                                           `- warning: reference to captured var 'hCount' in concurrently-executing code; this is an error in the Swift 6 language mode [#SendableClosureCaptures]
+745 |         }
+746 |     }
+
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>

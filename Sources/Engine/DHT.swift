@@ -9,13 +9,16 @@ actor DHT {
 
     private let nodeId: Data
     private var routingTable: [DHTNodeInfo] = []
-    private var tokenSecrets: [String: Data] = [:]    // ip -> secret
+    private var tokenSecrets: [String: Data] = [:]    // ip -> token received from that node
     private var pendingTx: [String: CheckedContinuation<DHTResponse, Error>] = [:]
+    // Maps 2-byte tx id -> info_hash so responses are routed to the right torrent
+    private var pendingGetPeers: [Data: Data] = [:]
     private var connection: NWConnection?
     private var isRunning = false
+    private var lastRoutingSave: Date = .distantPast
 
-    private static let k = 8          // bucket size
-    private static let alpha = 3      // concurrency parameter
+    private static let k = 8
+    private static let alpha = 3
     private static let maxNodes = 500
     private static let port: UInt16 = 6881
     private static let bootstrapNodes: [(String, UInt16)] = [
@@ -29,7 +32,6 @@ actor DHT {
     var onPeersFound: ((_ infoHash: Data, _ peers: [(String, UInt16)]) -> Void)?
 
     init() {
-        // Stable node ID stored in UserDefaults
         if let saved = UserDefaults.standard.data(forKey: "dht.nodeId"), saved.count == 20 {
             nodeId = saved
         } else {
@@ -45,12 +47,14 @@ actor DHT {
     func start() async {
         guard !isRunning else { return }
         isRunning = true
+        loadRoutingTable()
         await bindSocket()
         await bootstrap()
     }
 
     func stop() {
         isRunning = false
+        saveRoutingTable(force: true)
         connection?.cancel()
         connection = nil
     }
@@ -65,7 +69,7 @@ actor DHT {
         let params = NWParameters.udp
         params.allowLocalEndpointReuse = true
         guard let listener = try? NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.port)!) else { return }
-        
+
         listener.newConnectionHandler = { [weak self] newConn in
             guard let self else { return }
             newConn.stateUpdateHandler = { state in
@@ -106,37 +110,22 @@ actor DHT {
                 to: .hostPort(host: NWEndpoint.Host(host), port: 6881),
                 using: .udp
             )
-            
             @Sendable func resumeOnce(returning value: String?) {
                 let alreadyResumed = resumed.withLock { isResumed in
                     if isResumed { return true }
-                    isResumed = true
-                    return false
+                    isResumed = true; return false
                 }
-                if !alreadyResumed {
-                    cont.resume(returning: value)
-                    conn.cancel()
-                }
+                if !alreadyResumed { cont.resume(returning: value); conn.cancel() }
             }
-
             conn.stateUpdateHandler = { state in
                 if case .ready = state {
                     if case .hostPort(let h, _) = conn.currentPath?.remoteEndpoint {
                         resumeOnce(returning: "\(h)")
-                    } else {
-                        resumeOnce(returning: nil)
-                    }
-                } else if case .failed = state {
-                    resumeOnce(returning: nil)
-                }
+                    } else { resumeOnce(returning: nil) }
+                } else if case .failed = state { resumeOnce(returning: nil) }
             }
             conn.start(queue: .global())
-            
-            // Fallback timeout
-            Task {
-                try? await Task.sleep(for: .seconds(3))
-                resumeOnce(returning: nil)
-            }
+            Task { try? await Task.sleep(for: .seconds(3)); resumeOnce(returning: nil) }
         }
     }
 
@@ -187,6 +176,10 @@ actor DHT {
 
     private func sendGetPeers(to node: DHTNodeInfo, infoHash: Data) async {
         let tx = randomTx()
+        // Track which info_hash this tx corresponds to so we can route the response
+        pendingGetPeers[tx] = infoHash
+        // Prune old entries to avoid unbounded growth
+        if pendingGetPeers.count > 500 { pendingGetPeers.removeAll() }
         let msg = BValue.dict([
             ("t", .bytes(tx)),
             ("y", .bytes(Data("q".utf8))),
@@ -201,18 +194,16 @@ actor DHT {
 
     private func sendAnnouncePeer(to node: DHTNodeInfo, infoHash: Data, port: UInt16, token: Data) async {
         let tx = randomTx()
-        var portBytes = Data()
-        portBytes.appendUInt16(port)
         let msg = BValue.dict([
             ("t", .bytes(tx)),
             ("y", .bytes(Data("q".utf8))),
             ("q", .bytes(Data("announce_peer".utf8))),
             ("a", .dict([
-                ("id",          .bytes(nodeId)),
-                ("implied_port",.int(1)),
-                ("info_hash",   .bytes(infoHash)),
-                ("port",        .int(Int(port))),
-                ("token",       .bytes(token))
+                ("id",           .bytes(nodeId)),
+                ("implied_port", .int(1)),
+                ("info_hash",    .bytes(infoHash)),
+                ("port",         .int(Int(port))),
+                ("token",        .bytes(token))
             ]))
         ])
         send(Bencode.encode(msg), to: node)
@@ -250,22 +241,21 @@ actor DHT {
         send(Bencode.encode(msg), to: node)
     }
 
-    // MARK: - Receive loop (handled by startListener/receiveFrom)
+    // MARK: - Receive
 
     private func handlePacket(_ data: Data, from ip: String, port: UInt16) async {
         guard let msg = try? Bencode.decode(data) else { return }
         let type = msg["y"]?.string ?? ""
         let tx   = msg["t"]?.data ?? Data()
-        let sender = DHTNodeInfo(id: msg["a"]?["id"]?.data ?? msg["r"]?["id"]?.data ?? Data(repeating: 0, count: 20),
-                                 ip: ip, port: port)
+        let sender = DHTNodeInfo(
+            id: msg["a"]?["id"]?.data ?? msg["r"]?["id"]?.data ?? Data(repeating: 0, count: 20),
+            ip: ip, port: port)
 
         addNode(sender)
 
         switch type {
-        case "q":
-            await handleQuery(msg: msg, tx: tx, from: sender)
-        case "r":
-            await handleResponse(msg: msg, from: sender)
+        case "q": await handleQuery(msg: msg, tx: tx, from: sender)
+        case "r": await handleResponse(msg: msg, tx: tx, from: sender)
         default: break
         }
     }
@@ -282,21 +272,24 @@ actor DHT {
             let infoHash = msg["a"]?["info_hash"]?.data ?? Data()
             respondGetPeers(tx: tx, to: node, peers: closestNodes(to: infoHash, k: Self.k))
         case "announce_peer":
-            respondPing(tx: tx, to: node)  // accept, respond with pong
+            respondPing(tx: tx, to: node)
         default: break
         }
     }
 
-    private func handleResponse(msg: BValue, from node: DHTNodeInfo) async {
+    private func handleResponse(msg: BValue, tx: Data, from node: DHTNodeInfo) async {
         guard let r = msg["r"] else { return }
 
-        // Store token if present
+        // Store token for future announce_peer calls
         if let token = r["token"]?.data {
             tokenSecrets[node.ip] = token
         }
 
-        // Compact peer list (values)
-        if let values = r["values"]?.list {
+        // Look up which info_hash this response is for (only set for get_peers queries)
+        let infoHash = pendingGetPeers[tx]
+
+        // Compact peer list (values) — only present when node has peers for that info_hash
+        if let values = r["values"]?.list, let hash = infoHash {
             var peers: [(String, UInt16)] = []
             for v in values {
                 guard let d = v.data else { continue }
@@ -305,7 +298,6 @@ actor DHT {
                     let port = UInt16(d[4]) << 8 | UInt16(d[5])
                     peers.append((ip, port))
                 } else if d.count == 18 {
-                    // IPv6
                     var addr = [UInt8](repeating: 0, count: 16)
                     for j in 0..<16 { addr[j] = d[j] }
                     let ip = IPv6ToString(addr)
@@ -314,23 +306,24 @@ actor DHT {
                 }
             }
             if !peers.isEmpty {
-                DHTBus.shared.dispatch(peers: peers)
+                // Route peers only to the torrent that requested them — not all torrents
+                DHTBus.shared.dispatch(infoHash: hash, peers: peers)
             }
         }
 
-        // Compact node list (nodes) — add to routing table
+        // Compact node list — add to routing table, and continue iterative lookup
+        var newNodes: [DHTNodeInfo] = []
         if let nodes = r["nodes"]?.data {
             var i = 0
             while i + 26 <= nodes.count {
                 let id   = Data(nodes[i..<(i+20)])
                 let ip   = "\(nodes[i+20]).\(nodes[i+21]).\(nodes[i+22]).\(nodes[i+23])"
                 let port = UInt16(nodes[i+24]) << 8 | UInt16(nodes[i+25])
-                addNode(DHTNodeInfo(id: id, ip: ip, port: port))
+                let n = DHTNodeInfo(id: id, ip: ip, port: port)
+                addNode(n); newNodes.append(n)
                 i += 26
             }
         }
-        
-        // Compact IPv6 node list (nodes6)
         if let nodes6 = r["nodes6"]?.data {
             var i = 0
             while i + 38 <= nodes6.count {
@@ -339,8 +332,18 @@ actor DHT {
                 for j in 0..<16 { addr[j] = nodes6[i+20+j] }
                 let ip = IPv6ToString(addr)
                 let port = UInt16(nodes6[i+36]) << 8 | UInt16(nodes6[i+37])
-                addNode(DHTNodeInfo(id: id, ip: ip, port: port))
+                let n = DHTNodeInfo(id: id, ip: ip, port: port)
+                addNode(n); newNodes.append(n)
                 i += 38
+            }
+        }
+
+        // Iterative get_peers: when we receive closer nodes but no peers yet,
+        // continue the lookup towards those nodes.
+        if let hash = infoHash, !newNodes.isEmpty {
+            let closest = closestNodes(to: hash, k: 3)
+            for n in closest.prefix(Self.alpha) {
+                await sendGetPeers(to: n, infoHash: hash)
             }
         }
     }
@@ -351,8 +354,12 @@ actor DHT {
         guard node.id.count == 20, !node.ip.isEmpty, node.port > 0 else { return }
         if routingTable.contains(where: { $0.id == node.id }) { return }
         routingTable.append(node)
-        if routingTable.count > Self.maxNodes {
-            routingTable.removeFirst()
+        if routingTable.count > Self.maxNodes { routingTable.removeFirst() }
+        // Throttled persistence: save at most once per 60s
+        let now = Date.now
+        if now.timeIntervalSince(lastRoutingSave) > 60 {
+            lastRoutingSave = now
+            saveRoutingTable()
         }
     }
 
@@ -363,7 +370,33 @@ actor DHT {
             .map { $0 }
     }
 
-    // MARK: - Helpers
+    // MARK: - Routing table persistence
+
+    private func saveRoutingTable(force: Bool = false) {
+        let nodes = routingTable.prefix(200).map { n -> [String: Any] in
+            ["id": n.id.hexString, "ip": n.ip, "port": Int(n.port)]
+        }
+        if let json = try? JSONSerialization.data(withJSONObject: nodes) {
+            UserDefaults.standard.set(json, forKey: "dht.routingTable")
+        }
+    }
+
+    private func loadRoutingTable() {
+        guard let json = UserDefaults.standard.data(forKey: "dht.routingTable"),
+              let array = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]]
+        else { return }
+        for node in array {
+            guard let idHex = node["id"] as? String,
+                  let id   = Data(hex: idHex), id.count == 20,
+                  let ip   = node["ip"]   as? String,
+                  let port = node["port"] as? Int
+            else { continue }
+            routingTable.append(DHTNodeInfo(id: id, ip: ip, port: UInt16(port)))
+        }
+        print("[DHT] Loaded \(routingTable.count) nodes from cache")
+    }
+
+    // MARK: - Send helper
 
     private func send(_ data: Data, to node: DHTNodeInfo) {
         let endpoint = NWEndpoint.hostPort(
@@ -389,7 +422,7 @@ actor DHT {
         let len = min(a.count, b.count)
         return Data((0..<len).map { a[$0] ^ b[$0] })
     }
-    
+
     private func IPv6ToString(_ addr: [UInt8]) -> String {
         var str = ""
         for i in stride(from: 0, to: 16, by: 2) {
@@ -412,7 +445,7 @@ struct DHTResponse {
     var nodes: [DHTNodeInfo]
 }
 
-// Lightweight event bus so DHT peers reach the right TorrentHandle
+// Lightweight event bus: DHT peers reach the right TorrentHandle by info-hash.
 final class DHTBus {
     static let shared = DHTBus()
     private var listeners: [(Data, ([(String, UInt16)]) -> Void)] = []
@@ -424,8 +457,9 @@ final class DHTBus {
     func unregister(infoHash: Data) {
         listeners.removeAll { $0.0 == infoHash }
     }
-    func dispatch(peers: [(String, UInt16)]) {
-        // Broadcast to all listeners (TorrentHandle filters duplicates)
-        for (_, handler) in listeners { handler(peers) }
+    /// Dispatch peers only to the torrent with the matching info-hash.
+    func dispatch(infoHash: Data, peers: [(String, UInt16)]) {
+        for (hash, handler) in listeners where hash == infoHash { handler(peers) }
     }
 }
+

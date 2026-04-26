@@ -53,25 +53,25 @@ final class MSEncryption {
     private var decryptor: RC4?
     
     init(sharedSecret: Data, infoHash: Data) {
-        // Shared secret is derived from DH exchange (not implemented here for brevity, 
-        // using a placeholder for the logic structure)
         self.s_key = sharedSecret
-        
-        // Key for encryption: SHA1(sharedSecret + infoHash)
-        var encKeyData = Data()
+
+        // MSE spec: initiator→recipient stream key = RC4(SHA1("keyA" + S + SKEY))
+        //           recipient→initiator stream key = RC4(SHA1("keyB" + S + SKEY))
+        // The "keyA"/"keyB" prefixes differentiate the two directions so they use
+        // independent RC4 key streams even though both sides share the same S and SKEY.
+        var encKeyData = Data("keyA".utf8)
         encKeyData.append(sharedSecret)
         encKeyData.append(infoHash)
         let encKey = Insecure.SHA1.hash(data: encKeyData)
         self.encryptor = RC4(key: Data(encKey))
-        
-        // Key for decryption: SHA1(sharedSecret + infoHash)
-        var decKeyData = Data()
+
+        var decKeyData = Data("keyB".utf8)
         decKeyData.append(sharedSecret)
         decKeyData.append(infoHash)
         let decKey = Insecure.SHA1.hash(data: decKeyData)
         self.decryptor = RC4(key: Data(decKey))
-        
-        // Discard first 1024 bytes of RC4 stream as per spec
+
+        // Discard first 1024 bytes of each RC4 stream as required by the MSE spec
         _ = self.encryptor?.process(Data(count: 1024))
         _ = self.decryptor?.process(Data(count: 1024))
     }

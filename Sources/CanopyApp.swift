@@ -13,5 +13,10 @@ struct CanopyApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            SettingsView()
+                .environment(engine)
+        }
     }
 }
