@@ -27,6 +27,8 @@ actor DHT {
         ("dht.transmissionbt.com", 6881),
         ("router.bitcomet.com",    6881),
         ("dht.aelitis.com",        6881),
+        ("dht.libtorrent.org",     6881),
+        ("dht.example.com",      6881),
     ]
 
     var onPeersFound: ((_ infoHash: Data, _ peers: [(String, UInt16)]) -> Void)?
