@@ -205,6 +205,7 @@ actor TorrentEngine_: PeerDelegate {
 
     private let tracker = TrackerClient()
     private var peers: [any AnyPeer] = []
+    private var webSeeds: [any AnyPeer] = []
     private var isRunning = false
     /// Set true after a magnet's metadata arrives but before the user confirms which
     /// files to keep. Gates `scheduleRequests` so we don't write piece data to disk
@@ -313,6 +314,10 @@ actor TorrentEngine_: PeerDelegate {
         }
 
         await announceAndConnect(event: "started")
+
+        if meta.hasWebSeeds {
+            await connectToWebSeeds()
+        }
 
         if !meta.isPrivate {
             DHTBus.shared.register(infoHash: meta.infoHash) { [weak self] peers in
@@ -620,6 +625,23 @@ actor TorrentEngine_: PeerDelegate {
         for conn in fresh { Task { await conn.connect() } }
     }
 
+    private func connectToWebSeeds() async {
+        guard !meta.webSeeds.isEmpty, meta.pieceLength > 0, !meta.pieces.isEmpty else { return }
+
+        let maxWebSeeds = 10
+        let totalPieces = meta.pieces.count
+
+        for urlString in meta.webSeeds.prefix(maxWebSeeds) {
+            guard let url = URL(string: urlString) else { continue }
+            let webSeed = WebSeedConnection(url: url, pieceLength: meta.pieceLength, totalPieces: totalPieces)
+            await webSeed.setDelegateInternal(self)
+            webSeeds.append(webSeed)
+        }
+
+        for ws in webSeeds { Task { await ws.connect() } }
+        print("[Canopy] WebSeeds: \(webSeeds.count) connections")
+    }
+
     private func processRetryQueue() async {
         let now = Date.now
         var due: [RetryEntry] = []
@@ -733,6 +755,37 @@ actor TorrentEngine_: PeerDelegate {
         }
         peerInFlight[pid] = myInFlight
         await peer.requestBlocks(blocks)
+    }
+
+    private func scheduleWebSeedRequests() async {
+        guard !webSeeds.isEmpty, let store, !awaitingFileSelection else { return }
+        if rarityDirty { await refreshRarityOrder(); rarityDirty = false }
+        guard !cachedRarityOrder.isEmpty else { return }
+
+        let slotsPerWebSeed = min(Self.peerPipeline, Self.pipeline - globalInFlight.count)
+        guard slotsPerWebSeed > 0 else { return }
+
+        let webSeedBitfield = Array(repeating: true, count: meta.pieces.count)
+
+        for ws in webSeeds {
+            guard await !ws.isClosed else { continue }
+            let blocks = await store.blocksToRequest(
+                orderedPieces: cachedRarityOrder,
+                peerBitfield: webSeedBitfield,
+                excluding: globalInFlight,
+                endgame: false,
+                maxBlocks: slotsPerWebSeed
+            )
+            guard !blocks.isEmpty else { continue }
+            let pid = ObjectIdentifier(ws)
+            var myInFlight = peerInFlight[pid] ?? []
+            for b in blocks {
+                let key = PieceStore.inFlightKey(piece: b.piece, blockIndex: b.offset / PieceStore.blockSize)
+                myInFlight.insert(key); globalInFlight.insert(key)
+            }
+            peerInFlight[pid] = myInFlight
+            await ws.requestBlocks(blocks)
+        }
     }
 
     // MARK: - PeerDelegate
@@ -989,6 +1042,10 @@ actor TorrentEngine_: PeerDelegate {
                 }
                 for peer in peers where stalledPids.contains(ObjectIdentifier(peer)) {
                     await scheduleRequests(for: peer)
+                }
+
+                if !webSeeds.isEmpty {
+                    await scheduleWebSeedRequests()
                 }
 
                 if isMagnetMode {

@@ -27,10 +27,12 @@ struct Metainfo {
     let pieces: [Data]        // array of 20-byte SHA1 hashes
     let files: [FileEntry]
     let announceList: [[String]]
+    let webSeeds: [String]    // BEP 17: HTTP Seed URLs
     let totalSize: Int64
     let isPrivate: Bool
 
     var isSingleFile: Bool { files.count == 1 && files[0].path.count == 1 }
+    var hasWebSeeds: Bool { !webSeeds.isEmpty }
 
     func fileIndices(inFolder folderPath: String) -> [Int] {
         var indices: [Int] = []
@@ -107,6 +109,12 @@ struct Metainfo {
 
         let isPrivate = info["private"]?.int == 1
 
+        // BEP 17: HTTP Seed URLs (url-list)
+        var webSeeds: [String] = []
+        if let urls = root["url-list"]?.list {
+            webSeeds = urls.compactMap(\.string)
+        }
+
         return Metainfo(
             name: name,
             infoHash: infoHash,
@@ -114,6 +122,7 @@ struct Metainfo {
             pieces: pieces.map { Data($0) },
             files: files,
             announceList: announceList,
+            webSeeds: webSeeds,
             totalSize: totalSize,
             isPrivate: isPrivate
         )
@@ -145,7 +154,7 @@ struct Metainfo {
         return Metainfo(
             name: name, infoHash: infoHash,
             pieceLength: pieceLenVal, pieces: pieces,
-            files: files, announceList: trackers,
+            files: files, announceList: trackers, webSeeds: [],
             totalSize: files.reduce(0) { $0 + $1.length },
             isPrivate: false
         )
@@ -159,6 +168,7 @@ struct Metainfo {
             pieces: [],
             files: [],
             announceList: trackers.isEmpty ? [] : [trackers],
+            webSeeds: [],
             totalSize: 0,
             isPrivate: false
         )
