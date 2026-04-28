@@ -91,7 +91,6 @@ actor WebSeedConnection: @preconcurrency AnyPeer {
             guard let delegate else { continue }
 
             let fileOffset = Int64(req.piece) * Int64(pieceLength) + Int64(req.offset)
-            let rangeEnd = fileOffset + Int64(req.length) - 1
 
             do {
                 let data = try await fetchBytes(

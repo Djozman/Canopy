@@ -1144,7 +1144,7 @@ actor TorrentEngine_: PeerDelegate {
         let newState: TorrentHandle.TorrentState
         if isMagnetMode            { newState = .metadata }
         else if progressValue >= 1 { newState = .seeding }
-        else if !peers.isEmpty     { newState = .downloading }
+        else if !peers.isEmpty || !webSeeds.isEmpty { newState = .downloading }
         else                       { newState = .connecting }
 
         // Detect download completion — send "completed" announce and notify user once
