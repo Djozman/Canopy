@@ -262,7 +262,7 @@ actor TorrentEngine_: PeerDelegate {
     let peerId: Data
     private weak var handle: TorrentHandle?
 
-    static let maxPeers = 500
+    static let maxPeers = 100
     static let port: UInt16 = 6881
     static let pipeline = 500
     /// Per-peer in-flight cap. Prevents a single slow peer from monopolising the global
@@ -347,6 +347,8 @@ actor TorrentEngine_: PeerDelegate {
                 }
             }
             Task {
+                await DHT.shared.findPeers(infoHash: meta.infoHash)
+                await DHT.shared.findPeers(infoHash: meta.infoHash)
                 await DHT.shared.findPeers(infoHash: meta.infoHash)
                 if isMagnetMode {
                     await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881)
@@ -1069,13 +1071,13 @@ actor TorrentEngine_: PeerDelegate {
                     await requestMetadataPieces()
                 }
 
-                // Periodic DHT — adaptive interval: query every 8 s when starved for peers
-                // (< 10 connected), otherwise every 30 s. Runs for all non-private torrents
-                // while we still need more peers, not just in magnet mode.
-                if !meta.isPrivate && (isMagnetMode || peers.count < 30) {
-                    let dhtInterval: TimeInterval = peers.count < 10 ? 8 : 30
+                // Periodic DHT — adaptive interval: every 5 s when starved for peers
+                // (< 10 connected), otherwise every 30 s. Run multiple queries for more peers.
+                if !meta.isPrivate && (isMagnetMode || peers.count < 20) {
+                    let dhtInterval: TimeInterval = peers.count < 10 ? 5 : 15
                     if now.timeIntervalSince(lastDHTQuery) >= dhtInterval {
                         lastDHTQuery = now
+                        Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
                         Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
                         Task { await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881) }
                     }
