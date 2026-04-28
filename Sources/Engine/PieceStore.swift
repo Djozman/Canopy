@@ -29,6 +29,59 @@ actor PieceStore {
         return Int64(fullCount) * Int64(meta.pieceLength) + Int64(lastBytes)
     }
 
+    /// Sum of file lengths the user opted into. This is the meaningful denominator for
+    /// download progress when the user has deselected files — "MB downloaded of MB I want"
+    /// rather than "MB downloaded of MB the torrent contains".
+    var selectedSize: Int64 {
+        if skippedFiles.isEmpty { return meta.totalSize }
+        var total: Int64 = 0
+        for (idx, file) in meta.files.enumerated() where !skippedFiles.contains(idx) {
+            total += file.length
+        }
+        return total
+    }
+
+    /// Bytes of *selected* file data that have been verified on disk. Boundary pieces
+    /// that overlap multiple files only count their wanted slice — the bits we actually
+    /// wrote to disk, not the whole piece.
+    var downloadedSelected: Int64 {
+        var bytes: Int64 = 0
+        for (fileIdx, file) in meta.files.enumerated() where !skippedFiles.contains(fileIdx) {
+            bytes += completedBytes(forFileIndex: fileIdx, fileLength: file.length)
+        }
+        return bytes
+    }
+
+    /// Per-file download fraction, [0, 1]. For deselected files this is always 0 because
+    /// `write(piece:)` doesn't touch them; the bytes-on-disk for that file remain zero.
+    func fileProgress(_ fileIndex: Int) -> Double {
+        guard fileIndex < meta.files.count else { return 0 }
+        if skippedFiles.contains(fileIndex) { return 0 }
+        let file = meta.files[fileIndex]
+        guard file.length > 0 else { return 1 }
+        return Double(completedBytes(forFileIndex: fileIndex, fileLength: file.length)) / Double(file.length)
+    }
+
+    /// Sum of completed-piece bytes that fall *inside* the byte range of the given file.
+    /// Walks pieces only within the file's range — O(file_size / piece_size) per call.
+    private func completedBytes(forFileIndex fileIndex: Int, fileLength: Int64) -> Int64 {
+        let file = meta.files[fileIndex]
+        let fileStart = fileOffset(for: file)
+        let fileEnd   = fileStart + fileLength
+        let pieceLen  = Int64(meta.pieceLength)
+        let firstPiece = Int(fileStart / pieceLen)
+        let lastPiece  = Int((fileEnd - 1) / pieceLen)
+        var bytes: Int64 = 0
+        for p in firstPiece...lastPiece {
+            guard p < bitfield.count, bitfield[p] else { continue }
+            let pieceStart = Int64(p) * pieceLen
+            let pieceEnd   = pieceStart + Int64(pieceLength(for: p))
+            let overlap = min(pieceEnd, fileEnd) - max(pieceStart, fileStart)
+            if overlap > 0 { bytes += overlap }
+        }
+        return bytes
+    }
+
     init(meta: Metainfo, saveDir: URL, skippedFiles: Set<Int> = []) throws {
         self.meta = meta
         self.saveDir = saveDir
@@ -43,7 +96,7 @@ actor PieceStore {
             cum += file.length
         }
 
-        try Self.createLayout(meta: meta, dir: saveDir)
+        try Self.createLayout(meta: meta, dir: saveDir, skippedFiles: skippedFiles)
 
         if let data = try? Data(contentsOf: stateURL),
            let savedBitfield = try? JSONDecoder().decode([Bool].self, from: data),
@@ -71,26 +124,27 @@ actor PieceStore {
         }
     }
 
-    // Pre-allocate file layout on disk
-    private static func createLayout(meta: Metainfo, dir: URL) throws {
+    // Pre-allocate file layout on disk. Skipped files get neither directory entries nor
+    // empty placeholders — the user explicitly opted out, so nothing of theirs appears in
+    // the save folder. (A piece that *overlaps* both a wanted file and a skipped file is
+    // still downloaded for the wanted part; `write(piece:)` filters out the skipped slice.)
+    private static func createLayout(meta: Metainfo, dir: URL, skippedFiles: Set<Int>) throws {
         let fm = FileManager.default
         if meta.isSingleFile {
+            // Single-file torrents only have one file — if the user skipped it, there's
+            // nothing to download at all.
+            guard !skippedFiles.contains(0) else { return }
             let url = dir.appendingPathComponent(meta.name)
             if !fm.fileExists(atPath: url.path) {
                 fm.createFile(atPath: url.path, contents: nil)
                 let fh = try FileHandle(forWritingTo: url)
-                fh.seekToEndOfFile()
-                let end = fh.offsetInFile
-                if end < UInt64(meta.totalSize) {
-                    fh.seek(toFileOffset: UInt64(meta.totalSize) - 1)
-                    fh.write(Data([0]))
-                }
+                Self.preallocate(fileHandle: fh, size: meta.totalSize)
                 try fh.close()
             }
         } else {
             let torrentDir = dir.appendingPathComponent(meta.name)
             try fm.createDirectory(at: torrentDir, withIntermediateDirectories: true)
-            for file in meta.files {
+            for (idx, file) in meta.files.enumerated() where !skippedFiles.contains(idx) {
                 let url = file.path.dropLast().reduce(torrentDir) { $0.appendingPathComponent($1) }
                 try fm.createDirectory(at: url, withIntermediateDirectories: true)
                 let fileURL = torrentDir.appendingPathComponent(file.name)
@@ -98,8 +152,7 @@ actor PieceStore {
                     fm.createFile(atPath: fileURL.path, contents: nil)
                     if file.length > 0 {
                         let fh = try FileHandle(forWritingTo: fileURL)
-                        fh.seek(toFileOffset: UInt64(file.length) - 1)
-                        fh.write(Data([0]))
+                        Self.preallocate(fileHandle: fh, size: file.length)
                         try fh.close()
                     }
                 }
@@ -107,12 +160,51 @@ actor PieceStore {
         }
     }
 
+    /// Sets the file's *logical* size only. Physical disk blocks remain unallocated
+    /// until we actually write piece data — the file is sparse on APFS, so `du` and
+    /// Finder's "size used" reflect bytes downloaded, not bytes reserved.
+    /// Tradeoff: slightly higher fragmentation on giant (>50 GB) torrents vs.
+    /// `F_PREALLOCATE`, but APFS's copy-on-write extents handle this gracefully.
+    private static func preallocate(fileHandle fh: FileHandle, size: Int64) {
+        ftruncate(fh.fileDescriptor, off_t(size))
+    }
+
     // Receive a block from a peer
-    func receiveBlock(piece: Int, offset: Int, data: Data) throws {
+    func receiveBlock(piece: Int, offset: Int, data: Data) async throws {
         guard !isClosed else { return }
         guard piece >= 0 && piece < meta.pieces.count, !bitfield[piece] else { return }
         pendingBlocks[piece, default: [:]][offset] = data
-        try assembleIfComplete(piece: piece)
+        try await assembleIfComplete(piece: piece)
+    }
+
+    /// Pieces currently undergoing async hash verification — skip them in
+    /// `assembleIfComplete` so a flood of inbound blocks doesn't kick off duplicate jobs.
+    private var verifyingPieces: Set<Int> = []
+
+    // MARK: - Upload read cache (LRU, 64 MiB)
+    // Recently-read blocks are kept in RAM keyed by (piece, offset, length). Many peers
+    // requesting the same hot blocks (start of a swarm, popular seed) hit RAM instead of
+    // round-tripping through disk. Pre-warmed by `assembleIfComplete` on piece complete.
+    private var readCache: [UInt64: Data] = [:]
+    private var readCacheOrder: [UInt64] = []
+    /// 32 MiB. Big enough to absorb hot-block bursts when many peers want our newest
+    /// pieces; small enough that the app's resident memory stays modest.
+    private let readCacheMaxBytes: Int = 32 * 1_048_576
+    private var readCacheBytes: Int = 0
+
+    private func cacheKey(piece: Int, offset: Int, length: Int) -> UInt64 {
+        UInt64(piece & 0xFFFFFF) << 40 | UInt64(offset & 0xFFFFFF) << 16 | UInt64(length & 0xFFFF)
+    }
+
+    private func cachePut(_ key: UInt64, _ data: Data) {
+        if readCache[key] != nil { return }
+        readCache[key] = data
+        readCacheOrder.append(key)
+        readCacheBytes += data.count
+        while readCacheBytes > readCacheMaxBytes, let oldKey = readCacheOrder.first {
+            readCacheOrder.removeFirst()
+            if let evicted = readCache.removeValue(forKey: oldKey) { readCacheBytes -= evicted.count }
+        }
     }
 
     func hasPiece(_ index: Int) -> Bool { bitfield[index] }
@@ -146,32 +238,38 @@ actor PieceStore {
 
     func readBlock(piece: Int, offset: Int, length: Int) throws -> Data? {
         guard piece < meta.pieces.count, bitfield[piece] else { return nil }
-        
+
+        // Cache hit — skip disk entirely.
+        let cKey = cacheKey(piece: piece, offset: offset, length: length)
+        if let cached = readCache[cKey] { return cached }
+
         let globalOffset = Int64(piece) * Int64(meta.pieceLength) + Int64(offset)
         var result = Data()
         var remaining = Int64(length)
         var currentOffset = globalOffset
-        
+
         for file in meta.files {
             let fileStart = fileOffset(for: file)
             let fileEnd = fileStart + file.length
-            
+
             guard currentOffset < fileEnd && (currentOffset + remaining) > fileStart else { continue }
-            
+
             let inFileStart = max(currentOffset, fileStart) - fileStart
             let count = min(currentOffset + remaining, fileEnd) - max(currentOffset, fileStart)
-            
+
             let fileURL = fileURL(for: file)
             let fh = try fileHandle(for: fileURL, writing: false)
             fh.seek(toFileOffset: UInt64(inFileStart))
             result.append(fh.readData(ofLength: Int(count)))
-            
+
             remaining -= count
             currentOffset += count
             if remaining <= 0 { break }
         }
-        
-        return result.count == length ? result : nil
+
+        guard result.count == length else { return nil }
+        cachePut(cKey, result)
+        return result
     }
 
     // Single call that replaces the O(pieces) loop of blocksNeeded() calls in scheduling.
@@ -246,25 +344,50 @@ actor PieceStore {
         return meta.pieceLength
     }
 
-    private func assembleIfComplete(piece: Int) throws {
+    private func assembleIfComplete(piece: Int) async throws {
+        guard !verifyingPieces.contains(piece) else { return }
         let len = pieceLength(for: piece)
         let blocks = pendingBlocks[piece] ?? [:]
-        var assembled = Data(capacity: len)
+        // Pre-allocate exact piece size and slot blocks via replaceSubrange — avoids
+        // the O(n²) growth pattern of repeated Data.append() on large pieces.
+        var assembled = Data(count: len)
         var off = 0
         while off < len {
             guard let block = blocks[off] else { return }  // not ready yet
-            assembled.append(block)
+            let blockLen = min(Self.blockSize, len - off)
+            assembled.replaceSubrange(off..<(off + blockLen), with: block.prefix(blockLen))
             off += Self.blockSize
         }
-        // Verify SHA1
-        let hash = Insecure.SHA1.hash(data: assembled)
-        guard Data(hash) == meta.pieces[piece] else {
+
+        // Move SHA1 off the actor — hashing a multi-MB piece blocks all peer reads
+        // and writes for 5–15 ms on M1 otherwise. Detached Task runs userInitiated
+        // priority on a background queue.
+        verifyingPieces.insert(piece)
+        let expected = meta.pieces[piece]
+        let assembledCopy = assembled
+        let isValid = await Task.detached(priority: .userInitiated) { () -> Bool in
+            Data(Insecure.SHA1.hash(data: assembledCopy)) == expected
+        }.value
+        verifyingPieces.remove(piece)
+        guard !isClosed else { return }
+
+        guard isValid else {
             pendingBlocks[piece] = nil  // bad data, discard and re-request
             return
         }
         try write(piece: piece, data: assembled)
         bitfield[piece] = true
         pendingBlocks[piece] = nil
+
+        // Pre-warm the upload cache — peers will request blocks of this piece within
+        // seconds of seeing our HAVE, and now they hit RAM instead of seeking disk.
+        var bo = 0
+        while bo < len {
+            let blockLen = min(Self.blockSize, len - bo)
+            let key = cacheKey(piece: piece, offset: bo, length: blockLen)
+            cachePut(key, Data(assembled[bo..<(bo + blockLen)]))
+            bo += Self.blockSize
+        }
         saveState()
     }
 
@@ -272,7 +395,12 @@ actor PieceStore {
         let globalOffset = Int64(piece) * Int64(meta.pieceLength)
         var written = 0
 
-        for file in meta.files {
+        for (idx, file) in meta.files.enumerated() {
+            // The piece may overlap a skipped file — we still verified its hash, but the
+            // user opted out of this file so we skip writes to its slice. (createLayout
+            // didn't even create the file on disk, so opening a handle would fail anyway.)
+            if skippedFiles.contains(idx) { continue }
+
             let fileStart = fileOffset(for: file)
             let fileEnd = fileStart + file.length
             let pieceEnd = globalOffset + Int64(data.count)

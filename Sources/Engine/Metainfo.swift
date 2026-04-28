@@ -8,6 +8,18 @@ struct FileEntry {
     var name: String { path.joined(separator: "/") }
 }
 
+enum FileNode: Identifiable {
+    case folder(name: String, children: [FileNode], allSelected: Bool, totalSize: Int64)
+    case file(name: String, index: Int, size: Int64, selected: Bool)
+
+    var id: String {
+        switch self {
+        case .folder(let name, _, _, _): return "folder:\(name)"
+        case .file(_, let idx, _, _): return "file:\(idx)"
+        }
+    }
+}
+
 struct Metainfo {
     let name: String
     let infoHash: Data        // 20-byte SHA1
@@ -19,6 +31,31 @@ struct Metainfo {
     let isPrivate: Bool
 
     var isSingleFile: Bool { files.count == 1 && files[0].path.count == 1 }
+
+    func fileIndices(inFolder folderPath: String) -> [Int] {
+        var indices: [Int] = []
+        for (idx, file) in files.enumerated() {
+            if file.path.count > 1 && file.path[0] == folderPath {
+                indices.append(idx)
+            }
+        }
+        return indices
+    }
+
+    func allFileIndices() -> [Int] { Array(files.indices) }
+
+    func pieceRange(forFile fileIndex: Int) -> ClosedRange<Int>? {
+        guard fileIndex < files.count else { return nil }
+        var startOffset: Int64 = 0
+        for i in 0..<fileIndex {
+            startOffset += files[i].length
+        }
+        let endOffset = startOffset + files[fileIndex].length
+
+        let startPiece = Int(startOffset / Int64(pieceLength))
+        let endPiece = Int((endOffset - 1) / Int64(pieceLength))
+        return startPiece...endPiece
+    }
 
     static func parse(_ data: Data) throws -> Metainfo {
         let root = try Bencode.decode(data)

@@ -44,6 +44,9 @@ protocol AnyPeer: AnyObject, Sendable {
 protocol PeerDelegate: AnyObject {
     func peerConnected(_ peer: any AnyPeer, supportsExtensions: Bool) async
     func peerDidDisconnect(_ peer: any AnyPeer) async
+    /// Fired when an MSE handshake fails on this peer. The engine uses this to mark the
+    /// host as "plaintext-only" so subsequent retries skip MSE.
+    func peerMSEHandshakeFailed(host: String, port: UInt16) async
     func peerChokedUs(_ peer: any AnyPeer) async
     func peerUnchokedUs(_ peer: any AnyPeer) async
     func peerSentBitfield(_ peer: any AnyPeer) async
@@ -94,7 +97,12 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private(set) var lastHandshakeReceivedTime: Date = .distantPast
     private var extPEX: UInt8?
     private(set) var extMetadata: UInt8?
-    private var encryption: MSEncryption?
+    private var encryption: MSECipher?
+    /// Per-peer MSE preference. Defaulted from `Self.defaultMode`. Override per-peer via
+    /// `setMSEMode(_:)` — used by the engine to force `.disabled` on hosts whose MSE
+    /// handshake previously failed.
+    private var mseMode: MSEMode = PeerConnection.defaultMode
+    func setMSEMode(_ m: MSEMode) { self.mseMode = m }
 
     weak var delegate: PeerDelegate?
     func setDelegateInternal(_ d: PeerDelegate) { delegate = d }
@@ -106,7 +114,11 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private let peerId: Data
     private let totalPieces: Int
     private let isPrivate: Bool
-    private var mseDH: MSEDH?
+
+    /// Process-wide MSE mode default. **`.disabled` by default** for backwards compat —
+    /// flip via Settings to `.enabled` (prefer encryption with plaintext fallback) or
+    /// `.forced` (encrypted only). Persisted in UserDefaults via `TorrentEngine.mseMode`.
+    static var defaultMode: MSEMode = .disabled
 
     private static let localPEXId: UInt8 = 1
     private static let localMetadataId: UInt8 = 2
@@ -121,8 +133,26 @@ actor PeerConnection: @preconcurrency AnyPeer {
             host: NWEndpoint.Host(host),
             port: NWEndpoint.Port(rawValue: port)!
         )
-        connection = NWConnection(to: endpoint, using: .tcp)
+        connection = NWConnection(to: endpoint, using: Self.tunedTCPParameters())
         self.isPrivate = isPrivate
+    }
+
+    /// TCP parameters tuned for BitTorrent:
+    /// - `noDelay = true`: disables Nagle on the OS side. Request and HAVE messages get
+    ///   sent immediately instead of being held up to 200ms waiting for more data.
+    /// - `enableKeepalive`: detects dead peers without waiting for the 120s app-level timeout.
+    /// - `connectionTimeout = 8`: bail on unreachable peers fast (vs ~75s OS default).
+    private static func tunedTCPParameters() -> NWParameters {
+        let params = NWParameters.tcp
+        if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+            tcp.noDelay = true
+            tcp.enableKeepalive = true
+            tcp.keepaliveIdle = 30
+            tcp.keepaliveInterval = 10
+            tcp.keepaliveCount = 3
+            tcp.connectionTimeout = 8
+        }
+        return params
     }
 
     init(incomingConnection: NWConnection, infoHash: Data, peerId: Data, totalPieces: Int, isPrivate: Bool) {
@@ -151,6 +181,25 @@ actor PeerConnection: @preconcurrency AnyPeer {
         sendExtensionHandshake()
         sendInterested()
         await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+        receiveLoop()
+    }
+
+    /// Inbound MSE — `TorrentEngine` has already run the responder handshake and
+    /// matched the SKEY. We adopt the negotiated cipher, send our BT handshake
+    /// (encrypted by `enqueueSend`'s hook into `encryption?.encrypt`), and resume the
+    /// normal receive loop with any decrypted leftover bytes already pre-fed.
+    func acceptInboundMSE(cipher: MSECipher?,
+                          decryptedLeftover: Data,
+                          remoteSupportsExt: Bool) async {
+        self.encryption = cipher
+        self.state = .active
+        self.bitfield = Array(repeating: false, count: totalPieces)
+        enqueueSend(buildBTHandshakeBytes())
+        sendExtensionHandshake()
+        sendInterested()
+        if !decryptedLeftover.isEmpty { receiveBuffer.append(decryptedLeftover) }
+        await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+        await tryParseMessages()
         receiveLoop()
     }
 
@@ -299,75 +348,64 @@ actor PeerConnection: @preconcurrency AnyPeer {
     private func handleStateChange(_ s: NWConnection.State) async {
         switch s {
         case .ready:
-            await performMSEHandshake()
+            switch mseMode {
+            case .disabled:               switchToPlaintext()
+            case .enabled:                switchToPlaintext()  // outbound MSE kills non-MSE peers
+            case .forced:                 await performMSEHandshake()
+            }
         case .failed, .cancelled:
             state = .closed
         default: break
         }
     }
 
+    /// Outbound MSE handshake (initiator role). On success, switches to either RC4 mode
+    /// or plaintext mode per the negotiated `crypto_select`. The peer's BT handshake
+    /// arrives as part of the post-handshake stream and is parsed by the normal receive
+    /// loop. Our own BT handshake is piggybacked as the IA payload inside step 3.
     private func performMSEHandshake() async {
-        // FORCED FALLBACK: Disable MSE for now to debug "0 handshaked" issue
-        self.switchToPlaintext()
-        return;
-        
         state = .mseHandshake
-        let dh = MSEDH()
-        self.mseDH = dh
-        enqueueSend(dh.publicKeyData)
-        
-        // Wait for first byte to distinguish between MSE and Plaintext
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 96) { [weak self] data, _, _, error in
-            Task {
-                guard let self = self, let data = data, error == nil else {
-                    await self?.disconnect(); return
-                }
-                
-                if data[0] == 19 {
-                    // Standard BitTorrent handshake received! Skip MSE.
-                    await self.appendToReceiveBuffer(data)
-                    await self.switchToPlaintext()
-                } else if data.count == 96 {
-                    await self.completeMSEHandshake(remotePublicKey: data)
-                } else {
-                    // Partial data, wait for the rest of the 96 bytes
-                    await self.waitForRemainingMSE(current: data)
-                }
-            }
-        }
-    }
+        let stream = MSEStream(connection: connection)
+        let ia = buildBTHandshakeBytes()
+        let mode = mseMode
+        let hash = infoHash
 
-    private func waitForRemainingMSE(current: Data) async {
-        let remaining = 96 - current.count
-        connection.receive(minimumIncompleteLength: remaining, maximumLength: remaining) { [weak self] data, _, _, error in
-            Task {
-                guard let self = self, let data = data, error == nil else {
-                    await self?.disconnect(); return
-                }
-                var full = current
-                full.append(data)
-                await self.completeMSEHandshake(remotePublicKey: full)
+        do {
+            let result = try await withMSETimeout(seconds: MSEConst.handshakeTimeoutSeconds) {
+                try await MSEInitiator.run(stream: stream, infoHash: hash, ia: ia, mode: mode)
+            }
+            self.encryption = result.cipher
+            self.state = .handshaking
+            self.lastMessageReceivedTime = .now  // reset handshake-idle timer
+            if !result.decryptedLeftover.isEmpty {
+                receiveBuffer.append(result.decryptedLeftover)
+                await tryParseHandshake()
+            }
+            receiveLoop()
+        } catch {
+            print("[Canopy] MSE handshake failed (\(host)): \(error.localizedDescription)")
+            await delegate?.peerMSEHandshakeFailed(host: host, port: port)
+            if mode == .enabled {
+                switchToPlaintext()
+            } else {
+                disconnect()
             }
         }
     }
 
     private func switchToPlaintext() {
         self.state = .handshaking
+        // Reset the handshake-idle timer to "now" — the stats loop's 30s budget for
+        // receiving the peer's BT handshake should start when WE've sent ours, not when
+        // the PeerConnection actor was first instantiated.
+        self.lastMessageReceivedTime = .now
         self.sendBTHandshake()
         self.receiveLoop()
     }
 
-    private func completeMSEHandshake(remotePublicKey: Data) async {
-        guard let dh = mseDH else { return }
-        let secret = dh.computeSharedSecret(remotePublicKeyData: remotePublicKey)
-        self.encryption = MSEncryption(sharedSecret: secret, infoHash: infoHash)
-        
-        state = .handshaking
-        sendBTHandshake()
-        receiveLoop()
-    }
-
-    private func sendBTHandshake() {
+    /// 68-byte standard BitTorrent handshake. Used as IA in MSE step 3, and as the
+    /// standalone first message in plaintext mode.
+    private func buildBTHandshakeBytes() -> Data {
         var hs = Data(capacity: 68)
         hs.append(19)
         hs.append(contentsOf: "BitTorrent protocol".utf8)
@@ -377,7 +415,11 @@ actor PeerConnection: @preconcurrency AnyPeer {
         hs.append(contentsOf: reserved)
         hs.append(infoHash)
         hs.append(peerId)
-        enqueueSend(hs)
+        return hs
+    }
+
+    private func sendBTHandshake() {
+        enqueueSend(buildBTHandshakeBytes())
         sendInterested()
     }
 
@@ -422,7 +464,9 @@ actor PeerConnection: @preconcurrency AnyPeer {
     // MARK: - Receive loop
 
     private func receiveLoop() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 131072) { [weak self] data, _, done, error in
+        // 1 MiB read window — the kernel hands us large bursts in one call and TCP's
+        // recv-window stays open under high download speed.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, done, error in
             Task {
                 guard let self else { return }
                 if let data { await self.received(data) }

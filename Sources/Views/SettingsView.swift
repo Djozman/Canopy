@@ -22,6 +22,14 @@ struct SettingsView: View {
             Section("Network") {
                 LabeledContent("Listen port", value: "6881 (TCP + uTP)")
                 LabeledContent("DHT", value: engine.torrents.isEmpty ? "Starting…" : "Active")
+                Picker("Encryption (MSE/PE)", selection: Binding(
+                    get: { engine.mseMode },
+                    set: { engine.mseMode = $0 }
+                )) {
+                    ForEach(MSEMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
             }
 
             Section("About") {

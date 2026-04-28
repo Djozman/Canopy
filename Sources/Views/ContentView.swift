@@ -3,9 +3,8 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Environment(TorrentEngine.self) private var engine
+    @Environment(\.openWindow) private var openWindow
     @State private var searchText = ""
-    @State private var showAdd = false
-    @State private var showMagnet = false
     @State private var selection: Set<UUID> = []
     @State private var isTargeted = false
     @State private var addError: String?
@@ -27,14 +26,13 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .sheet(isPresented: $showAdd) {
-            AddTorrentView()
-                .environment(engine)
+        // Watch all torrents for `needsFileSelection` (covers magnets that resolved
+        // across an app restart). Pops the file-selection window. The magnet add flow
+        // handles its own selection inside its own window so this won't double-fire.
+        .onChange(of: engine.torrents.map { $0.needsFileSelection }) { _, _ in
+            openFileSelectionWindowIfNeeded()
         }
-        .sheet(isPresented: $showMagnet) {
-            MagnetView(onAdd: { id in selection = [id] })
-                .environment(engine)
-        }
+        .onAppear { openFileSelectionWindowIfNeeded() }
         .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
             handleDrop(providers)
         }
@@ -131,13 +129,13 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
-            Button { showAdd = true } label: {
+            Button { openWindow(id: "add-torrent") } label: {
                 Label("Add Torrent", systemImage: "plus")
             }
             .keyboardShortcut("o")
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { showMagnet = true } label: {
+            Button { openWindow(id: "add-magnet") } label: {
                 Label("Add Magnet", systemImage: "link.badge.plus")
             }
             .keyboardShortcut("m")
@@ -188,6 +186,14 @@ struct ContentView: View {
 
     private func selected() -> [TorrentHandle] {
         engine.torrents.filter { selection.contains($0.id) }
+    }
+
+    /// Opens the dedicated file-selection Window if any torrent has `needsFileSelection`
+    /// set. The window itself reads engine state to find the right torrent.
+    private func openFileSelectionWindowIfNeeded() {
+        if engine.torrents.contains(where: { $0.needsFileSelection && $0.meta.files.count > 1 }) {
+            openWindow(id: "file-selection")
+        }
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {

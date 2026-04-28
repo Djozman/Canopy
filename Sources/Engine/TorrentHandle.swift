@@ -14,15 +14,35 @@ final class TorrentHandle: Identifiable {
 
     var name: String { meta.name }
     var totalSize: Int64 { meta.totalSize }
+    /// Set true when a magnet's metadata arrives and the user still needs to pick which
+    /// files to keep. Cleared by `fileSelectionCompleted()`.
+    var needsFileSelection: Bool = false
+    var selectedSize: Int64 {
+        let sel = fileSelections
+        guard !sel.isEmpty, sel.count == meta.files.count else { return meta.totalSize }
+        var total: Int64 = 0
+        for (idx, file) in meta.files.enumerated() where idx < sel.count && sel[idx] {
+            total += file.length
+        }
+        return total
+    }
+    /// Progress against `selectedSize` rather than `totalSize`. With a 3GB selection of a
+    /// 70GB torrent, this hits 1.0 when the user's chosen 3GB is done — matches the
+    /// progress bar to what the user actually asked for.
     var progress: Double = 0
     var downloadSpeed: Int64 = 0
+    var bytesReceived: Int64 = 0    // bytes of selected content received and verified
+    /// Per-file download fractions, [0, 1] each. Indexed parallel to `meta.files`.
+    /// Deselected files always read 0.
+    var fileProgresses: [Double] = []
     var uploadSpeed: Int64 = 0
     var state: TorrentState = .stopped
     var peersCount: Int = 0
     var seedsCount: Int = 0
     var eta: Int = 0
     var statusMessage: String = ""
-    var pieces: [Bool] = []
+    var pieces: [Bool] = []           // completed pieces
+    var piecesPending: [Bool] = []    // pieces being downloaded
     var metadataPiecesCount: Int = 0
     var metadataTotalPieces: Int = 0
     var handshakedPeersCount: Int = 0
@@ -101,8 +121,27 @@ final class TorrentHandle: Identifiable {
     func updateFileSelection(at index: Int, selected: Bool) {
         guard index < fileSelections.count else { return }
         fileSelections[index] = selected
+        needsFileSelection = false
         let skipped = Set(meta.files.indices.filter { !fileSelections[$0] })
         Task { await engine?.updateSkippedFiles(skipped) }
+    }
+
+    /// Called by the file-selection UI when the user clicks "Start Download". Releases
+    /// the engine's gate so piece data starts flowing.
+    func fileSelectionCompleted() {
+        needsFileSelection = false
+        let skipped = Set(meta.files.indices.filter { !fileSelections[$0] })
+        Task { [weak engine] in
+            await engine?.updateSkippedFiles(skipped)
+            await engine?.releaseFileSelectionGate()
+        }
+    }
+
+    /// Override the save dir before the PieceStore exists (i.e. between magnet metadata
+    /// resolution and the user clicking Start). After PieceStore creation this is a no-op.
+    func setSaveDirectory(_ url: URL) {
+        saveDirectory = url
+        Task { [weak engine] in await engine?.setSaveDir(url) }
     }
 
     func acceptInbound(_ connection: NWConnection, remoteSupportsExt: Bool) {
@@ -113,11 +152,24 @@ final class TorrentHandle: Identifiable {
         Task { await engine?.acceptInboundUTP(peer, remoteSupportsExt: remoteSupportsExt) }
     }
 
+    /// Routed by `TorrentEngine.handleInboundMSE` after a successful MSE responder
+    /// handshake matched our SKEY.
+    func acceptInboundMSE(connection: NWConnection,
+                          cipher: MSECipher?,
+                          decryptedLeftover: Data,
+                          remoteSupportsExt: Bool) async {
+        await engine?.acceptInboundMSE(connection: connection,
+                                       cipher: cipher,
+                                       decryptedLeftover: decryptedLeftover,
+                                       remoteSupportsExt: remoteSupportsExt)
+    }
+
     // Called by TorrentEngine_ when a magnet link resolves to full metadata.
     @MainActor
     func onMagnetResolved(newMeta: Metainfo) {
         meta = newMeta
         fileSelections = Array(repeating: true, count: newMeta.files.count)
+        needsFileSelection = newMeta.files.count > 1
         state = .connecting
     }
 
@@ -146,7 +198,7 @@ final class TorrentHandle: Identifiable {
 actor TorrentEngine_: PeerDelegate {
     private var meta: Metainfo
     private var store: PieceStore?       // nil while in magnet mode
-    private let saveDir: URL
+    private var saveDir: URL
     private var isMagnetMode: Bool
     private var rawMetadata: Data?       // raw info-dict bytes once fetched, for serving peers
     private var skippedFiles: Set<Int>
@@ -154,6 +206,10 @@ actor TorrentEngine_: PeerDelegate {
     private let tracker = TrackerClient()
     private var peers: [any AnyPeer] = []
     private var isRunning = false
+    /// Set true after a magnet's metadata arrives but before the user confirms which
+    /// files to keep. Gates `scheduleRequests` so we don't write piece data to disk
+    /// before the user has finalized their selection.
+    private var awaitingFileSelection = false
 
     // Peer discovery
     private var pexKnown: Set<String> = []
@@ -165,6 +221,8 @@ actor TorrentEngine_: PeerDelegate {
     private var retryQueue: [RetryEntry] = []
     private var peerAttempts: [String: Int] = [:]
     private var blacklist: Set<String> = []
+    /// Hosts whose MSE handshake failed — next dial uses plaintext to skip retry.
+    private var mseDisabledHosts: Set<String> = []
 
     private var choker = Choker()
 
@@ -187,10 +245,13 @@ actor TorrentEngine_: PeerDelegate {
     let peerId: Data
     private weak var handle: TorrentHandle?
 
-    static let maxPeers = 200
+    static let maxPeers = 500
     static let port: UInt16 = 6881
     static let pipeline = 500
-    static let endgameThreshold = 20
+    // Enter endgame at 50 pieces remaining (was 20). In endgame the same block is
+    // requested from multiple peers; whoever delivers first wins, the rest get CANCEL.
+    // Earlier entry = fewer trailing-tail stalls on the last 1–2% of a torrent.
+    static let endgameThreshold = 50
 
     private var peerInFlight: [ObjectIdentifier: Set<UInt64>] = [:]
     private var globalInFlight: Set<UInt64> = []
@@ -238,6 +299,14 @@ actor TorrentEngine_: PeerDelegate {
             DHTBus.shared.register(infoHash: meta.infoHash) { [weak self] peers in
                 Task { await self?.connectToPeers(peers.map { TrackerPeer(ip: $0.0, port: $0.1) }) }
             }
+            // Local Peer Discovery (BEP 14). Multicast on the LAN — peers on the same
+            // network can saturate gigabit, way above any internet seed.
+            let infoHash = meta.infoHash
+            Task {
+                await LocalPeerDiscovery.shared.register(infoHash: infoHash) { [weak self] ip, port in
+                    Task { await self?.connectToPeers([TrackerPeer(ip: ip, port: port)]) }
+                }
+            }
             Task {
                 await DHT.shared.findPeers(infoHash: meta.infoHash)
                 if isMagnetMode {
@@ -253,6 +322,31 @@ actor TorrentEngine_: PeerDelegate {
         await store?.updateSkippedFiles(skipped)
     }
 
+    /// Updates the save dir. Only effective before the PieceStore is created (i.e. during
+    /// the magnet-resolved-but-not-yet-confirmed window).
+    func setSaveDir(_ url: URL) async {
+        guard store == nil else { return }
+        saveDir = url
+    }
+
+    /// Called after the user finalizes file selection in the magnet flow. Builds the
+    /// PieceStore with the chosen `skippedFiles` and starts piece downloads.
+    func releaseFileSelectionGate() async {
+        guard awaitingFileSelection else { return }
+        awaitingFileSelection = false
+        if store == nil {
+            store = try? PieceStore(meta: meta, saveDir: saveDir, skippedFiles: skippedFiles)
+        }
+        await announceAndConnect(event: "started")
+        await refreshRarityOrder()
+        if let bits = await store?.getBitfield() {
+            for peer in peers {
+                await peer.sendBitfield(bits)
+                await scheduleRequests(for: peer)
+            }
+        }
+    }
+
     func stop() async {
         guard isRunning else { return }
         isRunning = false
@@ -265,6 +359,8 @@ actor TorrentEngine_: PeerDelegate {
         }
 
         DHTBus.shared.unregister(infoHash: meta.infoHash)
+        let ih = meta.infoHash
+        Task { await LocalPeerDiscovery.shared.unregister(infoHash: ih) }
         for peer in peers { await peer.disconnect() }
         peers = []
     }
@@ -312,6 +408,20 @@ actor TorrentEngine_: PeerDelegate {
         await peer.acceptInbound(remoteSupportsExt: remoteSupportsExt)
     }
 
+    func acceptInboundMSE(connection: NWConnection,
+                          cipher: MSECipher?,
+                          decryptedLeftover: Data,
+                          remoteSupportsExt: Bool) async {
+        let peer = PeerConnection(incomingConnection: connection, infoHash: meta.infoHash,
+                                  peerId: peerId, totalPieces: meta.pieces.count, isPrivate: meta.isPrivate)
+        guard peers.count < Self.maxPeers else { await peer.disconnect(); return }
+        peers.append(peer)
+        await peer.setDelegateInternal(self)
+        await peer.acceptInboundMSE(cipher: cipher,
+                                    decryptedLeftover: decryptedLeftover,
+                                    remoteSupportsExt: remoteSupportsExt)
+    }
+
     // MARK: - Magnet resolution
 
     private func magnetResolved(newMeta: Metainfo, rawInfo: Data) async {
@@ -320,13 +430,21 @@ actor TorrentEngine_: PeerDelegate {
         rawMetadata = rawInfo
         metadataPieces.removeAll()
 
-        store = try? PieceStore(meta: newMeta, saveDir: saveDir, skippedFiles: skippedFiles)
+        // Defer creating the PieceStore (which lays files on disk) until the user picks
+        // which files to keep. Single-file torrents have nothing to choose, so they
+        // start downloading immediately.
+        if newMeta.files.count > 1 {
+            awaitingFileSelection = true
+        } else {
+            store = try? PieceStore(meta: newMeta, saveDir: saveDir, skippedFiles: skippedFiles)
+        }
 
         // Notify handle (UI update) and outer engine (persistence)
         await handle?.onMagnetResolved(newMeta: newMeta)
         persistCallback?(rawInfo, newMeta)
 
-        // Start real download
+        // Start real download — only if we don't need to wait for the user.
+        guard !awaitingFileSelection else { return }
         await announceAndConnect(event: "started")
         await refreshRarityOrder()
 
@@ -342,9 +460,38 @@ actor TorrentEngine_: PeerDelegate {
     // MARK: - Tracker
 
     private func announceAndConnect(event: String? = nil) async {
-        let trackerURLs = meta.announceList.flatMap { $0 }
+        var trackerURLs = meta.announceList.flatMap { $0 }
         guard !trackerURLs.isEmpty else { return }
-        print("[Canopy] Announcing to \(trackerURLs.count) trackers (event=\(event ?? "none"))")
+
+        // BEP 48 — on the very first announce, scrape HTTP trackers in parallel and
+        // sort by swarm size so the busiest tracker is contacted first → first peers
+        // arrive faster. Bound the scrape phase to 3 s so a slow tracker can't delay us.
+        if event == "started", trackerURLs.count > 1 {
+            let httpURLs = trackerURLs.filter { $0.hasPrefix("http") }
+            if httpURLs.count > 1 {
+                let infoHash = meta.infoHash
+                let scrapes = await withTaskGroup(of: (String, Int).self) { group in
+                    for url in httpURLs {
+                        group.addTask { [weak self] in
+                            guard let self else { return (url, 0) }
+                            let scrape = try? await withThrowingTaskGroup(of: TrackerScrape?.self) { g in
+                                g.addTask { try await self.tracker.scrape(trackerURL: url, infoHash: infoHash) }
+                                g.addTask { try await Task.sleep(for: .seconds(3)); return nil }
+                                let result = try await g.next() ?? nil
+                                g.cancelAll()
+                                return result
+                            }
+                            return (url, (scrape ?? nil)?.quality ?? 0)
+                        }
+                    }
+                    var results: [(String, Int)] = []
+                    for await r in group { results.append(r) }
+                    return results
+                }
+                let scoreMap = Dictionary(uniqueKeysWithValues: scrapes)
+                trackerURLs.sort { (scoreMap[$0] ?? 0) > (scoreMap[$1] ?? 0) }
+            }
+        }
 
         // Capture immutable values so the Task closure doesn't need actor hops for them
         let capturedInfoHash = meta.infoHash
@@ -408,11 +555,21 @@ actor TorrentEngine_: PeerDelegate {
 
     private func updateTrackerStatus(added: Int) { trackerStatus = "Tracker: \(added) peers found" }
 
+    /// Mix of outbound transports: 0,1,2 → TCP, 3 → uTP. ~75% TCP / 25% uTP — most
+    /// peers go over TCP for raw throughput, but we still dial uTP on some so peers
+    /// behind TCP-blocking firewalls / corporate NATs are reachable.
+    private var transportTick: Int = 0
+
     private func makeConnection(host: String, port: UInt16, totalPieces: Int) -> any AnyPeer {
-        // TCP-only for outbound connections — avoids LEDBAT throughput penalty on all peers.
-        // Inbound uTP connections are still accepted via the UDP listener in TorrentEngine.
+        transportTick &+= 1
+        if (transportTick % 4) == 0 {
+            return UTPConnection(host: host, port: port,
+                                 infoHash: meta.infoHash, peerId: peerId,
+                                 totalPieces: totalPieces, isPrivate: meta.isPrivate)
+        }
         return PeerConnection(host: host, port: port,
-                              infoHash: meta.infoHash, peerId: peerId, totalPieces: totalPieces, isPrivate: meta.isPrivate)
+                              infoHash: meta.infoHash, peerId: peerId,
+                              totalPieces: totalPieces, isPrivate: meta.isPrivate)
     }
 
     private func connectToPeers(_ newPeers: [TrackerPeer]) async {
@@ -422,6 +579,7 @@ actor TorrentEngine_: PeerDelegate {
         let queuedKeys = Set(retryQueue.map { "\($0.ip):\($0.port)" })
         var added = 0
         let totalPieces = meta.pieces.count
+        var fresh: [any AnyPeer] = []
 
         for peer in newPeers {
             guard added < needed else { break }
@@ -430,10 +588,16 @@ actor TorrentEngine_: PeerDelegate {
                   !blacklist.contains(key) else { continue }
             let conn = makeConnection(host: peer.ip, port: peer.port, totalPieces: totalPieces)
             await conn.setDelegateInternal(self)
+            if mseDisabledHosts.contains(key), let tcp = conn as? PeerConnection {
+                await tcp.setMSEMode(.disabled)
+            }
             peers.append(conn)
-            await conn.connect()
+            fresh.append(conn)
             added += 1
         }
+        // Kick all dials off in parallel — the actor doesn't block on connect(), so
+        // connections race in the network stack instead of serializing one at a time.
+        for conn in fresh { Task { await conn.connect() } }
     }
 
     private func processRetryQueue() async {
@@ -446,6 +610,7 @@ actor TorrentEngine_: PeerDelegate {
         let connectedKeys = Set(peers.map { "\($0.host):\($0.port)" })
         let totalPieces = meta.pieces.count
         var added = 0
+        var fresh: [any AnyPeer] = []
         for entry in due {
             let key = "\(entry.ip):\(entry.port)"
             guard !blacklist.contains(key), !connectedKeys.contains(key), added < needed else {
@@ -453,8 +618,15 @@ actor TorrentEngine_: PeerDelegate {
             }
             let conn = makeConnection(host: entry.ip, port: entry.port, totalPieces: totalPieces)
             await conn.setDelegateInternal(self)
-            peers.append(conn); await conn.connect(); added += 1
+            if mseDisabledHosts.contains(key), let tcp = conn as? PeerConnection {
+                await tcp.setMSEMode(.disabled)
+            }
+            peers.append(conn)
+            fresh.append(conn)
+            added += 1
         }
+        // Parallel retry dials.
+        for conn in fresh { Task { await conn.connect() } }
     }
 
     // MARK: - PEX
@@ -482,7 +654,10 @@ actor TorrentEngine_: PeerDelegate {
     }
 
     private func scheduleRequests(for peer: any AnyPeer) async {
-        guard !isMagnetMode, let store else { return }
+        // While `awaitingFileSelection` is true (magnet metadata just arrived, user
+        // hasn't picked files yet), don't request piece data — keeps disk untouched
+        // until the user finalizes which files to keep.
+        guard !isMagnetMode, let store, !awaitingFileSelection else { return }
         if rarityDirty { await refreshRarityOrder(); rarityDirty = false }
         guard await !peer.isClosed, await !peer.peerChoking else { return }
         let pid = ObjectIdentifier(peer)
@@ -510,6 +685,14 @@ actor TorrentEngine_: PeerDelegate {
         let pid = ObjectIdentifier(peer)
         if let inFlight = peerInFlight[pid] { for k in inFlight { globalInFlight.remove(k) } }
         peerInFlight.removeValue(forKey: ObjectIdentifier(peer))
+    }
+
+    /// PeerConnection signals here when an MSE handshake fails. Marks the host
+    /// "plaintext-only" for subsequent retries.
+    func peerMSEHandshakeFailed(host: String, port: UInt16) async {
+        let key = "\(host):\(port)"
+        mseDisabledHosts.insert(key)
+        if mseDisabledHosts.count > 5_000 { mseDisabledHosts.removeFirst() }
     }
 
     func peerDidDisconnect(_ peer: any AnyPeer) async {
@@ -767,8 +950,22 @@ actor TorrentEngine_: PeerDelegate {
         
         let dlSpeed = displayDlSpeed
         let ulSpeed = displayUlSpeed
-        let progressValue = await store?.progress ?? 0
+        // Effective progress against *selected* size, not total. With 3GB selected of a
+        // 70GB torrent, the bar fills to 100% when those 3GB are done — matches the
+        // user's mental model and the speed counter.
+        let selSize        = await store?.selectedSize ?? meta.totalSize
+        let downloadedSel  = await store?.downloadedSelected ?? 0
+        let progressValue: Double = selSize > 0
+            ? min(1.0, Double(downloadedSel) / Double(selSize))
+            : (await store?.progress ?? 0)
         let done = await store?.completedPieces ?? 0
+        // Per-file progress — deselected files always read 0 (they're never written).
+        var fileProgresses: [Double] = Array(repeating: 0, count: meta.files.count)
+        if let s = store {
+            for i in meta.files.indices {
+                fileProgresses[i] = await s.fileProgress(i)
+            }
+        }
         
         var seedCount = 0
         for p in peers { 
@@ -823,6 +1020,16 @@ actor TorrentEngine_: PeerDelegate {
         else                   { status = "\(seedCount) seed\(seedCount == 1 ? "" : "s"), \(pCount) peer\(pCount == 1 ? "" : "s") connected" }
         
         let pMap = await store?.bitfieldCopy ?? []
+        // In-flight piece bitmap (one bit per piece that has at least one block requested
+        // but not yet received). Used by the piece-map view to color partially-loaded
+        // pieces differently from unstarted ones.
+        var inFlightPieces = Array(repeating: false, count: pMap.count)
+        for (_, blocks) in peerInFlight {
+            for key in blocks {
+                let p = Int(key >> 32)
+                if p < inFlightPieces.count { inFlightPieces[p] = true }
+            }
+        }
 
         // Collect per-peer snapshots for the Peers tab
         var snapshots: [TorrentHandle.PeerInfo] = []
@@ -855,18 +1062,29 @@ actor TorrentEngine_: PeerDelegate {
         let mTotal = metadataTotalSize > 0 ? (metadataTotalSize + 16383) / 16384 : 0
         let h = self.handle
 
+        // Bytes-of-selected-content the user has on disk — the figure shown in
+        // "X of Y" UI. Capped at selSize so it never reads larger than the user's
+        // requested download (endgame duplicate-block reception can otherwise overshoot).
+        let finalBytesReceived = min(downloadedSel, selSize)
+        let finalSelectedSize  = selSize
+        let finalFileProgresses = fileProgresses
         let finalHCount = hCountVal
         let finalSnapshots = snapshots
+        let finalInFlightPieces = inFlightPieces
 
         await MainActor.run { [weak h] in
             guard let handle = h else { return }
             handle.progress = progressValue
             handle.downloadSpeed = dlSpeed
+            handle.bytesReceived = finalBytesReceived
+            handle.fileProgresses = finalFileProgresses
             handle.uploadSpeed = ulSpeed
+            _ = finalSelectedSize  // (already exposed via TorrentHandle.selectedSize getter)
             handle.peersCount = finalPCount
             handle.seedsCount = finalSeedCount
             handle.statusMessage = finalStatus
             handle.pieces = pMap
+            handle.piecesPending = finalInFlightPieces
             handle.state = newState
             handle.eta = finalEta
             handle.metadataPiecesCount = mCount

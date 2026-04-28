@@ -1,6 +1,7 @@
 #!/usr/bin/env swift
 
 import Foundation
+import AppKit
 
 let app = "Canopy.app"
 let bundle = "\(app)/Contents"
@@ -12,14 +13,20 @@ let buildProcess = Process()
 buildProcess.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
 buildProcess.arguments = ["build", "-c", "release"]
 buildProcess.currentDirectoryURL = URL(fileURLWithPath: ".")
-buildProcess.standardOutput = .pipe
-buildProcess.standardError = .pipe
+let buildOut = Pipe()
+let buildErr = Pipe()
+buildProcess.standardOutput = buildOut
+buildProcess.standardError = buildErr
 
 try buildProcess.run()
 buildProcess.waitUntilExit()
 
 if buildProcess.terminationStatus != 0 {
     print("Build failed!")
+    let errData = buildErr.fileHandleForReading.readDataToEndOfFile()
+    if let err = String(data: errData, encoding: .utf8) {
+        print(err)
+    }
     exit(1)
 }
 
@@ -93,10 +100,11 @@ try entitlements.write(toFile: entitlementsPath, atomically: true, encoding: .ut
 let codeSignProcess = Process()
 codeSignProcess.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
 codeSignProcess.arguments = ["--force", "--deep", "--sign", "-", "--entitlements", entitlementsPath, app]
-codeSignProcess.standardOutput = .pipe
+let codeSignOut = Pipe()
+codeSignProcess.standardOutput = codeSignOut
 
 try codeSignProcess.run()
 codeSignProcess.waitUntilExit()
 
 print("Built: \(app)")
-print("Run with: open \(app)")
+NSWorkspace.shared.open(URL(fileURLWithPath: app))

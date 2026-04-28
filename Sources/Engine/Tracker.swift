@@ -12,6 +12,14 @@ struct TrackerResponse {
     let peers: [TrackerPeer]
 }
 
+struct TrackerScrape {
+    let complete: Int
+    let incomplete: Int
+    let downloaded: Int
+    /// Higher score = more useful tracker. Heavy weight on seeders.
+    var quality: Int { complete * 2 + incomplete }
+}
+
 enum HTTPTrackerError: LocalizedError {
     case badURL, noResponse, trackerFailure(String)
     var errorDescription: String? {
@@ -51,6 +59,30 @@ final class TrackerClient {
         // ATS only governs URLSession/CFNetwork, not Network.framework.
         let body = try await rawHTTPGet(url)
         return try parseResponse(body)
+    }
+
+    /// BEP 48 — scrape returns swarm stats without joining the swarm. Used to rank
+    /// trackers before the announce so the most-populated tracker is contacted first.
+    func scrape(trackerURL: String, infoHash: Data) async throws -> TrackerScrape? {
+        guard let scrapeURL = Self.scrapeURL(from: trackerURL) else { return nil }
+        let qs = "info_hash=\(infoHash.urlEncoded)"
+        let separator = scrapeURL.contains("?") ? "&" : "?"
+        guard let url = URL(string: scrapeURL + separator + qs) else { return nil }
+        let body = try await rawHTTPGet(url)
+        let decoded = try Bencode.decode(body)
+        guard let files = decoded["files"]?.dict, let entry = files.first?.value else {
+            return nil
+        }
+        return TrackerScrape(
+            complete:   entry["complete"]?.int   ?? 0,
+            incomplete: entry["incomplete"]?.int ?? 0,
+            downloaded: entry["downloaded"]?.int ?? 0)
+    }
+
+    /// Convention: replace the trailing `/announce` with `/scrape`.
+    static func scrapeURL(from announceURL: String) -> String? {
+        guard let range = announceURL.range(of: "/announce") else { return nil }
+        return announceURL.replacingCharacters(in: range, with: "/scrape")
     }
 
     // MARK: - Raw HTTP via NWConnection (ATS-exempt)
@@ -143,7 +175,32 @@ final class TrackerClient {
             }
         }
 
+        // BEP 7 — compact IPv6 peers (18 bytes per peer: 16-byte addr + 2-byte port)
+        if let compact6 = decoded["peers6"]?.data {
+            var i = 0
+            while i + 18 <= compact6.count {
+                let addrBytes = compact6[(compact6.startIndex + i)..<(compact6.startIndex + i + 16)]
+                let port = UInt16(compact6[compact6.startIndex + i + 16]) << 8
+                         | UInt16(compact6[compact6.startIndex + i + 17])
+                peers.append(TrackerPeer(ip: Self.formatIPv6(Data(addrBytes)), port: port))
+                i += 18
+            }
+        }
+
         return TrackerResponse(interval: interval, peers: peers)
+    }
+
+    /// Format 16 raw bytes into a canonical IPv6 string. NWConnection accepts both
+    /// IPv4 and IPv6 host strings, so the rest of the code path is unchanged.
+    static func formatIPv6(_ bytes: Data) -> String {
+        guard bytes.count == 16 else { return "" }
+        var groups: [String] = []
+        for i in stride(from: 0, to: 16, by: 2) {
+            let v = UInt16(bytes[bytes.startIndex + i]) << 8
+                  | UInt16(bytes[bytes.startIndex + i + 1])
+            groups.append(String(format: "%x", v))
+        }
+        return groups.joined(separator: ":")
     }
 }
 

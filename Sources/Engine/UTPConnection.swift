@@ -75,14 +75,18 @@ actor UTPConnection: @preconcurrency AnyPeer {
 
     // MARK: - Congestion / flow control (LEDBAT)
 
-    private static let targetDelay: UInt32 = 100_000    // 100 ms in µs (more aggressive for LAN/fast paths)
-    private static let maxPayload      = 1_350           // MTU-safe payload bytes
-    private static let minCwnd         = maxPayload      // floor
+    private static let targetDelay: UInt32 = 150_000    // 150 ms in µs — looser LEDBAT, doesn't back off on minor jitter
+    // Path MTU: 1450 is safe for the public internet (1500 ethernet − 20 IP − 8 UDP − 20 uTP − ~2 ext).
+    // ~7% throughput gain per packet vs the conservative 1350.
+    private static let maxPayload      = 1_450
+    // Don't collapse below 4 segments — keeps useful throughput even after many losses.
+    private static let minCwnd         = 4 * maxPayload
 
-    private var cwnd: Int = 16 * maxPayload             // congestion window (bytes) — start with 16 segments
+    private var cwnd: Int = 32 * maxPayload             // initial congestion window — 32 segments
     private var remoteWindow: UInt32 = 65_536           // remote's advertised window
     private var baseDelay: UInt32 = .max                // minimum observed one-way delay
-    private var windowSize: UInt32 = 1_048_576          // our advertised recv window (1 MiB)
+    // 8 MiB advertised receive window — supports BDP for ~250 Mbps × 250 ms (transcontinental).
+    private var windowSize: UInt32 = 8 * 1_048_576
 
     // Send queue: data waiting for the congestion window to open
     private var sendQueue = Data()
@@ -100,6 +104,24 @@ actor UTPConnection: @preconcurrency AnyPeer {
     private var extPEX: UInt8?
     private(set) var extMetadata: UInt8?
     private(set) var lastHandshakeReceivedTime: Date = .distantPast
+
+    // MARK: - MSE/PE state (uTP transport)
+    private var mseMode: MSEMode = PeerConnection.defaultMode
+    private var mseCipher: MSECipher?
+    /// Set once MSE is finished (or skipped via `.disabled`). All subsequent payload bytes
+    /// flow through `mseCipher.decrypt` (if any) before reaching `wireBuffer`.
+    private var mseDone: Bool = false
+    /// Holds payload bytes that arrived during the MSE handshake but the handshake task
+    /// hasn't yet pulled via its `MSEStream`.
+    private var mseRecvBuffer = Data()
+    /// Pending continuation when the handshake task is awaiting the next chunk.
+    private var mseRecvWaiter: CheckedContinuation<Data, Error>?
+    /// Guards against double-launch of the inbound MSE responder.
+    private var mseHandshakeStarted: Bool = false
+    /// Set by the engine on inbound uTP — returns all known SKEYs so the responder can
+    /// identify which torrent the peer wants without per-torrent pre-binding.
+    nonisolated(unsafe) var mseKnownInfoHashes: (@Sendable () async -> [Data])?
+    func setMSEMode(_ m: MSEMode) { self.mseMode = m }
 
     // Speed accumulators (raw UDP payload bytes)
     private var dlAccum: Int64 = 0
@@ -223,7 +245,34 @@ actor UTPConnection: @preconcurrency AnyPeer {
     }
 
     private func sendStateAck() {
-        sendRaw(makeHeader(type: 2, seq: seqNr, ack: ackNr, connId: connIdSend))
+        // BEP 29 §3.6 — attach a Selective ACK extension when there are out-of-order
+        // packets buffered. Lets the sender skip already-received packets and only
+        // retransmit the ones we're actually missing.
+        if oobBuffer.isEmpty {
+            sendRaw(makeHeader(type: 2, seq: seqNr, ack: ackNr, connId: connIdSend, ext: 0))
+            return
+        }
+        var pkt = makeHeader(type: 2, seq: seqNr, ack: ackNr, connId: connIdSend, ext: 1)
+        // SACK bitmask covers seqs starting at ack+2 (ack+1 is the gap). Length must be a
+        // multiple of 4 bytes.
+        let base = ackNr &+ 2
+        var maxOffset: Int = -1
+        for seq in oobBuffer.keys {
+            let offset = Int(Int16(bitPattern: seq &- base))
+            if offset >= 0 && offset < 256 { maxOffset = max(maxOffset, offset) }
+        }
+        let bytes = max(4, ((maxOffset / 8) + 1 + 3) & ~3)
+        var bitmask = [UInt8](repeating: 0, count: bytes)
+        for seq in oobBuffer.keys {
+            let offset = Int(Int16(bitPattern: seq &- base))
+            if offset >= 0 && offset < bytes * 8 {
+                bitmask[offset / 8] |= UInt8(1 << (offset % 8))
+            }
+        }
+        pkt.append(0)             // next-extension = 0 (end of chain)
+        pkt.append(UInt8(bytes))  // length
+        pkt.append(contentsOf: bitmask)
+        sendRaw(pkt)
     }
 
     // Appends payload to the send queue, then drains as much as the window allows.
@@ -252,10 +301,10 @@ actor UTPConnection: @preconcurrency AnyPeer {
         }
     }
 
-    private func makeHeader(type: UInt8, seq: UInt16, ack: UInt16, connId: UInt16) -> Data {
+    private func makeHeader(type: UInt8, seq: UInt16, ack: UInt16, connId: UInt16, ext: UInt8 = 0) -> Data {
         var d = Data(capacity: 20)
         d.append((type << 4) | 1)
-        d.append(0)
+        d.append(ext)                   // first-extension type (0 = none, 1 = SACK)
         d.appendUInt16(connId)
         d.appendUInt32(microTimestamp())
         d.appendUInt32(0)               // timestamp_diff (remote fills this)
@@ -289,14 +338,53 @@ actor UTPConnection: @preconcurrency AnyPeer {
     private func handlePacket(_ rawData: Data) async {
         guard rawData.count >= 20 else { return }
 
-        let type   = rawData[0] >> 4
-        let pktTs  = rawData.readUInt32(at: 4)
-        let pktWnd = rawData.readUInt32(at: 12)
-        let seq    = rawData.readUInt16(at: 16)
-        let ack    = rawData.readUInt16(at: 18)
+        let type     = rawData[0] >> 4
+        let firstExt = rawData[1]
+        let pktTs    = rawData.readUInt32(at: 4)
+        let pktWnd   = rawData.readUInt32(at: 12)
+        let seq      = rawData.readUInt16(at: 16)
+        let ack      = rawData.readUInt16(at: 18)
 
         remoteWindow = pktWnd
         lastMessageReceivedTime = .now
+
+        // Walk the BEP 29 extension chain. Find the start of the payload (past any
+        // extensions) and pull out a SACK bitmask if present.
+        var payloadStart = 20
+        var sackBitmask: Data?
+        var nextExt = firstExt
+        var cursor = 20
+        while nextExt != 0 && cursor + 2 <= rawData.count {
+            let extType = nextExt
+            nextExt    = rawData[cursor]
+            let extLen = Int(rawData[cursor + 1])
+            let dataStart = cursor + 2
+            let dataEnd   = dataStart + extLen
+            guard dataEnd <= rawData.count else { break }
+            if extType == 1 { sackBitmask = Data(rawData[dataStart..<dataEnd]) }
+            cursor = dataEnd
+            payloadStart = cursor
+        }
+
+        // SACK: anything bit-set is "received by peer" — drop it from our in-flight map
+        // and the in-flight-bytes counter. Cumulative ACK already handled `<= ack`; SACK
+        // covers seqs at ack+2+bitN.
+        if let mask = sackBitmask {
+            let base = ack &+ 2
+            var sackedBytes = 0
+            for byteIdx in 0..<mask.count {
+                let bits = mask[mask.startIndex + byteIdx]
+                guard bits != 0 else { continue }
+                for bitIdx in 0..<8 where (bits >> bitIdx) & 1 == 1 {
+                    let sackedSeq = base &+ UInt16(byteIdx * 8 + bitIdx)
+                    if let entry = inFlight.removeValue(forKey: sackedSeq) {
+                        sackedBytes += entry.data.count
+                        inFlightBytes -= entry.data.count
+                    }
+                }
+            }
+            if sackedBytes > 0 { drainSendQueue() }
+        }
 
         // LEDBAT: track minimum one-way delay as baseline
         let nowTs = microTimestamp()
@@ -334,6 +422,8 @@ actor UTPConnection: @preconcurrency AnyPeer {
             ackNr = seq
             utpState = .connected
             seqNr = UInt16.random(in: 1...65535)
+            // Reset handshake-idle timer for the inbound side too.
+            lastMessageReceivedTime = .now
             sendStateAck()
             startRetransmit()
 
@@ -341,11 +431,20 @@ actor UTPConnection: @preconcurrency AnyPeer {
             if utpState == .synSent {
                 utpState = .connected
                 ackNr = seq
-                sendBTHandshake()
+                // Reset handshake-idle timer (same fix as TCP path) — the 30s budget for
+                // the peer's BT handshake reply should start when our uTP transport is up,
+                // not at object construction.
+                lastMessageReceivedTime = .now
+                if mseMode == .disabled {
+                    mseDone = true
+                    sendBTHandshake()
+                } else {
+                    startOutboundMSE()
+                }
             }
 
-        case 0: // ST_DATA — payload packet
-            let payload = Data(rawData.dropFirst(20))
+        case 0: // ST_DATA — payload packet (skip past any extension headers)
+            let payload = payloadStart < rawData.count ? Data(rawData[payloadStart...]) : Data()
             guard !payload.isEmpty else { sendStateAck(); break }
             dlAccum += Int64(payload.count)
 
@@ -355,10 +454,10 @@ actor UTPConnection: @preconcurrency AnyPeer {
             if diff == 0 {
                 // In-order: deliver immediately, then pull any buffered successors
                 ackNr = seq
-                wireBuffer.append(payload)
+                deliverPayload(payload)
                 drainOOB()
                 sendStateAck()
-                await processBTBuffer()
+                if mseDone { await processBTBuffer() }
             } else if diff > 0 {
                 // Out-of-order: buffer for later delivery
                 oobBuffer[seq] = payload
@@ -382,8 +481,169 @@ actor UTPConnection: @preconcurrency AnyPeer {
     private func drainOOB() {
         while let payload = oobBuffer.removeValue(forKey: ackNr &+ 1) {
             ackNr = ackNr &+ 1
-            wireBuffer.append(payload)
+            deliverPayload(payload)
         }
+    }
+
+    /// Single chokepoint for inbound reassembled bytes. While MSE is in-progress, bytes
+    /// go to the handshake buffer (or directly to a waiter). Once MSE is done, bytes
+    /// pass through `mseCipher.decrypt` (if any) before reaching `wireBuffer`.
+    private func deliverPayload(_ payload: Data) {
+        guard !payload.isEmpty else { return }
+        if mseDone {
+            let plain = mseCipher?.decrypt(payload) ?? payload
+            wireBuffer.append(plain)
+            return
+        }
+        if let w = mseRecvWaiter {
+            mseRecvWaiter = nil
+            w.resume(returning: payload)
+            return
+        }
+        mseRecvBuffer.append(payload)
+        // First inbound byte arrived — kick off the responder (or commit to plaintext).
+        // Guarded so multiple deliveries before the handshake task starts don't double-launch.
+        if isInbound, !mseHandshakeStarted {
+            mseHandshakeStarted = true
+            Task { [weak self] in await self?.startInboundMSEIfNeeded() }
+        }
+    }
+
+    /// Async pull from the MSE-side receive buffer. Used by the handshake `MSEStream`.
+    private func mseReceiveChunk() async throws -> Data {
+        if !mseRecvBuffer.isEmpty {
+            let chunk = mseRecvBuffer
+            mseRecvBuffer = Data()
+            return chunk
+        }
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+            self.mseRecvWaiter = c
+        }
+    }
+
+    /// Encrypts BT-layer bytes through the cipher (if any) and queues them on uTP.
+    /// All BT-layer sends after MSE setup go through here instead of `sendData`.
+    private func sendBTBytes(_ data: Data) {
+        sendData(mseCipher?.encrypt(data) ?? data)
+    }
+
+    /// Adopts the cipher from a completed outbound MSE handshake. Any decrypted bytes the
+    /// handshake already pulled (peer's BT handshake, etc.) get routed to the BT parser.
+    private func adoptCipherAndResume(cipher: MSECipher?, leftover: Data) async {
+        self.mseCipher = cipher
+        self.mseDone = true
+        self.lastMessageReceivedTime = .now  // reset handshake-idle timer
+        if !leftover.isEmpty { wireBuffer.append(leftover) }
+        await processBTBuffer()
+    }
+
+    private func failMSEHandshake(_ error: Error) async {
+        print("[Canopy] uTP MSE handshake failed (\(host)): \(error.localizedDescription)")
+        await delegate?.peerMSEHandshakeFailed(host: host, port: port)
+        if let w = mseRecvWaiter { mseRecvWaiter = nil; w.resume(throwing: error) }
+        await teardown()
+    }
+
+    private nonisolated func makeMSEStream(prebuffer: Data) -> MSEStream {
+        MSEStream(
+            prebuffer: prebuffer,
+            send: { [weak self] data in
+                guard let self else { throw MSEError.eof }
+                await self._mseSendRaw(data)
+            },
+            receive: { [weak self] in
+                guard let self else { throw MSEError.eof }
+                return try await self.mseReceiveChunk()
+            })
+    }
+
+    /// Raw passthrough used by the MSE handshake — bytes go to the uTP send queue without
+    /// running through `mseCipher` (cipher hasn't been adopted yet, and the MSE wire
+    /// format is not itself BT-frame encrypted).
+    private func _mseSendRaw(_ data: Data) {
+        sendData(data)
+    }
+
+    /// Outbound MSE initiator. We've just transitioned to `.connected` after our SYN was
+    /// ACKed. Run the handshake; on success, install the cipher.
+    private func startOutboundMSE() {
+        let stream = makeMSEStream(prebuffer: Data())
+        let ia = buildBTHandshakeIA()
+        let mode = mseMode
+        let hash = infoHash
+        Task { [weak self] in
+            do {
+                let r = try await withMSETimeout(seconds: MSEConst.handshakeTimeoutSeconds) {
+                    try await MSEInitiator.run(stream: stream, infoHash: hash, ia: ia, mode: mode)
+                }
+                await self?.adoptCipherAndResume(cipher: r.cipher, leftover: r.decryptedLeftover)
+            } catch {
+                await self?.failMSEHandshake(error)
+            }
+        }
+    }
+
+    /// Inbound dispatch — peer sent first byte. If `0x13` it's a plaintext BT handshake;
+    /// otherwise run the MSE responder. Called once per inbound peer.
+    private func startInboundMSEIfNeeded() async {
+        guard !mseDone, isInbound else { return }
+        guard let first = mseRecvBuffer.first else { return }
+        if first == 19 || mseMode == .disabled {
+            // Plaintext path (or MSE rejected by config — just proceed and let the
+            // handshake validation in processBTBuffer fail if it isn't really plaintext).
+            let pre = mseRecvBuffer
+            mseRecvBuffer = Data()
+            mseDone = true
+            wireBuffer.append(pre)
+            await processBTBuffer()
+            return
+        }
+        let knownHashes: [Data] = await (mseKnownInfoHashes?() ?? [])
+        guard !knownHashes.isEmpty else { await teardown(); return }
+
+        let stream = makeMSEStream(prebuffer: mseRecvBuffer)
+        mseRecvBuffer = Data()
+        let mode = mseMode
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let r = try await withMSETimeout(seconds: MSEConst.handshakeTimeoutSeconds) {
+                    try await MSEResponder.run(
+                        stream: stream,
+                        knownInfoHashes: knownHashes,
+                        mode: mode)
+                }
+                guard r.ia.count >= 68,
+                      r.ia[r.ia.startIndex] == 19,
+                      String(data: r.ia[(r.ia.startIndex+1)..<(r.ia.startIndex+20)],
+                             encoding: .utf8) == "BitTorrent protocol",
+                      r.ia[(r.ia.startIndex+28)..<(r.ia.startIndex+48)] == r.infoHash
+                else { await self.teardown(); return }
+                let remoteSupportsExt = (r.ia[r.ia.startIndex+25] & 0x10) != 0
+                if let onInboundHandshake = self.onInboundHandshake {
+                    let bound = await onInboundHandshake(r.infoHash, remoteSupportsExt)
+                    if !bound { await self.teardown(); return }
+                }
+                await self.finishInboundMSE(cipher: r.cipher,
+                                            leftover: r.decryptedLeftover,
+                                            remoteSupportsExt: remoteSupportsExt)
+            } catch {
+                await self.failMSEHandshake(error)
+            }
+        }
+    }
+
+    private func finishInboundMSE(cipher: MSECipher?, leftover: Data, remoteSupportsExt: Bool) async {
+        self.mseCipher = cipher
+        self.mseDone = true
+        self.btHandshakeDone = true
+        self.bitfield = Array(repeating: false, count: totalPieces)
+        self.lastMessageReceivedTime = .now
+        sendBTBytes(buildBTHandshakeIA())
+        sendExtHandshake()
+        sendBTFrame(id: 2, payload: Data())  // INTERESTED
+        await delegate?.peerConnected(self, supportsExtensions: remoteSupportsExt)
+        if !leftover.isEmpty { wireBuffer.append(leftover); await processBTBuffer() }
     }
 
     // MARK: - ACK processing and RTT measurement
@@ -475,17 +735,23 @@ actor UTPConnection: @preconcurrency AnyPeer {
 
     // MARK: - BitTorrent handshake
 
-    private func sendBTHandshake() {
+    /// 68-byte BT handshake — used as IA in MSE step 3 and as the standalone handshake
+    /// in plaintext mode.
+    private func buildBTHandshakeIA() -> Data {
         var hs = Data(capacity: 68)
         hs.append(19)
         hs.append(contentsOf: "BitTorrent protocol".utf8)
         var reserved = [UInt8](repeating: 0, count: 8)
-        reserved[5] |= 0x10  // BEP 10 extension protocol
+        reserved[5] |= 0x10  // BEP 10
         reserved[7] |= 0x01  // DHT
         hs.append(contentsOf: reserved)
         hs.append(infoHash)
         hs.append(peerId)
-        sendData(hs)
+        return hs
+    }
+
+    private func sendBTHandshake() {
+        sendBTBytes(buildBTHandshakeIA())
         sendBTFrame(id: 2, payload: Data()) // INTERESTED
     }
 
@@ -599,7 +865,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
         guard !nagleBuffer.isEmpty else { return }
         let buf = nagleBuffer
         nagleBuffer = Data()
-        sendData(buf)
+        sendBTBytes(buf)
     }
 
     // MARK: - AnyPeer outbound BT messages
@@ -649,7 +915,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
             combined.appendUInt32(UInt32(r.offset))
             combined.appendUInt32(UInt32(r.length))
         }
-        sendData(combined)
+        sendBTBytes(combined)
     }
 
     nonisolated func sendPiece(index: Int, begin: Int, block: Data) {
@@ -694,7 +960,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
         guard utpState == .connected,
               Date.now.timeIntervalSince(lastMessageReceivedTime) > 100 else { return }
         flushNagle()
-        sendData(Data([0, 0, 0, 0]))
+        sendBTBytes(Data([0, 0, 0, 0]))
     }
 
     nonisolated func updateStats() { Task { [weak self] in await self?._updateStats() } }
@@ -718,7 +984,7 @@ actor UTPConnection: @preconcurrency AnyPeer {
         frame.append(payload)
         if frame.count > Self.maxPayload {
             flushNagle()
-            sendData(frame)
+            sendBTBytes(frame)
         } else {
             enqueueBT(frame)
         }

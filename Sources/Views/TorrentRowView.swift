@@ -24,8 +24,9 @@ struct TorrentRowView: View {
                 .tint(progressTint)
 
             HStack(spacing: 12) {
-                let downloadedSize = Int64(torrent.progress * Double(torrent.totalSize))
-                Text("\(formatSize(downloadedSize)) of \(formatSize(torrent.totalSize))")
+                // Show progress against *selected* size, not the full torrent — matches
+                // what the user actually opted to download.
+                Text("\(formatSize(torrent.bytesReceived)) of \(formatSize(torrent.selectedSize))")
                     .foregroundStyle(.secondary)
                 if torrent.downloadSpeed > 0 {
                     Text("↓ \(formatSpeed(torrent.downloadSpeed))")

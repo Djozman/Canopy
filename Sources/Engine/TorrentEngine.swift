@@ -18,20 +18,44 @@ final class TorrentEngine {
     }
 
     init() {
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-        let dir = downloads.appendingPathComponent("Canopy")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        saveDirectory = dir
+        // Default save dir is the user's Downloads folder directly — no auto-created
+        // "Canopy" subfolder. Each multi-file torrent already creates its own subfolder
+        // under the save dir; single-file torrents land at the top level.
+        saveDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
 
         if let saved = UserDefaults.standard.string(forKey: "canopy.saveDir"),
            let url = URL(string: saved) {
             saveDirectory = url
         }
 
+        // Restore persisted MSE mode. Defaults to `.enabled` (prefer encryption with
+        // plaintext fallback). Set to `.disabled` for plaintext-only or `.forced`
+        // for encrypted-only.
+        if let raw = UserDefaults.standard.string(forKey: "canopy.mseMode"),
+           let mode = MSEMode(rawValue: raw) {
+            PeerConnection.defaultMode = mode
+        } else {
+            PeerConnection.defaultMode = .enabled
+        }
+
+        // In-memory MSE round-trip — catches regressions in DH / RC4 / VC sync / IA.
+        Task { _ = await MSESelfTest.run() }
+
         Task { await DHT.shared.start() }
+        Task { await LocalPeerDiscovery.shared.start(localPort: 6881) }
         loadPersistedTorrents()
         startListener()
         Task { await PortForwarder(port: 6881).start() }
+    }
+
+    /// Settings binding — read/write `PeerConnection.defaultMode` and persist to
+    /// UserDefaults so the next launch restores the user's choice.
+    var mseMode: MSEMode {
+        get { PeerConnection.defaultMode }
+        set {
+            PeerConnection.defaultMode = newValue
+            UserDefaults.standard.set(newValue.rawValue, forKey: "canopy.mseMode")
+        }
     }
 
     private var udpListener: NWListener?
@@ -39,7 +63,14 @@ final class TorrentEngine {
     private func startListener() {
         guard let port = NWEndpoint.Port(rawValue: 6881) else { return }
         do {
-            listener = try NWListener(using: .tcp, on: port)
+            // Inbound TCP gets the same noDelay + keepalive tuning as outbound.
+            let tcpParams = NWParameters.tcp
+            if let tcp = tcpParams.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+                tcp.noDelay = true
+                tcp.enableKeepalive = true
+                tcp.keepaliveIdle = 30
+            }
+            listener = try NWListener(using: tcpParams, on: port)
             listener?.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor [weak self] in
                     self?.handleInboundConnection(connection)
@@ -64,27 +95,80 @@ final class TorrentEngine {
 
     private func handleInboundConnection(_ connection: NWConnection) {
         connection.start(queue: .global())
-        connection.receive(minimumIncompleteLength: 68, maximumLength: 68) { [weak self] data, _, _, error in
-            guard let self = self, let data = data, data.count == 68, error == nil else {
-                connection.cancel()
-                return
+        // Peek 1 byte: `0x13` → plaintext BT (`19 BitTorrent protocol...`); anything else
+        // → MSE responder (peer's first 96 bytes are their DH public key, never `19`).
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] firstData, _, _, error in
+            guard let self = self, let firstData = firstData, !firstData.isEmpty, error == nil else {
+                connection.cancel(); return
             }
-
-            guard data[0] == 19,
-                  String(data: data[1..<20], encoding: .utf8) == "BitTorrent protocol" else {
+            if firstData[firstData.startIndex] == 19 {
+                self.handleInboundPlaintext(connection, firstByte: firstData)
+            } else if PeerConnection.defaultMode == .disabled {
+                // MSE rejected by config — drop the peer.
                 connection.cancel()
-                return
+            } else {
+                self.handleInboundMSE(connection, firstByte: firstData)
             }
+        }
+    }
 
-            let remoteSupportsExt = (data[25] & 0x10) != 0
-            let infoHash = data[28..<48]
-
+    private func handleInboundPlaintext(_ connection: NWConnection, firstByte: Data) {
+        connection.receive(minimumIncompleteLength: 67, maximumLength: 67) { [weak self] data, _, _, error in
+            guard let self = self, let data = data, data.count == 67, error == nil else {
+                connection.cancel(); return
+            }
+            var full = firstByte
+            full.append(data)
+            guard String(data: full[1..<20], encoding: .utf8) == "BitTorrent protocol" else {
+                connection.cancel(); return
+            }
+            let remoteSupportsExt = (full[25] & 0x10) != 0
+            let infoHash = full[28..<48]
             Task { @MainActor in
                 if let handle = self.torrents.first(where: { $0.meta.infoHash == infoHash }) {
                     await handle.acceptInbound(connection, remoteSupportsExt: remoteSupportsExt)
                 } else {
                     connection.cancel()
                 }
+            }
+        }
+    }
+
+    private func handleInboundMSE(_ connection: NWConnection, firstByte: Data) {
+        let knownHashes: [Data] = self.torrents.map { $0.meta.infoHash }
+        let stream = MSEStream(connection: connection, prebuffer: firstByte)
+        Task.detached {
+            do {
+                let result = try await withMSETimeout(seconds: MSEConst.handshakeTimeoutSeconds) {
+                    try await MSEResponder.run(
+                        stream: stream,
+                        knownInfoHashes: knownHashes,
+                        mode: PeerConnection.defaultMode)
+                }
+                guard result.ia.count >= 68,
+                      result.ia[result.ia.startIndex] == 19,
+                      String(data: result.ia[(result.ia.startIndex+1)..<(result.ia.startIndex+20)],
+                             encoding: .utf8) == "BitTorrent protocol",
+                      result.ia[(result.ia.startIndex+28)..<(result.ia.startIndex+48)] == result.infoHash
+                else { connection.cancel(); return }
+                let remoteSupportsExt = (result.ia[result.ia.startIndex+25] & 0x10) != 0
+
+                await MainActor.run { [weak self] in
+                    guard let self else { connection.cancel(); return }
+                    if let handle = self.torrents.first(where: { $0.meta.infoHash == result.infoHash }) {
+                        Task {
+                            await handle.acceptInboundMSE(connection: connection,
+                                                          cipher: result.cipher,
+                                                          decryptedLeftover: result.decryptedLeftover,
+                                                          remoteSupportsExt: remoteSupportsExt)
+                        }
+                    } else {
+                        connection.cancel()
+                    }
+                }
+            } catch {
+                print("[Canopy] Inbound MSE handshake failed: \(error.localizedDescription)")
+                connection.cancel()
             }
         }
     }
@@ -102,6 +186,11 @@ final class TorrentEngine {
                 }
                 return false
             }
+        }
+        // Snapshot of known SKEYs so the uTP MSE responder can identify the peer's torrent.
+        utp.mseKnownInfoHashes = { [weak self] in
+            guard let self else { return [] }
+            return await MainActor.run { self.torrents.map { $0.meta.infoHash } }
         }
         pendingUTPConnections.append(utp)
         Task { await utp.connect() }
@@ -202,6 +291,9 @@ final class TorrentEngine {
     }
 
     func remove(_ handle: TorrentHandle, deleteFiles: Bool = false) {
+        // Stop the torrent first
+        handle.stop()
+
         torrents.removeAll { $0.id == handle.id }
 
         Task {

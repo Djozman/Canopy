@@ -39,7 +39,7 @@ struct TorrentDetailView: View {
                 Text(torrent.stateLabel)
                     .font(.headline)
                     .foregroundStyle(stateColor)
-                Text("\(formatSize(Int64(torrent.progress * Double(torrent.totalSize)))) / \(formatSize(torrent.totalSize))")
+                Text("\(formatSize(torrent.bytesReceived)) / \(formatSize(torrent.selectedSize))")
                     .font(.subheadline)
             }
         }
@@ -50,24 +50,56 @@ struct TorrentDetailView: View {
     private var fileList: some View {
         List {
             ForEach(torrent.meta.files.indices, id: \.self) { index in
-                let file = torrent.meta.files[index]
-                HStack {
-                    Toggle("", isOn: Binding(
-                        get: { torrent.fileSelections[index] },
-                        set: { torrent.updateFileSelection(at: index, selected: $0) }
-                    ))
-                    .toggleStyle(.checkbox)
-                    
-                    VStack(alignment: .leading) {
-                        Text(file.path.joined(separator: "/"))
-                            .lineLimit(1)
-                        Text(formatSize(file.length))
-                            .font(.caption)
+                fileRow(at: index)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileRow(at index: Int) -> some View {
+        let file = torrent.meta.files[index]
+        let selected = index < torrent.fileSelections.count && torrent.fileSelections[index]
+        let progress = index < torrent.fileProgresses.count ? torrent.fileProgresses[index] : 0
+        HStack(spacing: 10) {
+            Toggle("", isOn: Binding(
+                get: { selected },
+                set: { torrent.updateFileSelection(at: index, selected: $0) }
+            ))
+            .toggleStyle(.checkbox)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(file.path.joined(separator: "/"))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(selected ? .primary : .secondary)
+                    Spacer()
+                    if selected {
+                        Text("\(Int(progress * 100))%")
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                    } else {
+                        Text("Skipped")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
+                    Text(formatSize(file.length))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 70, alignment: .trailing)
+                }
+                // Only show the progress bar for selected files. For deselected files
+                // the value is always 0 and would just be a flat empty bar — cleaner
+                // to omit it so adjacent rows don't visually look "kinda downloaded".
+                if selected {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(progress >= 1 ? .green : .blue)
                 }
             }
         }
+        .padding(.vertical, 2)
     }
     
     private var pieceMap: some View {
