@@ -29,8 +29,8 @@ actor Choker {
 
         let interested         = stats.filter { $0.interested }
         let unchokeCandidates  = interested.filter { !$0.snubbed }
-        // Unchoke top 8 (was 4) — more parallel upload slots, more tit-for-tat reciprocity.
-        let top4ids            = Set(unchokeCandidates.sorted { $0.speed > $1.speed }.prefix(8).map { $0.id })
+        // Unchoke top 8 uploaders + 2 extra for seeds we want to download from
+        let top4ids            = Set(unchokeCandidates.sorted { $0.speed > $1.speed }.prefix(10).map { $0.id })
 
         // Rotate optimistic unchoke every 30 s, if the previous opt peer closed, or all are snubbed
         var rotate = now.timeIntervalSince(lastRotation) >= 30 || optimisticId == nil
