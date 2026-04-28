@@ -230,6 +230,7 @@ final class TorrentEngine {
                                                     name: magnet.name ?? "Unknown",
                                                     trackers: magnet.trackers)
                 let handle = TorrentHandle(meta: magnetMeta, saveDir: saveDirectory,
+                                           fileSelections: fileSel,
                                            persistCallback: makePersistCallback(hashStr: hashStr))
                 torrents.append(handle)
                 handle.start()

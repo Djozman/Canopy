@@ -122,6 +122,14 @@ final class TorrentHandle: Identifiable {
         guard index < fileSelections.count else { return }
         fileSelections[index] = selected
         needsFileSelection = false
+
+        // Save after each toggle
+        let hashStr = meta.infoHash.map { String(format: "%02x", $0) }.joined()
+        let key = "canopy.torrent.\(hashStr).fileSelections"
+        if let data = try? JSONEncoder().encode(fileSelections) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+
         let skipped = Set(meta.files.indices.filter { !fileSelections[$0] })
         Task { await engine?.updateSkippedFiles(skipped) }
     }
@@ -130,6 +138,14 @@ final class TorrentHandle: Identifiable {
     /// the engine's gate so piece data starts flowing.
     func fileSelectionCompleted() {
         needsFileSelection = false
+
+        // Save file selections BEFORE starting download
+        let hashStr = meta.infoHash.map { String(format: "%02x", $0) }.joined()
+        let key = "canopy.torrent.\(hashStr).fileSelections"
+        if let data = try? JSONEncoder().encode(fileSelections) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+
         let skipped = Set(meta.files.indices.filter { !fileSelections[$0] })
         Task { [weak engine] in
             await engine?.updateSkippedFiles(skipped)
