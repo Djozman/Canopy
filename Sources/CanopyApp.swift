@@ -1,5 +1,9 @@
 import SwiftUI
 
+extension Notification.Name {
+    static let magnetWindowWillAppear = Notification.Name("magnetWindowWillAppear")
+}
+
 @main
 struct CanopyApp: App {
     @State private var engine = TorrentEngine()
@@ -24,7 +28,11 @@ struct CanopyApp: App {
         // Separate small window for pasting a magnet URI; resizes itself larger when the
         // flow advances to the file-selection phase.
         Window("Add Magnet Link", id: "add-magnet") {
-            MagnetView().environment(engine)
+            MagnetView()
+                .environment(engine)
+                .onAppear {
+                    NotificationCenter.default.post(name: .magnetWindowWillAppear, object: nil)
+                }
         }
         .defaultSize(width: 520, height: 360)
         .windowResizability(.contentSize)

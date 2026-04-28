@@ -239,6 +239,16 @@ struct MagnetView: View {
             case .error:    errorView
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .magnetWindowWillAppear)) { _ in
+            phase = .input
+            magnetText = ""
+            errorText = nil
+            torrentId = nil
+            torrentIsNew = false
+            resolvingTask?.cancel()
+            resolvingTask = nil
+            saveDir = nil
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)   // fills the window
         .background(Color(NSColor.windowBackgroundColor))
         .onDisappear { resolvingTask?.cancel() }

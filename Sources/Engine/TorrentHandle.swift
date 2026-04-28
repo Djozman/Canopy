@@ -280,7 +280,15 @@ actor TorrentEngine_: PeerDelegate {
         self.persistCallback = persistCallback
 
         if !meta.pieces.isEmpty {
-            self.store = try? PieceStore(meta: meta, saveDir: saveDir, skippedFiles: skippedFiles)
+            do {
+                self.store = try PieceStore(meta: meta, saveDir: saveDir, skippedFiles: skippedFiles)
+            } catch {
+                print("[Canopy] Failed to create PieceStore for \(meta.name): \(error.localizedDescription)")
+                let h = self.handle
+                Task { @MainActor in
+                    h?.setError("Failed to initialize storage: \(error.localizedDescription)")
+                }
+            }
             self.pieceCounts = Array(repeating: 0, count: meta.pieces.count)
         }
     }
