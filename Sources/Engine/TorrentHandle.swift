@@ -280,6 +280,7 @@ actor TorrentEngine_: PeerDelegate {
         self.persistCallback = persistCallback
 
         if !meta.pieces.isEmpty {
+            try? FileManager.default.createDirectory(at: saveDir, withIntermediateDirectories: true)
             do {
                 self.store = try PieceStore(meta: meta, saveDir: saveDir, skippedFiles: skippedFiles)
             } catch {
