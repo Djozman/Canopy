@@ -183,6 +183,10 @@ struct MagnetView: View {
     @State private var magnetText = ""
     @State private var errorText: String?
     @State private var torrentId: UUID?
+    /// true only when addMagnet() added a brand-new entry to the engine.
+    /// false when the magnet matched an already-existing torrent.
+    /// cancelMagnet() only calls engine.remove() when this is true.
+    @State private var torrentIsNew = false
     @State private var resolvingTask: Task<Void, Never>?
     @State private var saveDir: URL?    // chosen save location for this magnet
 
@@ -357,8 +361,14 @@ struct MagnetView: View {
     private func addMagnet() {
         let uri = magnetText.trimmingCharacters(in: .whitespaces)
         do {
+            // Snapshot count before adding so we can tell if a new entry was created.
+            let countBefore = engine.torrents.count
             let id = try engine.addMagnet(uri)
             torrentId = id
+            // engine.addMagnet returns the existing ID when the torrent is already present.
+            // Only mark as new (and therefore eligible for removal on cancel) when the
+            // engine actually appended a fresh TorrentHandle.
+            torrentIsNew = engine.torrents.count > countBefore
             phase = .resolving
             // Watch the torrent until its metadata resolves (meta.pieces becomes non-empty
             // and meta.files.count is known). Then transition to the file picker.
@@ -394,9 +404,9 @@ struct MagnetView: View {
 
     private func cancelMagnet() {
         resolvingTask?.cancel()
-        // Only remove the torrent if we're still resolving metadata.
-        // If we're in .selecting, the torrent is already live — just close the window.
-        if phase == .resolving,
+        // Only remove the torrent if this view created it. If addMagnet() returned an
+        // already-existing torrent's ID (duplicate magnet), we must NOT remove it.
+        if torrentIsNew,
            let id = torrentId,
            let torrent = engine.torrents.first(where: { $0.id == id }) {
             engine.remove(torrent)
