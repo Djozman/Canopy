@@ -16,7 +16,7 @@ actor Choker {
         var stats: [S] = []
         for peer in peers {
             let lastBlock = await peer.lastBlockReceivedTime
-            let snubbed   = !isSeeding && now.timeIntervalSince(lastBlock) > 60
+            let snubbed   = !isSeeding && now.timeIntervalSince(lastBlock) > 30
             stats.append(S(
                 peer:       peer,
                 id:         ObjectIdentifier(peer),

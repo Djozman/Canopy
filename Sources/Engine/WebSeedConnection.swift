@@ -83,28 +83,19 @@ actor WebSeedConnection: @preconcurrency AnyPeer {
 
     private func fetchPieces(_ requests: [(piece: Int, offset: Int, length: Int)]) async {
         webSeedState = .fetching
+        guard let delegate else { webSeedState = .active; return }
 
         var totalBytes: Int64 = 0
         let startTime = Date()
 
         for req in requests {
-            guard let delegate else { continue }
-
             let fileOffset = Int64(req.piece) * Int64(pieceLength) + Int64(req.offset)
 
             do {
-                let data = try await fetchBytes(
-                    fileOffset: fileOffset,
-                    length: req.length
-                )
+                let data = try await fetchBytes(fileOffset: fileOffset, length: req.length)
+                guard data.count == req.length else { continue }
 
-                await delegate.peerSentBlock(
-                    self,
-                    piece: req.piece,
-                    offset: req.offset,
-                    data: data
-                )
-
+                await delegate.peerSentBlock(self, piece: req.piece, offset: req.offset, data: data)
                 totalBytes += Int64(data.count)
             } catch {
                 break

@@ -4,7 +4,7 @@ import CryptoKit
 // Manages on-disk file layout and piece verification.
 // Block = 16 KiB sub-unit of a piece (standard BitTorrent block size).
 actor PieceStore {
-    static let blockSize = 16_384  // 16 KiB
+    static let blockSize = 32_768  // 32 KiB
 
     private let meta: Metainfo
     private let saveDir: URL
