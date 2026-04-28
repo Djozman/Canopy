@@ -54,7 +54,7 @@ let infoPlist = """
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3.2</string>
+    <string>1.4.0</string>
     <key>CFBundleExecutable</key>
     <string>Canopy</string>
     <key>CFBundlePackageType</key>
