@@ -248,6 +248,10 @@ actor TorrentEngine_: PeerDelegate {
     static let maxPeers = 500
     static let port: UInt16 = 6881
     static let pipeline = 500
+    /// Per-peer in-flight cap. Prevents a single slow peer from monopolising the global
+    /// pipeline budget — fast peers always get slots even if a stalled peer hasn't been
+    /// cleared yet.
+    static let peerPipeline = 100
     // Enter endgame at 50 pieces remaining (was 20). In endgame the same block is
     // requested from multiple peers; whoever delivers first wins, the rest get CANCEL.
     // Earlier entry = fewer trailing-tail stalls on the last 1–2% of a torrent.
@@ -259,6 +263,11 @@ actor TorrentEngine_: PeerDelegate {
     private var rarityDirty = true
     private var trackerStatus = ""
     private var didSendCompleted = false
+
+    /// Incremental rarity counter — pieceCounts[i] = number of connected peers that
+    /// have piece i. Updated on HAVE / bitfield events instead of recomputing from
+    /// scratch every tick, eliminating the O(peers × pieces) refresh loop.
+    private var pieceCounts: [Int] = []
 
     init(meta: Metainfo, saveDir: URL, skippedFiles: Set<Int>, handle: TorrentHandle,
          persistCallback: ((Data, Metainfo) -> Void)? = nil) {
@@ -272,6 +281,7 @@ actor TorrentEngine_: PeerDelegate {
 
         if !meta.pieces.isEmpty {
             self.store = try? PieceStore(meta: meta, saveDir: saveDir, skippedFiles: skippedFiles)
+            self.pieceCounts = Array(repeating: 0, count: meta.pieces.count)
         }
     }
 
@@ -429,6 +439,7 @@ actor TorrentEngine_: PeerDelegate {
         meta = newMeta
         rawMetadata = rawInfo
         metadataPieces.removeAll()
+        pieceCounts = Array(repeating: 0, count: newMeta.pieces.count)
 
         // Defer creating the PieceStore (which lays files on disk) until the user picks
         // which files to keep. Single-file torrents have nothing to choose, so they
@@ -555,14 +566,14 @@ actor TorrentEngine_: PeerDelegate {
 
     private func updateTrackerStatus(added: Int) { trackerStatus = "Tracker: \(added) peers found" }
 
-    /// Mix of outbound transports: 0,1,2 → TCP, 3 → uTP. ~75% TCP / 25% uTP — most
-    /// peers go over TCP for raw throughput, but we still dial uTP on some so peers
-    /// behind TCP-blocking firewalls / corporate NATs are reachable.
+    /// Mix of outbound transports: 50% TCP / 50% uTP. uTP uses LEDBAT congestion control
+    /// which fills idle bandwidth more aggressively without triggering TCP backoff on fast
+    /// connections. Peers behind TCP-blocking firewalls are also reachable via uTP.
     private var transportTick: Int = 0
 
     private func makeConnection(host: String, port: UInt16, totalPieces: Int) -> any AnyPeer {
         transportTick &+= 1
-        if (transportTick % 4) == 0 {
+        if (transportTick % 2) == 0 {
             return UTPConnection(host: host, port: port,
                                  infoHash: meta.infoHash, peerId: peerId,
                                  totalPieces: totalPieces, isPrivate: meta.isPrivate)
@@ -645,12 +656,14 @@ actor TorrentEngine_: PeerDelegate {
         let missing = await store?.wantedPieces() ?? []
         guard !missing.isEmpty else { cachedRarityOrder = []; return }
         if missing.count <= Self.endgameThreshold { cachedRarityOrder = missing; return }
-        var counts = [Int: Int]()
-        for p in peers {
-            let bf = await p.bitfield
-            for idx in missing where idx < bf.count && bf[idx] { counts[idx, default: 0] += 1 }
+        // Use the incrementally-maintained pieceCounts array — no actor hops, no
+        // O(peers × pieces) loop. Counts are kept current by peerSentBitfield /
+        // peerSentHave / peerDidDisconnect.
+        cachedRarityOrder = missing.sorted {
+            let a = $0 < pieceCounts.count ? pieceCounts[$0] : 0
+            let b = $1 < pieceCounts.count ? pieceCounts[$1] : 0
+            return a < b
         }
-        cachedRarityOrder = missing.sorted { (counts[$0] ?? 0) < (counts[$1] ?? 0) }
     }
 
     private func scheduleRequests(for peer: any AnyPeer) async {
@@ -661,14 +674,48 @@ actor TorrentEngine_: PeerDelegate {
         if rarityDirty { await refreshRarityOrder(); rarityDirty = false }
         guard await !peer.isClosed, await !peer.peerChoking else { return }
         let pid = ObjectIdentifier(peer)
-        let slotsLeft = Self.pipeline - (peerInFlight[pid]?.count ?? 0)
+        let perPeerUsed = peerInFlight[pid]?.count ?? 0
+        // Enforce both a per-peer cap (peerPipeline) and the global cap (pipeline) so
+        // one slow/stalled peer cannot monopolise the entire in-flight budget.
+        let slotsLeft = min(
+            Self.peerPipeline - perPeerUsed,
+            Self.pipeline - globalInFlight.count
+        )
         guard slotsLeft > 0, !cachedRarityOrder.isEmpty else { return }
         let isEndgame = cachedRarityOrder.count <= Self.endgameThreshold
         let peerBitfield = await peer.bitfield
         guard !peerBitfield.isEmpty else { return }
+
+        if isEndgame {
+            // True endgame: flood every unchoked peer with every missing block so the
+            // last pieces finish as fast as possible. The first delivery wins; the rest
+            // receive CANCEL messages in peerSentBlock.
+            for p in peers {
+                guard await !p.isClosed, await !p.peerChoking else { continue }
+                let epid = ObjectIdentifier(p)
+                let epUsed = peerInFlight[epid]?.count ?? 0
+                let epSlots = min(Self.peerPipeline - epUsed, Self.pipeline - globalInFlight.count)
+                guard epSlots > 0 else { continue }
+                let epBitfield = await p.bitfield
+                guard !epBitfield.isEmpty else { continue }
+                let blocks = await store.blocksToRequest(
+                    orderedPieces: cachedRarityOrder, peerBitfield: epBitfield,
+                    excluding: [], endgame: true, maxBlocks: epSlots)
+                guard !blocks.isEmpty else { continue }
+                var myInFlight = peerInFlight[epid] ?? []
+                for b in blocks {
+                    let key = PieceStore.inFlightKey(piece: b.piece, blockIndex: b.offset / PieceStore.blockSize)
+                    myInFlight.insert(key); globalInFlight.insert(key)
+                }
+                peerInFlight[epid] = myInFlight
+                await p.requestBlocks(blocks)
+            }
+            return
+        }
+
         let blocks = await store.blocksToRequest(
             orderedPieces: cachedRarityOrder, peerBitfield: peerBitfield,
-            excluding: globalInFlight, endgame: isEndgame, maxBlocks: slotsLeft)
+            excluding: globalInFlight, endgame: false, maxBlocks: slotsLeft)
         guard !blocks.isEmpty else { return }
         var myInFlight = peerInFlight[pid] ?? []
         for b in blocks {
@@ -698,6 +745,11 @@ actor TorrentEngine_: PeerDelegate {
     func peerDidDisconnect(_ peer: any AnyPeer) async {
         let key = "\(peer.host):\(peer.port)"
         let pid = ObjectIdentifier(peer)
+        // Decrement pieceCounts for every piece this peer held
+        let bf = await peer.bitfield
+        for (i, has) in bf.enumerated() where has && i < pieceCounts.count {
+            pieceCounts[i] = max(0, pieceCounts[i] - 1)
+        }
         peers.removeAll { ObjectIdentifier($0) == pid }
         clearInFlight(for: peer)
         pexDropped.append((peer.host, peer.port))
@@ -725,7 +777,11 @@ actor TorrentEngine_: PeerDelegate {
 
     func peerSentBitfield(_ peer: any AnyPeer) async {
         rarityDirty = true
-        let isPeerSeed = await peer.bitfield.allSatisfy { $0 }
+        let bf = await peer.bitfield
+        // Populate incremental rarity counters from the full bitfield
+        if pieceCounts.isEmpty && !bf.isEmpty { pieceCounts = Array(repeating: 0, count: bf.count) }
+        for (i, has) in bf.enumerated() where has && i < pieceCounts.count { pieceCounts[i] += 1 }
+        let isPeerSeed = bf.allSatisfy { $0 }
         let amISeed = await (store?.progress ?? 0) >= 1.0
         if isPeerSeed && amISeed {
             clearInFlight(for: peer)
@@ -735,7 +791,13 @@ actor TorrentEngine_: PeerDelegate {
         await scheduleRequests(for: peer)
     }
 
-    func peerSentHave(_ peer: any AnyPeer) async { rarityDirty = true; await scheduleRequests(for: peer) }
+    func peerSentHave(_ peer: any AnyPeer) async {
+        rarityDirty = true
+        // Bump the count for the newly announced piece
+        let bf = await peer.bitfield
+        if let idx = bf.lastIndex(of: true), idx < pieceCounts.count { pieceCounts[idx] += 1 }
+        await scheduleRequests(for: peer)
+    }
 
     func peerSentBlock(_ peer: any AnyPeer, piece: Int, offset: Int, data: Data) async {
         guard let store else { return }
@@ -748,6 +810,8 @@ actor TorrentEngine_: PeerDelegate {
             try await store.receiveBlock(piece: piece, offset: offset, data: data)
             if await store.hasPiece(piece) {
                 rarityDirty = true
+                // Decrement rarity counter — piece is now complete, no longer wanted
+                if piece < pieceCounts.count { pieceCounts[piece] = 0 }
                 let missing = await store.missingPieces()
                 let isEndgame = missing.count <= Self.endgameThreshold
                 let pieceHigh = UInt64(piece)
@@ -791,9 +855,9 @@ actor TorrentEngine_: PeerDelegate {
         guard metadataTotalSize == 0 || metadataTotalSize == totalSize else { return }
         metadataTotalSize = totalSize
         let pieceSize = min(16384, totalSize - (piece * 16384))
-        guard data.count >= pieceSize else { 
+        guard data.count >= pieceSize else {
             print("[Canopy] BEP9: received truncated piece \(piece) (\(data.count) < \(pieceSize))")
-            return 
+            return
         }
         metadataPieces[piece] = data.prefix(pieceSize)
         print("[Canopy] BEP9: received piece \(piece)/\( (totalSize + 16383) / 16384 ) from \(peer.host)")
@@ -890,9 +954,10 @@ actor TorrentEngine_: PeerDelegate {
                         await peer.disconnect()
                         continue
                     }
-                    // If a peer has stopped delivering blocks for 2 s, free their in-flight slots
-                    // so other peers can claim them. Mark as stalled so we schedule them last.
-                    if now.timeIntervalSince(await peer.lastBlockReceivedTime) > 2 {
+                    // If a peer has stopped delivering blocks for 0.5 s, free their in-flight
+                    // slots so other peers can claim them immediately. Mark as stalled so we
+                    // schedule them last in Pass 2.
+                    if now.timeIntervalSince(await peer.lastBlockReceivedTime) > 0.5 {
                         if !(peerInFlight[pid]?.isEmpty ?? true) {
                             clearInFlight(for: peer)
                             stalledPids.insert(pid)
@@ -921,13 +986,16 @@ actor TorrentEngine_: PeerDelegate {
                     await requestMetadataPieces()
                 }
 
-                // Periodic DHT — run for ALL non-private torrents while we need more peers,
-                // not just in magnet mode.
-                if !meta.isPrivate && (isMagnetMode || peers.count < 30) &&
-                   now.timeIntervalSince(lastDHTQuery) >= 30 {
-                    lastDHTQuery = now
-                    Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
-                    Task { await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881) }
+                // Periodic DHT — adaptive interval: query every 8 s when starved for peers
+                // (< 10 connected), otherwise every 30 s. Runs for all non-private torrents
+                // while we still need more peers, not just in magnet mode.
+                if !meta.isPrivate && (isMagnetMode || peers.count < 30) {
+                    let dhtInterval: TimeInterval = peers.count < 10 ? 8 : 30
+                    if now.timeIntervalSince(lastDHTQuery) >= dhtInterval {
+                        lastDHTQuery = now
+                        Task { await DHT.shared.findPeers(infoHash: meta.infoHash) }
+                        Task { await DHT.shared.announcePeer(infoHash: meta.infoHash, port: 6881) }
+                    }
                 }
 
                 let isSeeding = await (store?.progress ?? 0) >= 1.0
@@ -947,7 +1015,7 @@ actor TorrentEngine_: PeerDelegate {
             displayUlSpeed = Int64(Double(speedUlAccum) / elapsed)
             speedDlAccum = 0; speedUlAccum = 0; lastSpeedSample = now
         }
-        
+
         let dlSpeed = displayDlSpeed
         let ulSpeed = displayUlSpeed
         // Effective progress against *selected* size, not total. With 3GB selected of a
@@ -966,14 +1034,47 @@ actor TorrentEngine_: PeerDelegate {
                 fileProgresses[i] = await s.fileProgress(i)
             }
         }
-        
+
+        // Batch all per-peer reads into a single snapshot struct per peer to minimise
+        // actor hops — one hop per peer instead of 7+.
+        struct PeerSnap {
+            var bitfield: [Bool]
+            var pState: String
+            var dl: Int64
+            var ul: Int64
+            var choking: Bool
+            var amChoke: Bool
+            var hasExt: Bool
+            var handshaked: Bool
+        }
+        var snapshots: [TorrentHandle.PeerInfo] = []
         var seedCount = 0
-        for p in peers { 
-            let bf = await p.bitfield
-            if !bf.isEmpty && bf.allSatisfy({ $0 }) { seedCount += 1 } 
+        var hCountVal = 0
+        for p in peers {
+            let bf      = await p.bitfield
+            let pState  = await p.state
+            let dl      = await p.downloadSpeed
+            let ul      = await p.uploadSpeed
+            let choking = await p.peerChoking
+            let amChoke = await p.amChoking
+            let hasExt  = await p.extMetadata != nil
+            let hs      = await p.lastHandshakeReceivedTime != .distantPast
+            if hs { hCountVal += 1 }
+            let isSeed = !bf.isEmpty && bf.allSatisfy { $0 }
+            if isSeed { seedCount += 1 }
+            snapshots.append(TorrentHandle.PeerInfo(
+                host: p.host, port: p.port,
+                transport: p.transportName,
+                state: pState.rawValue,
+                dlSpeed: dl, ulSpeed: ul,
+                piecesHeld: bf.filter { $0 }.count,
+                totalPieces: bf.count,
+                peerChoking: choking, amChoking: amChoke,
+                hasExtension: hasExt
+            ))
         }
         let pCount = peers.count - seedCount
-        
+
         let newState: TorrentHandle.TorrentState
         if isMagnetMode            { newState = .metadata }
         else if progressValue >= 1 { newState = .seeding }
@@ -999,12 +1100,6 @@ actor TorrentEngine_: PeerDelegate {
         let left = max(0, meta.totalSize - Int64(done) * Int64(meta.pieceLength))
         let eta = dlSpeed > 0 ? Int(left / max(dlSpeed, 1)) : 0
         let retryInfo = retryQueue.isEmpty ? "" : " (\(retryQueue.count) retrying)"
-        
-        let hCountVal = await {
-            var count = 0
-            for p in peers { if await p.lastHandshakeReceivedTime != .distantPast { count += 1 } }
-            return count
-        }()
 
         let status: String
         if isMagnetMode {
@@ -1018,7 +1113,7 @@ actor TorrentEngine_: PeerDelegate {
         }
         else if peers.isEmpty  { status = trackerStatus + retryInfo }
         else                   { status = "\(seedCount) seed\(seedCount == 1 ? "" : "s"), \(pCount) peer\(pCount == 1 ? "" : "s") connected" }
-        
+
         let pMap = await store?.bitfieldCopy ?? []
         // In-flight piece bitmap (one bit per piece that has at least one block requested
         // but not yet received). Used by the piece-map view to color partially-loaded
@@ -1031,40 +1126,13 @@ actor TorrentEngine_: PeerDelegate {
             }
         }
 
-        // Collect per-peer snapshots for the Peers tab
-        var snapshots: [TorrentHandle.PeerInfo] = []
-        for p in peers {
-            let bf       = await p.bitfield
-            let pState   = await p.state
-            let dl       = await p.downloadSpeed
-            let ul       = await p.uploadSpeed
-            let choking  = await p.peerChoking
-            let amChoke  = await p.amChoking
-            let hasExt   = await p.extMetadata != nil
-            snapshots.append(TorrentHandle.PeerInfo(
-                host: p.host, port: p.port,
-                transport: p.transportName,
-                state: pState.rawValue,
-                dlSpeed: dl, ulSpeed: ul,
-                piecesHeld: bf.filter { $0 }.count,
-                totalPieces: bf.count,
-                peerChoking: choking, amChoking: amChoke,
-                hasExtension: hasExt
-            ))
-        }
-
         let finalSeedCount = seedCount
         let finalPCount = pCount
         let finalStatus = status
         let finalEta = eta
-
         let mCount = metadataPieces.count
         let mTotal = metadataTotalSize > 0 ? (metadataTotalSize + 16383) / 16384 : 0
         let h = self.handle
-
-        // Bytes-of-selected-content the user has on disk — the figure shown in
-        // "X of Y" UI. Capped at selSize so it never reads larger than the user's
-        // requested download (endgame duplicate-block reception can otherwise overshoot).
         let finalBytesReceived = min(downloadedSel, selSize)
         let finalSelectedSize  = selSize
         let finalFileProgresses = fileProgresses
