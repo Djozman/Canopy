@@ -253,10 +253,9 @@ actor TorrentEngine_: PeerDelegate {
     /// pipeline budget — fast peers always get slots even if a stalled peer hasn't been
     /// cleared yet.
     static let peerPipeline = 100
-    // Enter endgame at 50 pieces remaining (was 20). In endgame the same block is
-    // requested from multiple peers; whoever delivers first wins, the rest get CANCEL.
-    // Earlier entry = fewer trailing-tail stalls on the last 1–2% of a torrent.
-    static let endgameThreshold = 50
+    // Enter endgame at 100 pieces remaining. Earlier entry = fewer trailing-tail stalls
+    // on the last few pieces, especially when only 2 peers are active.
+    static let endgameThreshold = 100
 
     private var peerInFlight: [ObjectIdentifier: Set<UInt64>] = [:]
     private var globalInFlight: Set<UInt64> = []
@@ -813,6 +812,8 @@ actor TorrentEngine_: PeerDelegate {
             pieceCounts[i] = max(0, pieceCounts[i] - 1)
         }
         peers.removeAll { ObjectIdentifier($0) == pid }
+        // Refresh rarity since we lost a peer's knowledge
+        rarityDirty = true
         clearInFlight(for: peer)
         pexDropped.append((peer.host, peer.port))
         guard !blacklist.contains(key) else { return }
