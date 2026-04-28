@@ -394,7 +394,10 @@ struct MagnetView: View {
 
     private func cancelMagnet() {
         resolvingTask?.cancel()
-        if let id = torrentId,
+        // Only remove the torrent if we're still resolving metadata.
+        // If we're in .selecting, the torrent is already live — just close the window.
+        if phase == .resolving,
+           let id = torrentId,
            let torrent = engine.torrents.first(where: { $0.id == id }) {
             engine.remove(torrent)
         }
