@@ -918,12 +918,12 @@ actor TorrentEngine_: PeerDelegate {
     }
 
     func peerConnected(_ peer: any AnyPeer, supportsExtensions: Bool) async {
-        print("[Canopy] Peer connected: \(peer.host):\(peer.port) ext=\(supportsExtensions)")
         let bits = await store?.getBitfield() ?? []
         if bits.contains(true) { await peer.sendBitfield(bits) }
         let key = "\(peer.host):\(peer.port)"
         peerAttempts.removeValue(forKey: key)
         if !pexKnown.contains(key) { pexKnown.insert(key); pexAdded.append((peer.host, peer.port)) }
+        await scheduleRequests(for: peer)
     }
 
     func peerRequestedBlock(_ peer: any AnyPeer, piece: Int, offset: Int, length: Int) async {
@@ -1096,6 +1096,7 @@ actor TorrentEngine_: PeerDelegate {
             Task { [weak self] in await self?.sendOneShot(event: "completed") }
             let torrentName = meta.name
             Task { @MainActor in
+                guard Bundle.main.bundleIdentifier != nil else { return }
                 let center = UNUserNotificationCenter.current()
                 let content = UNMutableNotificationContent()
                 content.title = "Download Complete"
