@@ -76,12 +76,6 @@ struct ContentView: View {
     }
 
     // MARK: - Pre-add window
-    //
-    // Key design: PreAddViewModel is an ObservableObject owned by the window.
-    // PreAddSheet observes it via @ObservedObject so every mutation
-    // (checkbox toggle, sort change, file priority) triggers a real SwiftUI diff.
-    // No fake Binding<T> over a reference box — that pattern silently swallows
-    // mutations because SwiftUI never sees a value change on the Binding itself.
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
         let holder = PreAddWindowHolder()
@@ -117,15 +111,15 @@ struct ContentView: View {
         window.makeKeyAndOrderFront(nil)
         holder.window = window
 
-        // Magnet: push real file list into the model when metadata arrives.
-        // Because model is @Published, SwiftUI re-renders automatically.
+        // Magnet: when metadata arrives, populate the file list and rebuild the tree
         if pending.isMagnet, let handle = magnetHandle {
             engine.onMetadataReady(for: handle) { [weak model] files in
                 guard let model else { return }
                 DispatchQueue.main.async {
                     model.pending.files     = files
                     model.pending.totalSize = files.reduce(0) { $0 + $1.size }
-                    model.pending.name      = handle.name.isEmpty ? model.pending.name : handle.name
+                    if !handle.name.isEmpty { model.pending.name = handle.name }
+                    model.rebuildTree()          // ← build folder tree from new file list
                     window.title = model.pending.name
                 }
             }
@@ -200,15 +194,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - PreAddViewModel
-// ObservableObject so SwiftUI's diff engine sees every mutation.
-
-final class PreAddViewModel: ObservableObject {
-    @Published var pending: PendingTorrent
-    init(pending: PendingTorrent) { self.pending = pending }
-}
-
-// MARK: - Window holder (keeps NSWindow alive)
+// MARK: - Window holder
 
 private final class PreAddWindowHolder {
     var window: NSWindow?
