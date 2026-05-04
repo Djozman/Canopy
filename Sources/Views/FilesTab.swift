@@ -34,7 +34,8 @@ struct FilesTab: View {
     }
 
     @ViewBuilder
-    private func sortCol(_ title: String, min: CGFloat, asc: FileSortOrder, desc: FileSortOrder) -> some View {
+    private func sortCol(_ title: String, min: CGFloat,
+                         asc: FileSortOrder, desc: FileSortOrder) -> some View {
         Button {
             sortOrder = (sortOrder == asc) ? desc : asc
             vm.setSort(sortOrder)
@@ -67,20 +68,21 @@ private struct FileNodeRow: View {
                 Spacer().frame(width: CGFloat(depth) * 16)
 
                 if node.isFolder {
+                    // Large 32×32 tap target so the arrow is easy to hit
                     Button {
                         withAnimation(.easeInOut(duration: 0.15)) { node.isExpanded.toggle() }
                     } label: {
                         Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 12)
+                            .frame(width: 32, height: 32)   // big tap target
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Spacer().frame(width: 12)
+                    Spacer().frame(width: 32)
                 }
 
-                // Native macOS checkbox — handles mixed state visually
                 NativeCheckbox(state: node.checkState) {
                     vm.toggleCheck(node)
                 }
@@ -136,46 +138,37 @@ private struct FileNodeRow: View {
     }
 
     private func barColor(_ p: Double) -> Color {
-        if p >= 1.0 { return .green }
-        if p > 0    { return .blue  }
-        return .secondary
+        p >= 1 ? .green : p > 0 ? .blue : .secondary
     }
 
     private func fileIcon(_ name: String) -> String {
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "mkv", "mp4", "avi", "mov", "webm": return "film"
-        case "mp3", "flac", "wav", "m4a":        return "music.note"
-        case "iso", "img", "dmg":                return "opticaldisc"
-        case "zip", "rar", "7z", "tar", "gz":    return "doc.zipper"
-        case "txt", "md", "nfo":                 return "doc.text"
-        case "jpg", "png", "gif", "webp":        return "photo"
-        default:                                  return "doc"
+        switch (name as NSString).pathExtension.lowercased() {
+        case "mkv","mp4","avi","mov","webm": return "film"
+        case "mp3","flac","wav","m4a":       return "music.note"
+        case "iso","img","dmg":              return "opticaldisc"
+        case "zip","rar","7z","tar","gz":   return "doc.zipper"
+        case "txt","md","nfo":              return "doc.text"
+        case "jpg","png","gif","webp":      return "photo"
+        default:                              return "doc"
         }
     }
 }
 
-// MARK: - Tri-state Checkbox (kept for API compat, now wraps NativeCheckbox)
-// Legacy alias so other files that import TriStateCheckbox still compile.
+// MARK: - TriStateCheckbox alias (kept for backward compat)
 struct TriStateCheckbox: View {
     let state: CheckState
     var action: () -> Void = {}
-    var body: some View {
-        NativeCheckbox(state: state, action: action)
-    }
+    var body: some View { NativeCheckbox(state: state, action: action) }
 }
 
 // MARK: - NativeCheckbox
-// Wraps NSButton with .switch / .checkbox style so we get the exact
-// system-rendered checkbox — blue fill when on, dash when mixed, empty when off.
-// This is the ONLY correct way to get a native macOS checkbox in SwiftUI.
-
 struct NativeCheckbox: NSViewRepresentable {
     let state: CheckState
     let action: () -> Void
 
     func makeNSView(context: Context) -> NSButton {
-        let btn = NSButton(checkboxWithTitle: "", target: context.coordinator, action: #selector(Coordinator.tapped))
+        let btn = NSButton(checkboxWithTitle: "", target: context.coordinator,
+                           action: #selector(Coordinator.tapped))
         btn.allowsMixedState = true
         btn.setContentHuggingPriority(.required, for: .horizontal)
         btn.setContentHuggingPriority(.required, for: .vertical)
@@ -184,11 +177,7 @@ struct NativeCheckbox: NSViewRepresentable {
 
     func updateNSView(_ btn: NSButton, context: Context) {
         context.coordinator.action = action
-        switch state {
-        case .on:    btn.state = .on
-        case .off:   btn.state = .off
-        case .mixed: btn.state = .mixed
-        }
+        btn.state = state == .on ? .on : state == .off ? .off : .mixed
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }

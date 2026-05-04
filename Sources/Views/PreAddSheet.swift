@@ -80,9 +80,9 @@ struct PreAddSheet: View {
                     NativeCheckbox(state: allState) { model.toggleAll() }
                         .padding(.horizontal, 8)
 
-                    sortButton("File", asc: .nameAsc,  desc: .nameDesc,  minWidth: 240)
+                    sortButton("File", asc: .nameAsc, desc: .nameDesc, minWidth: 240)
                     Divider().frame(height: 20)
-                    sortButton("Size", asc: .sizeAsc,  desc: .sizeDesc,  minWidth: 80)
+                    sortButton("Size", asc: .sizeAsc, desc: .sizeDesc, minWidth: 80)
                     Divider().frame(height: 20)
                     Text("Priority")
                         .font(.caption)
@@ -132,7 +132,6 @@ struct PreAddSheet: View {
         }
     }
 
-    // MARK: - Sort header button
     @ViewBuilder
     private func sortButton(_ title: String, asc: FileSortOrder,
                              desc: FileSortOrder, minWidth: CGFloat) -> some View {
@@ -172,18 +171,20 @@ private struct PreAddTreeRow: View {
         }
     }
 
-    // MARK: Folder
+    // MARK: Folder row
     private var folderRow: some View {
         HStack(spacing: 4) {
             indentSpacer
 
+            // 32×32 tap target — easy to click even on small arrows
             Button {
                 node.isExpanded.toggle()
             } label: {
                 Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    .frame(width: 14)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -210,15 +211,16 @@ private struct PreAddTreeRow: View {
 
             Color.clear.frame(width: 90)
         }
-        .frame(height: 28)
+        .frame(height: 32)
         .contentShape(Rectangle())
     }
 
-    // MARK: File
+    // MARK: File row
     private var fileRow: some View {
         HStack(spacing: 6) {
             indentSpacer
-            Color.clear.frame(width: 14)
+            // Spacer matching the 32pt arrow button width
+            Color.clear.frame(width: 32)
 
             NativeCheckbox(state: node.priority == .dontDownload ? .off : .on) {
                 node.priority = node.priority == .dontDownload ? .normal : .dontDownload
@@ -233,7 +235,6 @@ private struct PreAddTreeRow: View {
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                // Only strikethrough, NO opacity/color change — keeps text readable
                 .foregroundColor(Color(nsColor: .labelColor))
                 .strikethrough(node.priority == .dontDownload,
                                color: Color(nsColor: .secondaryLabelColor))
@@ -264,7 +265,7 @@ private struct PreAddTreeRow: View {
             }
             .frame(width: 90)
         }
-        .frame(height: 28)
+        .frame(height: 32)
         .contentShape(Rectangle())
     }
 

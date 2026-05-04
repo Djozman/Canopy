@@ -12,7 +12,7 @@ public final class FileNode: Identifiable, ObservableObject {
     public var children: [FileNode]?
 
     @Published public var priority: FilePriority
-    @Published public var isExpanded = true
+    @Published public var isExpanded = false   // collapsed by default
 
     public var isFolder: Bool { children != nil }
 
