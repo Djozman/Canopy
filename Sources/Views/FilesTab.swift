@@ -67,22 +67,26 @@ private struct FileNodeRow: View {
                 Spacer().frame(width: CGFloat(depth) * 16)
 
                 if node.isFolder {
-                    Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 12)
-                        .onTapGesture {
-                            withAnimation(.easeInOut(duration: 0.15)) { node.isExpanded.toggle() }
-                        }
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { node.isExpanded.toggle() }
+                    } label: {
+                        Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 12)
+                    }
+                    .buttonStyle(.plain)
                 } else {
                     Spacer().frame(width: 12)
                 }
 
-                TriStateCheckbox(state: node.checkState)
-                    .onTapGesture { vm.toggleCheck(node) }
+                // Native macOS checkbox — handles mixed state visually
+                NativeCheckbox(state: node.checkState) {
+                    vm.toggleCheck(node)
+                }
 
                 Image(systemName: node.isFolder ? "folder.fill" : fileIcon(node.name))
-                    .foregroundStyle(node.isFolder ? .yellow : .secondary)
+                    .foregroundStyle(node.isFolder ? Color.yellow : Color(nsColor: .secondaryLabelColor))
                     .font(.system(size: 12))
 
                 Text(node.name)
@@ -90,12 +94,11 @@ private struct FileNodeRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-                    .foregroundStyle(node.priority == .dontDownload ? Color.secondary : Color.primary)
-                    .strikethrough(node.priority == .dontDownload)
+                    .foregroundColor(Color(nsColor: .labelColor))
 
                 Text(formatBytes(node.size))
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
                     .frame(width: 80, alignment: .trailing)
 
                 ProgressView(value: node.progress)
@@ -152,31 +155,47 @@ private struct FileNodeRow: View {
     }
 }
 
-// MARK: - Tri-state Checkbox
-
+// MARK: - Tri-state Checkbox (kept for API compat, now wraps NativeCheckbox)
+// Legacy alias so other files that import TriStateCheckbox still compile.
 struct TriStateCheckbox: View {
     let state: CheckState
-
+    var action: () -> Void = {}
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 3)
-                .stroke(Color.secondary.opacity(0.6), lineWidth: 1)
-                .frame(width: 14, height: 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(state == .off ? Color.clear : Color.accentColor.opacity(0.15))
-                )
-            switch state {
-            case .on:
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.accentColor)
-            case .mixed:
-                Rectangle().fill(Color.accentColor).frame(width: 8, height: 2)
-            case .off:
-                EmptyView()
-            }
+        NativeCheckbox(state: state, action: action)
+    }
+}
+
+// MARK: - NativeCheckbox
+// Wraps NSButton with .switch / .checkbox style so we get the exact
+// system-rendered checkbox — blue fill when on, dash when mixed, empty when off.
+// This is the ONLY correct way to get a native macOS checkbox in SwiftUI.
+
+struct NativeCheckbox: NSViewRepresentable {
+    let state: CheckState
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> NSButton {
+        let btn = NSButton(checkboxWithTitle: "", target: context.coordinator, action: #selector(Coordinator.tapped))
+        btn.allowsMixedState = true
+        btn.setContentHuggingPriority(.required, for: .horizontal)
+        btn.setContentHuggingPriority(.required, for: .vertical)
+        return btn
+    }
+
+    func updateNSView(_ btn: NSButton, context: Context) {
+        context.coordinator.action = action
+        switch state {
+        case .on:    btn.state = .on
+        case .off:   btn.state = .off
+        case .mixed: btn.state = .mixed
         }
-        .frame(width: 14, height: 14)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func tapped() { action() }
     }
 }

@@ -12,16 +12,11 @@ struct PreAddSheet: View {
     @State private var sortOrder: FileSortOrder = .nameAsc
 
     private var pending: PendingTorrent { model.pending }
-
-    // Root nodes of the folder tree
-    private var rootNodes: [FileNode] { model.tree }
-
-    private var allState: CheckState { model.treeRoot?.checkState ?? .on }
+    private var rootNodes: [FileNode]   { model.tree }
+    private var allState: CheckState    { model.treeRoot?.checkState ?? .on }
 
     private var selectedSize: Int64 {
-        model.pending.files
-            .filter { $0.priority != .dontDownload }
-            .reduce(0) { $0 + $1.size }
+        pending.files.filter { $0.priority != .dontDownload }.reduce(0) { $0 + $1.size }
     }
 
     var body: some View {
@@ -80,13 +75,10 @@ struct PreAddSheet: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Column header row
+                // Column header
                 HStack(spacing: 0) {
-                    Button { model.toggleAll() } label: {
-                        TriStateCheckbox(state: allState)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 8)
+                    NativeCheckbox(state: allState) { model.toggleAll() }
+                        .padding(.horizontal, 8)
 
                     sortButton("File", asc: .nameAsc,  desc: .nameDesc,  minWidth: 240)
                     Divider().frame(height: 20)
@@ -102,10 +94,11 @@ struct PreAddSheet: View {
 
                 Divider()
 
-                // Tree list
                 List {
                     ForEach(rootNodes) { node in
-                        FileTreeRow(node: node, depth: 0, model: model)
+                        PreAddTreeRow(node: node, depth: 0, model: model)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .listRowSeparator(.hidden)
                     }
                 }
                 .listStyle(.plain)
@@ -116,15 +109,10 @@ struct PreAddSheet: View {
 
             // ── Bottom bar
             HStack(spacing: 12) {
-                Button { model.toggleAll() } label: {
-                    HStack(spacing: 6) {
-                        TriStateCheckbox(state: allState)
-                        Text("Select all")
-                            .font(.caption)
-                            .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    }
-                }
-                .buttonStyle(.plain)
+                NativeCheckbox(state: allState) { model.toggleAll() }
+                Text("Select all")
+                    .font(.caption)
+                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
 
                 Spacer()
                 Text(formatBytes(selectedSize) + " selected")
@@ -145,7 +133,6 @@ struct PreAddSheet: View {
     }
 
     // MARK: - Sort header button
-
     @ViewBuilder
     private func sortButton(_ title: String, asc: FileSortOrder,
                              desc: FileSortOrder, minWidth: CGFloat) -> some View {
@@ -154,11 +141,9 @@ struct PreAddSheet: View {
             model.sort(by: sortOrder)
         } label: {
             HStack(spacing: 4) {
-                Text(title)
-                    .font(.caption)
-                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                if sortOrder == asc   { Image(systemName: "chevron.up").font(.system(size: 8)) }
-                else if sortOrder == desc { Image(systemName: "chevron.down").font(.system(size: 8)) }
+                Text(title).font(.caption).foregroundColor(Color(nsColor: .secondaryLabelColor))
+                if sortOrder == asc        { Image(systemName: "chevron.up").font(.system(size: 8)) }
+                else if sortOrder == desc  { Image(systemName: "chevron.down").font(.system(size: 8)) }
             }
             .frame(minWidth: minWidth, alignment: .leading)
             .padding(.horizontal, 4)
@@ -169,125 +154,118 @@ struct PreAddSheet: View {
 
 // MARK: - Tree row (recursive)
 
-private struct FileTreeRow: View {
+private struct PreAddTreeRow: View {
     @ObservedObject var node: FileNode
     let depth: Int
     @ObservedObject var model: PreAddViewModel
 
     var body: some View {
-        // Folder row
         if node.isFolder {
-            // Disclosure
-            HStack(spacing: 4) {
-                // indent
-                indentSpacer
-
-                Button {
-                    node.isExpanded.toggle()
-                } label: {
-                    Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                        .frame(width: 14)
-                }
-                .buttonStyle(.plain)
-
-                // Folder checkbox
-                Button {
-                    let newPrio: FilePriority = node.checkState == .on ? .dontDownload : .normal
-                    model.setFolderPriority(node: node, priority: newPrio)
-                } label: {
-                    TriStateCheckbox(state: node.checkState)
-                }
-                .buttonStyle(.plain)
-
-                Image(systemName: node.isExpanded ? "folder.fill" : "folder")
-                    .foregroundColor(.yellow)
-                    .font(.system(size: 12))
-
-                Text(node.name)
-                    .font(.caption)
-                    .foregroundColor(Color(nsColor: .labelColor))
-                    .lineLimit(1)
-
-                Spacer()
-
-                Text(formatBytes(node.size))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    .frame(width: 80, alignment: .trailing)
-
-                // No priority picker for folders — use checkbox
-                Color.clear.frame(width: 90)
-            }
-            .frame(height: 26)
-            .contentShape(Rectangle())
-
-            // Children
+            folderRow
             if node.isExpanded, let children = node.children {
                 ForEach(children) { child in
-                    FileTreeRow(node: child, depth: depth + 1, model: model)
+                    PreAddTreeRow(node: child, depth: depth + 1, model: model)
                 }
             }
-
         } else {
-            // File row
-            HStack(spacing: 6) {
-                indentSpacer
-                Color.clear.frame(width: 14) // align with folder chevron
-
-                Button {
-                    node.priority = node.priority == .dontDownload ? .normal : .dontDownload
-                    model.syncFilePriorities()
-                } label: {
-                    TriStateCheckbox(state: node.priority == .dontDownload ? .off : .on)
-                }
-                .buttonStyle(.plain)
-
-                Image(systemName: fileIcon(node.name))
-                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    .font(.system(size: 12))
-
-                Text(node.name)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundColor(
-                        node.priority == .dontDownload
-                        ? Color(nsColor: .secondaryLabelColor)
-                        : Color(nsColor: .labelColor)
-                    )
-                    .strikethrough(node.priority == .dontDownload)
-
-                Spacer()
-
-                Text(formatBytes(node.size))
-                    .font(.caption.monospacedDigit())
-                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                    .frame(width: 80, alignment: .trailing)
-
-                Menu {
-                    ForEach(FilePriority.allCases, id: \.self) { p in
-                        Button(p.label) {
-                            node.priority = p
-                            model.syncFilePriorities()
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 2) {
-                        Text(node.priority.label)
-                            .font(.caption)
-                            .foregroundColor(Color(nsColor: .secondaryLabelColor))
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 7))
-                            .foregroundColor(Color(nsColor: .tertiaryLabelColor))
-                    }
-                }
-                .frame(width: 90)
-            }
-            .frame(height: 26)
-            .contentShape(Rectangle())
+            fileRow
         }
+    }
+
+    // MARK: Folder
+    private var folderRow: some View {
+        HStack(spacing: 4) {
+            indentSpacer
+
+            Button {
+                node.isExpanded.toggle()
+            } label: {
+                Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    .frame(width: 14)
+            }
+            .buttonStyle(.plain)
+
+            NativeCheckbox(state: node.checkState) {
+                let newPrio: FilePriority = node.checkState == .on ? .dontDownload : .normal
+                model.setFolderPriority(node: node, priority: newPrio)
+            }
+
+            Image(systemName: node.isExpanded ? "folder.fill" : "folder")
+                .foregroundColor(.yellow)
+                .font(.system(size: 12))
+
+            Text(node.name)
+                .font(.caption)
+                .foregroundColor(Color(nsColor: .labelColor))
+                .lineLimit(1)
+
+            Spacer()
+
+            Text(formatBytes(node.size))
+                .font(.caption.monospacedDigit())
+                .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                .frame(width: 80, alignment: .trailing)
+
+            Color.clear.frame(width: 90)
+        }
+        .frame(height: 28)
+        .contentShape(Rectangle())
+    }
+
+    // MARK: File
+    private var fileRow: some View {
+        HStack(spacing: 6) {
+            indentSpacer
+            Color.clear.frame(width: 14)
+
+            NativeCheckbox(state: node.priority == .dontDownload ? .off : .on) {
+                node.priority = node.priority == .dontDownload ? .normal : .dontDownload
+                model.syncFilePriorities()
+            }
+
+            Image(systemName: fileIcon(node.name))
+                .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                .font(.system(size: 12))
+
+            Text(node.name)
+                .font(.caption)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                // Only strikethrough, NO opacity/color change — keeps text readable
+                .foregroundColor(Color(nsColor: .labelColor))
+                .strikethrough(node.priority == .dontDownload,
+                               color: Color(nsColor: .secondaryLabelColor))
+
+            Spacer()
+
+            Text(formatBytes(node.size))
+                .font(.caption.monospacedDigit())
+                .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                .frame(width: 80, alignment: .trailing)
+
+            Menu {
+                ForEach(FilePriority.allCases, id: \.self) { p in
+                    Button(p.label) {
+                        node.priority = p
+                        model.syncFilePriorities()
+                    }
+                }
+            } label: {
+                HStack(spacing: 2) {
+                    Text(node.priority.label)
+                        .font(.caption)
+                        .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 7))
+                        .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                }
+            }
+            .frame(width: 90)
+        }
+        .frame(height: 28)
+        .contentShape(Rectangle())
     }
 
     private var indentSpacer: some View {
