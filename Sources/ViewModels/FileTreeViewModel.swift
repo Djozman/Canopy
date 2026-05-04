@@ -25,7 +25,11 @@ public final class FileTreeViewModel: ObservableObject {
 
     public func refresh(torrent: TorrentStatus) {
         self.torrent = torrent
-        refreshFiles()
+        if roots.isEmpty {
+            refreshFiles()
+        } else {
+            refreshProgress()
+        }
     }
 
     public func setSort(_ order: FileSortOrder) {
@@ -109,6 +113,30 @@ public final class FileTreeViewModel: ObservableObject {
                 // Folder: recurse, keep the same node object
                 patchNodes(&children, byIndex: byIndex)
                 node.children = children
+            }
+        }
+    }
+
+    private func refreshProgress() {
+        guard let handle = torrent.handle else { return }
+        let count = Int(handle.fileCount)
+        guard count > 0 else { return }
+        let progress = handle.fileProgressAll() as [AnyObject]
+
+        for i in 0..<count {
+            let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
+            patchProgress(nodes: roots, fileIndex: i, downloaded: down)
+        }
+        for node in roots { computeFolderSize(node) }
+    }
+
+    private func patchProgress(nodes: [FileNode], fileIndex: Int, downloaded: Int64) {
+        for n in nodes {
+            if let children = n.children {
+                patchProgress(nodes: children, fileIndex: fileIndex, downloaded: downloaded)
+            } else if n.fileIndex == fileIndex {
+                n.downloaded = downloaded
+                return
             }
         }
     }
