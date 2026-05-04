@@ -35,6 +35,7 @@ let package = Package(
             dependencies: ["ClibtorrentBridge"],
             path: "Sources",
             exclude: ["Engine/Bridge", "README.md"],
+            resources: [.process("Assets.xcassets")],
             swiftSettings: [
                 .interoperabilityMode(.C),
             ]
