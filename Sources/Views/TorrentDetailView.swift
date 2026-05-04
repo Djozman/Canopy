@@ -65,7 +65,9 @@ private struct GeneralTab: View {
                 row("Ratio",       formatRatio(uploaded: torrent.totalUploaded, downloaded: torrent.totalDone))
                 row("Down speed",  formatSpeed(torrent.downloadRate))
                 row("Up speed",    formatSpeed(torrent.uploadRate))
-                row("ETA",         formatETA(torrent.etaSeconds))
+                if torrent.state != .seeding, torrent.state != .finished {
+                    row("ETA", formatETA(torrent.etaSeconds))
+                }
             }
             Section("Swarm") {
                 row("Seeds",  "\(torrent.numSeeds)")

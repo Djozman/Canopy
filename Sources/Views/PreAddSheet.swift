@@ -98,7 +98,10 @@ struct PreAddSheet: View {
             }
             .padding()
         }
-        .frame(minWidth: 700, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
+        .frame(
+            width:  NSScreen.main?.visibleFrame.width,
+            height: NSScreen.main?.visibleFrame.height
+        )
     }
 
     @ViewBuilder

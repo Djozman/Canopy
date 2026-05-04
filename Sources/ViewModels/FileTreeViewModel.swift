@@ -73,6 +73,10 @@ public final class FileTreeViewModel: ObservableObject {
                 handle.setFilePriority(Int32(priority.rawValue), at: Int32(idx))
             }
         }
+
+        if priority != .dontDownload, let handle = torrent.handle {
+            handle.resume()
+        }
     }
 
     private func buildTree(_ infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]) -> [FileNode] {
