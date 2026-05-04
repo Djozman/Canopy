@@ -1,6 +1,8 @@
 // ContentView.swift — root NavigationSplitView
 
 import SwiftUI
+import AppKit
+import ClibtorrentBridge
 
 struct ContentView: View {
     @StateObject private var vm: TorrentListViewModel
@@ -19,11 +21,10 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } content: {
             VStack(spacing: 0) {
-                // ── Toolbar area ──────────────────────────────────────────
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
-                    TextField("Search torrents…", text: $vm.searchText)
+                    TextField("Search torrents\u{2026}", text: $vm.searchText)
                         .textFieldStyle(.plain)
                 }
                 .padding(8)
@@ -33,7 +34,6 @@ struct ContentView: View {
 
                 Divider()
 
-                // ── Torrent list ──────────────────────────────────────────
                 if vm.filtered.isEmpty {
                     emptyState
                 } else {
@@ -64,11 +64,52 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showAddSheet) {
-            AddTorrentSheet(engine: engine)
+            AddTorrentSheet(engine: engine, onNext: { pending, magnetHandle in
+                showPreAddWindow(for: pending, magnetHandle: magnetHandle)
+            })
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+    }
+
+    // MARK: - PreAdd window
+
+    private func showPreAddWindow(for pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
+        let holder = WindowHolder()
+        var mutable = pending
+        let binding = Binding(
+            get: { mutable },
+            set: { mutable = $0 }
+        )
+        let rootView = PreAddSheet(
+            pending: binding,
+            onConfirm: { confirmed in
+                if let handle = magnetHandle {
+                    engine.commitMagnet(handle: handle,
+                                        savePath: confirmed.savePath,
+                                        files: confirmed.files)
+                } else {
+                    engine.confirm(confirmed)
+                }
+                holder.window?.close()
+            },
+            onCancel: {
+                if let handle = magnetHandle {
+                    engine.cancelMagnet(handle: handle)
+                }
+                holder.window?.close()
+            }
+        )
+
+        let hosting = NSHostingController(rootView: rootView)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = pending.name
+        window.setContentSize(NSSize(width: 700, height: 520))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        holder.window = window
     }
 
     // MARK: - Empty state
@@ -137,4 +178,8 @@ struct ContentView: View {
             NSWorkspace.shared.open(URL(fileURLWithPath: t.savePath))
         }
     }
+}
+
+private final class WindowHolder {
+    var window: NSWindow?
 }

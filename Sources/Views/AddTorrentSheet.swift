@@ -11,13 +11,12 @@ struct AddTorrentSheet: View {
     @State private var showFilePicker = false
     @State private var tab = 0
 
-    @State private var pendingTorrent: PendingTorrent?
-    @State private var showingPreAdd = false
     @State private var parseError: String?
     @State private var isFetchingMetadata = false
     @State private var metadataHandle: LTTorrentHandle?
 
     let engine: TorrentEngine
+    let onNext: (PendingTorrent, LTTorrentHandle?) -> Void
 
     var body: some View {
         NavigationStack {
@@ -88,31 +87,6 @@ struct AddTorrentSheet: View {
             }
         }
         .frame(minWidth: 440, minHeight: 340)
-        .sheet(isPresented: $showingPreAdd) {
-            if let binding = Binding($pendingTorrent) {
-                PreAddSheet(
-                    pending: binding,
-                    onConfirm: { confirmed in
-                        if let handle = metadataHandle {
-                            engine.commitMagnet(handle: handle,
-                                                savePath: confirmed.savePath,
-                                                files: confirmed.files)
-                        } else {
-                            engine.confirm(confirmed)
-                        }
-                        showingPreAdd = false
-                        dismiss()
-                    },
-                    onCancel: {
-                        if let handle = metadataHandle {
-                            engine.cancelMagnet(handle: handle)
-                        }
-                        metadataHandle = nil
-                        showingPreAdd = false
-                    }
-                )
-            }
-        }
         .alert("Error", isPresented: .constant(parseError != nil)) {
             Button("OK") { parseError = nil }
         } message: {
@@ -138,8 +112,8 @@ struct AddTorrentSheet: View {
                     savePath: saveDir,
                     files: files
                 )
-                pendingTorrent = pending
-                showingPreAdd = true
+                onNext(pending, metadataHandle)
+                dismiss()
             },
             onError: {
                 isFetchingMetadata = false
@@ -152,8 +126,8 @@ struct AddTorrentSheet: View {
         if let pending = engine.parse(torrentPath: magnetURI) {
             var p = pending
             p.savePath = saveDir
-            pendingTorrent = p
-            showingPreAdd = true
+            onNext(p, nil)
+            dismiss()
         } else {
             parseError = "Failed to parse torrent file."
         }
