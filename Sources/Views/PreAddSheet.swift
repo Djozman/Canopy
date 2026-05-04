@@ -1,7 +1,6 @@
 // PreAddSheet.swift — file selection before adding torrent
 
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct PreAddSheet: View {
     @Binding var pending: PendingTorrent
@@ -61,24 +60,13 @@ struct PreAddSheet: View {
 
             Divider()
 
-            if pending.isMagnet {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text("File list will be available after metadata is fetched.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding()
-            } else {
-                fileListHeader
-                Divider()
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(sortedFiles) { file in
-                            PreAddFileRow(file: fileBinding(file), totalSize: pending.totalSize)
-                            Divider().opacity(0.3)
-                        }
+            fileListHeader
+            Divider()
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(sortedFiles) { file in
+                        PreAddFileRow(file: fileBinding(file), totalSize: pending.totalSize)
+                        Divider().opacity(0.3)
                     }
                 }
             }
@@ -110,7 +98,7 @@ struct PreAddSheet: View {
             }
             .padding()
         }
-        .frame(width: 600, height: pending.isMagnet ? 260 : 460)
+        .frame(minWidth: 700, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
     }
 
     @ViewBuilder

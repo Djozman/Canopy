@@ -42,6 +42,7 @@ typedef NS_ENUM(int, LTAlertType) {
 @property (readonly) LTTorrentState state;
 @property (readonly) BOOL      paused;
 @property (readonly, nullable) NSString *errorMessage;
+@property (readonly) BOOL      hasMetadata;
 
 - (void)pause;
 - (void)resume;
@@ -75,6 +76,13 @@ typedef NS_ENUM(int, LTAlertType) {
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
                                   savePath:(NSString *)savePath;
 - (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath;
+
+// Magnet metadata-first mode: add paused in upload-only mode, commit later
+- (nullable LTTorrentHandle *)addMagnetForMetadata:(NSString *)uri;
+- (void)commitMagnet:(LTTorrentHandle *)handle
+            savePath:(NSString *)savePath
+          priorities:(nullable NSArray<NSNumber *> *)priorities;
+- (void)cancelMagnet:(LTTorrentHandle *)handle;
 - (NSArray<LTTorrentHandle *> *)allTorrents;
 - (void)removeTorrent:(LTTorrentHandle *)handle deleteFiles:(BOOL)deleteFiles;
 - (void)pause;

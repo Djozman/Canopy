@@ -157,6 +157,11 @@ static int mapState(lt::torrent_status::state_t s) {
     return [NSString stringWithUTF8String:_cachedStatus.errc.message().c_str()];
 }
 
+- (BOOL)hasMetadata {
+    if (!_cached) [self refresh];
+    return _cachedStatus.has_metadata;
+}
+
 - (void)pause      { _handle.pause(); }
 - (void)resume     { _handle.resume(); }
 - (void)recheck    { _handle.force_recheck(); }
@@ -305,6 +310,50 @@ static int mapState(lt::torrent_status::state_t s) {
         }
         return result;
     } catch (...) { return nil; }
+}
+
+- (nullable LTTorrentHandle *)addMagnetForMetadata:(NSString *)uri {
+    try {
+        auto params = lt::parse_magnet_uri(std::string(uri.UTF8String));
+        params.flags |= lt::torrent_flags::paused;
+        params.flags |= lt::torrent_flags::upload_mode;
+        params.save_path = "/tmp";
+        lt::torrent_handle h = _session->add_torrent(params);
+        if (!h.is_valid()) return nil;
+        auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
+        [_handles addObject:wrapper];
+        return wrapper;
+    } catch (...) { return nil; }
+}
+
+- (void)commitMagnet:(LTTorrentHandle *)handle
+            savePath:(NSString *)savePath
+          priorities:(nullable NSArray<NSNumber *> *)priorities {
+    auto h = handle.handle;
+    if (!h.is_valid()) return;
+
+    h.move_storage(std::string(savePath.UTF8String));
+
+    if (priorities && priorities.count > 0) {
+        std::vector<lt::download_priority_t> prios;
+        prios.reserve(priorities.count);
+        for (NSNumber *n in priorities) {
+            prios.push_back(lt::download_priority_t{(std::uint8_t)n.intValue});
+        }
+        h.prioritize_files(prios);
+    }
+
+    h.unset_flags(lt::torrent_flags::paused | lt::torrent_flags::upload_mode);
+    h.set_flags(lt::torrent_flags::auto_managed);
+    h.resume();
+}
+
+- (void)cancelMagnet:(LTTorrentHandle *)handle {
+    auto h = handle.handle;
+    if (h.is_valid()) {
+        _session->remove_torrent(h);
+    }
+    [_handles removeObject:handle];
 }
 
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI

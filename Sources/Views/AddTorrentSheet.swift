@@ -2,6 +2,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import ClibtorrentBridge
 
 struct AddTorrentSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -13,6 +14,8 @@ struct AddTorrentSheet: View {
     @State private var pendingTorrent: PendingTorrent?
     @State private var showingPreAdd = false
     @State private var parseError: String?
+    @State private var isFetchingMetadata = false
+    @State private var metadataHandle: LTTorrentHandle?
 
     let engine: TorrentEngine
 
@@ -54,6 +57,17 @@ struct AddTorrentSheet: View {
                     TextField("Save path", text: $saveDir)
                         .font(.system(.body, design: .monospaced))
                 }
+
+                if isFetchingMetadata {
+                    Section {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Fetching metadata\u{2026}")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
             .formStyle(.grouped)
             .navigationTitle("Add Torrent")
@@ -62,24 +76,14 @@ struct AddTorrentSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Next\u{2026}") {
+                    Button(isFetchingMetadata ? "Fetching\u{2026}" : "Next\u{2026}") {
                         if tab == 0 {
-                            var pending = engine.pendingMagnet(uri: magnetURI)
-                            pending.savePath = saveDir
-                            pendingTorrent = pending
-                            showingPreAdd = true
+                            startMagnetFetch()
                         } else {
-                            if let pending = engine.parse(torrentPath: magnetURI) {
-                                var p = pending
-                                p.savePath = saveDir
-                                pendingTorrent = p
-                                showingPreAdd = true
-                            } else {
-                                parseError = "Failed to parse torrent file."
-                            }
+                            parseTorrentFile()
                         }
                     }
-                    .disabled(magnetURI.isEmpty)
+                    .disabled(magnetURI.isEmpty || isFetchingMetadata)
                 }
             }
         }
@@ -89,11 +93,21 @@ struct AddTorrentSheet: View {
                 PreAddSheet(
                     pending: binding,
                     onConfirm: { confirmed in
-                        engine.confirm(confirmed)
+                        if let handle = metadataHandle {
+                            engine.commitMagnet(handle: handle,
+                                                savePath: confirmed.savePath,
+                                                files: confirmed.files)
+                        } else {
+                            engine.confirm(confirmed)
+                        }
                         showingPreAdd = false
                         dismiss()
                     },
                     onCancel: {
+                        if let handle = metadataHandle {
+                            engine.cancelMagnet(handle: handle)
+                        }
+                        metadataHandle = nil
                         showingPreAdd = false
                     }
                 )
@@ -103,6 +117,45 @@ struct AddTorrentSheet: View {
             Button("OK") { parseError = nil }
         } message: {
             Text(parseError ?? "")
+        }
+    }
+
+    private func startMagnetFetch() {
+        isFetchingMetadata = true
+        metadataHandle = engine.fetchMetadata(
+            uri: magnetURI,
+            onFiles: { files in
+                isFetchingMetadata = false
+                var name = magnetURI
+                if let comps = URLComponents(string: magnetURI),
+                   let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+                    name = dn
+                }
+                let pending = PendingTorrent(
+                    source: .magnet(uri: magnetURI),
+                    name: name,
+                    totalSize: files.reduce(0) { $0 + $1.size },
+                    savePath: saveDir,
+                    files: files
+                )
+                pendingTorrent = pending
+                showingPreAdd = true
+            },
+            onError: {
+                isFetchingMetadata = false
+                parseError = "Could not fetch magnet metadata."
+            }
+        )
+    }
+
+    private func parseTorrentFile() {
+        if let pending = engine.parse(torrentPath: magnetURI) {
+            var p = pending
+            p.savePath = saveDir
+            pendingTorrent = p
+            showingPreAdd = true
+        } else {
+            parseError = "Failed to parse torrent file."
         }
     }
 }

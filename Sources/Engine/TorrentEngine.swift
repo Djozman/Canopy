@@ -192,6 +192,60 @@ public final class TorrentEngine: ObservableObject {
             .first ?? NSHomeDirectory() + "/Downloads"
     }
 
+    // MARK: - Magnet metadata mode
+
+    private var metadataCallbacks: [String: ([PendingFile]) -> Void] = [:]
+
+    public func fetchMetadata(
+        uri: String,
+        onFiles: @MainActor @escaping ([PendingFile]) -> Void,
+        onError: @MainActor @escaping () -> Void
+    ) -> LTTorrentHandle? {
+        let session = self.session
+        var handle: LTTorrentHandle?
+        queue.sync {
+            handle = session?.addMagnet(forMetadata: uri)
+        }
+        guard let h = handle else {
+            DispatchQueue.main.async { onError() }
+            return nil
+        }
+        let hash = h.infoHash
+        metadataCallbacks[hash] = { files in
+            DispatchQueue.main.async { onFiles(files) }
+        }
+        return h
+    }
+
+    public func commitMagnet(handle: LTTorrentHandle, savePath: String, files: [PendingFile]) {
+        let priorities = files.map { NSNumber(value: $0.priority.rawValue) }
+        let expanded = (savePath as NSString).expandingTildeInPath
+        let session = self.session
+        queue.async {
+            session?.commitMagnet(handle, savePath: expanded, priorities: priorities.isEmpty ? nil : priorities)
+        }
+    }
+
+    public func cancelMagnet(handle: LTTorrentHandle) {
+        let session = self.session
+        queue.async {
+            session?.cancelMagnet(handle)
+        }
+    }
+
+    func handleMetadataReceived(infoHash: String, handle: LTTorrentHandle) {
+        guard let cb = metadataCallbacks.removeValue(forKey: infoHash) else { return }
+        let count = Int(handle.fileCount)
+        var files: [PendingFile] = []
+        for i in 0..<count {
+            var outSize: Int64 = 0
+            var outPriority: Int32 = 0
+            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority) else { continue }
+            files.append(PendingFile(id: i, path: path, size: outSize))
+        }
+        cb(files)
+    }
+
     public func pause(_ torrent: TorrentStatus) {
         if let h = torrent.handle { queue.async { h.pause() } }
     }
@@ -226,12 +280,18 @@ public final class TorrentEngine: ObservableObject {
 
     private func drainAlerts() {
         let session = self.session
-        queue.async {
-            guard let session else { return }
-            session.popAlerts { type, _, _, _ in
+        queue.async { [weak self] in
+            guard let self, let session else { return }
+            session.popAlerts { type, h, _, _ in
                 if type == LTAlertType.torrentFinished {
                     DispatchQueue.main.async {
                         NotificationCenter.default.post(name: .torrentFinished, object: nil)
+                    }
+                }
+                if type == LTAlertType.metadataReceived, let h {
+                    let hash = h.infoHash
+                    DispatchQueue.main.async {
+                        self.handleMetadataReceived(infoHash: hash, handle: h)
                     }
                 }
             }
