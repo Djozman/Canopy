@@ -20,18 +20,27 @@ struct PreAddSheet: View {
 
     private var allState: CheckState {
         let skipped = pending.files.filter { $0.priority == .dontDownload }.count
-        if skipped == 0                    { return .on  }
-        if skipped == pending.files.count  { return .off }
+        if skipped == 0                   { return .on   }
+        if skipped == pending.files.count { return .off  }
         return .mixed
+    }
+
+    private var selectedSize: Int64 {
+        pending.files.filter { $0.priority != .dontDownload }.reduce(0) { $0 + $1.size }
     }
 
     var body: some View {
         VStack(spacing: 0) {
+
+            // ── Header ────────────────────────────────────────────
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(pending.name).font(.headline).lineLimit(1)
+                    Text(pending.name)
+                        .font(.headline)
+                        .lineLimit(1)
                     Text(formatBytes(pending.totalSize))
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -39,10 +48,15 @@ struct PreAddSheet: View {
 
             Divider()
 
+            // ── Save path ─────────────────────────────────────────
             HStack {
-                Text("Save to:").font(.caption).foregroundStyle(.secondary)
+                Text("Save to:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Text(pending.savePath)
-                    .font(.caption).lineLimit(1).truncationMode(.head)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.head)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button("Choose\u{2026}") {
                     let panel = NSOpenPanel()
@@ -60,65 +74,92 @@ struct PreAddSheet: View {
 
             Divider()
 
-            fileListHeader
-            Divider()
-            ScrollView {
-                VStack(spacing: 0) {
+            // ── File list or loading spinner ──────────────────────
+            if pending.isMagnet && pending.files.isEmpty {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Fetching metadata\u{2026}")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Column header
+                HStack(spacing: 0) {
+                    // Select-all — Button so it's always hittable
+                    Button {
+                        toggleAll()
+                    } label: {
+                        TriStateCheckbox(state: allState)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+
+                    sortButton("File", asc: .nameAsc,  desc: .nameDesc,  minWidth: 240)
+                    Divider().frame(height: 20)
+                    sortButton("Size", asc: .sizeAsc,  desc: .sizeDesc,  minWidth: 80)
+                    Divider().frame(height: 20)
+                    Text("Priority")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 90)
+                }
+                .padding(.vertical, 6)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
+
+                List {
                     ForEach(sortedFiles) { file in
-                        PreAddFileRow(file: fileBinding(file), totalSize: pending.totalSize)
-                        Divider().opacity(0.3)
+                        PreAddFileRow(file: fileBinding(file))
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .listRowSeparator(.hidden)
                     }
                 }
+                .listStyle(.plain)
             }
 
             Divider()
 
-            HStack {
-                TriStateCheckbox(state: allState)
-                    .onTapGesture { toggleAll() }
-                Text("Select all")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .onTapGesture { toggleAll() }
+            // ── Bottom bar ────────────────────────────────────────
+            HStack(spacing: 12) {
+                Button {
+                    toggleAll()
+                } label: {
+                    HStack(spacing: 6) {
+                        TriStateCheckbox(state: allState)
+                        Text("Select all")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
 
                 Spacer()
 
-                let selectedSize = pending.files
-                    .filter { $0.priority != .dontDownload }
-                    .reduce(0) { $0 + $1.size }
                 Text(formatBytes(selectedSize) + " selected")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
                 Button("Cancel", role: .cancel) { onCancel() }
                     .keyboardShortcut(.escape)
+
                 Button("Add Torrent") { onConfirm(pending) }
                     .keyboardShortcut(.return)
                     .buttonStyle(.borderedProminent)
+                    .disabled(pending.isMagnet && pending.files.isEmpty)
             }
             .padding()
         }
-        .frame(minWidth: 640, idealWidth: 700, minHeight: 440, idealHeight: 520)
     }
 
-    @ViewBuilder
-    private var fileListHeader: some View {
-        HStack(spacing: 0) {
-            TriStateCheckbox(state: allState)
-                .onTapGesture { toggleAll() }
-                .padding(.horizontal, 8)
-            sortButton("File", asc: .nameAsc, desc: .nameDesc, minWidth: 240)
-            Divider().frame(height: 20)
-            sortButton("Size", asc: .sizeAsc, desc: .sizeDesc, minWidth: 80)
-            Divider().frame(height: 20)
-            Text("Priority").font(.caption).foregroundStyle(.secondary).frame(width: 80)
-        }
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
+    // MARK: - Sort button
 
     @ViewBuilder
-    private func sortButton(_ title: String, asc: FileSortOrder, desc: FileSortOrder, minWidth: CGFloat) -> some View {
+    private func sortButton(_ title: String, asc: FileSortOrder,
+                             desc: FileSortOrder, minWidth: CGFloat) -> some View {
         Button {
             sortOrder = sortOrder == asc ? desc : asc
         } label: {
@@ -135,6 +176,8 @@ struct PreAddSheet: View {
         }
         .buttonStyle(.plain)
     }
+
+    // MARK: - Helpers
 
     private func fileBinding(_ file: PendingFile) -> Binding<PendingFile> {
         Binding(
@@ -153,50 +196,69 @@ struct PreAddSheet: View {
     }
 }
 
+// MARK: - File row
+
 private struct PreAddFileRow: View {
     @Binding var file: PendingFile
-    let totalSize: Int64
 
     var body: some View {
         HStack(spacing: 8) {
-            TriStateCheckbox(state: file.priority == .dontDownload ? .off : .on)
-                .onTapGesture {
-                    file.priority = file.priority == .dontDownload ? .normal : .dontDownload
-                }
-                .padding(.leading, 8)
+
+            // Checkbox — Button so it's reliably tappable
+            Button {
+                file.priority = file.priority == .dontDownload ? .normal : .dontDownload
+            } label: {
+                TriStateCheckbox(state: file.priority == .dontDownload ? .off : .on)
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 8)
 
             Image(systemName: fileIcon(file.name))
-                .foregroundStyle(.secondary).font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(file.name)
-                    .font(.caption).lineLimit(1).truncationMode(.middle)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                     .strikethrough(file.priority == .dontDownload)
                     .foregroundStyle(file.priority == .dontDownload ? .secondary : .primary)
                 if !file.directory.isEmpty {
                     Text(file.directory)
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
             .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
 
             Text(formatBytes(file.size))
-                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .trailing)
 
+            // Priority picker
             Menu {
                 ForEach(FilePriority.allCases, id: \.self) { p in
                     Button(p.label) { file.priority = p }
                 }
             } label: {
-                Text(file.priority.label)
-                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 2) {
+                    Text(file.priority.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 7))
+                        .foregroundStyle(.tertiary)
+                }
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 80)
+            .frame(width: 90)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 5)
         .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+            Divider().opacity(0.3)
+        }
     }
 
     private func fileIcon(_ name: String) -> String {

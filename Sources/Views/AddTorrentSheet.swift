@@ -6,14 +6,13 @@ import ClibtorrentBridge
 
 struct AddTorrentSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var magnetURI = ""
-    @State private var saveDir   = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
+    @State private var magnetURI    = ""
+    @State private var torrentPath  = ""
+    @State private var saveDir      = FileManager.default.homeDirectoryForCurrentUser
+                                        .appendingPathComponent("Downloads").path
     @State private var showFilePicker = false
-    @State private var tab = 0
-
+    @State private var tab            = 0
     @State private var parseError: String?
-    @State private var isFetchingMetadata = false
-    @State private var metadataHandle: LTTorrentHandle?
 
     let engine: TorrentEngine
     let onNext: (PendingTorrent, LTTorrentHandle?) -> Void
@@ -37,14 +36,16 @@ struct AddTorrentSheet: View {
                 } else {
                     Section(".torrent file") {
                         Button("Choose file\u{2026}") { showFilePicker = true }
-                            .fileImporter(isPresented: $showFilePicker,
-                                          allowedContentTypes: [UTType(filenameExtension: "torrent")!]) { result in
+                            .fileImporter(
+                                isPresented: $showFilePicker,
+                                allowedContentTypes: [UTType(filenameExtension: "torrent")!]
+                            ) { result in
                                 if case .success(let url) = result {
-                                    magnetURI = url.path
+                                    torrentPath = url.path
                                 }
                             }
-                        if !magnetURI.isEmpty {
-                            Text(magnetURI)
+                        if !torrentPath.isEmpty {
+                            Text(torrentPath)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -56,17 +57,6 @@ struct AddTorrentSheet: View {
                     TextField("Save path", text: $saveDir)
                         .font(.system(.body, design: .monospaced))
                 }
-
-                if isFetchingMetadata {
-                    Section {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("Fetching metadata\u{2026}")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
             }
             .formStyle(.grouped)
             .navigationTitle("Add Torrent")
@@ -75,18 +65,15 @@ struct AddTorrentSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(isFetchingMetadata ? "Fetching\u{2026}" : "Next\u{2026}") {
-                        if tab == 0 {
-                            startMagnetFetch()
-                        } else {
-                            parseTorrentFile()
-                        }
+                    Button("Next\u{2026}") {
+                        if tab == 0 { handleMagnet() }
+                        else        { handleTorrentFile() }
                     }
-                    .disabled(magnetURI.isEmpty || isFetchingMetadata)
+                    .disabled(tab == 0 ? magnetURI.isEmpty : torrentPath.isEmpty)
                 }
             }
         }
-        .frame(minWidth: 440, minHeight: 340)
+        .frame(minWidth: 440, minHeight: 300)
         .alert("Error", isPresented: .constant(parseError != nil)) {
             Button("OK") { parseError = nil }
         } message: {
@@ -94,42 +81,53 @@ struct AddTorrentSheet: View {
         }
     }
 
-    private func startMagnetFetch() {
-        isFetchingMetadata = true
-        metadataHandle = engine.fetchMetadata(
-            uri: magnetURI,
-            onFiles: { files in
-                isFetchingMetadata = false
-                var name = magnetURI
-                if let comps = URLComponents(string: magnetURI),
-                   let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
-                    name = dn
-                }
-                let pending = PendingTorrent(
-                    source: .magnet(uri: magnetURI),
-                    name: name,
-                    totalSize: files.reduce(0) { $0 + $1.size },
-                    savePath: saveDir,
-                    files: files
-                )
-                onNext(pending, metadataHandle)
-                dismiss()
+    // MARK: - Magnet: open window immediately, fetch metadata in background
+
+    private func handleMagnet() {
+        let uri  = magnetURI
+        let save = saveDir
+
+        // Extract display name from dn= if present
+        var displayName = "Fetching metadata\u{2026}"
+        if let comps = URLComponents(string: uri),
+           let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+            displayName = dn
+        }
+
+        // Build a stub pending with empty file list — sheet opens instantly
+        let stub = PendingTorrent(
+            source:    .magnet(uri: uri),
+            name:      displayName,
+            totalSize: 0,
+            savePath:  save,
+            files:     []
+        )
+
+        // Add magnet in paused/metadata-only mode, get handle back
+        let handle = engine.fetchMetadata(
+            uri: uri,
+            onFiles: { _ in
+                // files are pushed directly into the window via the holder
+                // see ContentView.showPreAddWindow
             },
             onError: {
-                isFetchingMetadata = false
                 parseError = "Could not fetch magnet metadata."
             }
         )
+
+        onNext(stub, handle)
+        dismiss()
     }
 
-    private func parseTorrentFile() {
-        if let pending = engine.parse(torrentPath: magnetURI) {
-            var p = pending
-            p.savePath = saveDir
-            onNext(p, nil)
-            dismiss()
-        } else {
+    // MARK: - .torrent file: parse locally, open window with full file list
+
+    private func handleTorrentFile() {
+        guard var pending = engine.parse(torrentPath: torrentPath) else {
             parseError = "Failed to parse torrent file."
+            return
         }
+        pending.savePath = saveDir
+        onNext(pending, nil)
+        dismiss()
     }
 }
