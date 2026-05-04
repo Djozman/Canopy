@@ -9,7 +9,7 @@ public struct PendingTorrent {
     }
 
     public let source: Source
-    public let name: String
+    public var name: String
     public var totalSize: Int64
     public var savePath: String
     public var files: [PendingFile]
