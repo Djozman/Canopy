@@ -75,18 +75,20 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Pre-add window (fills the visible screen)
+    // MARK: - Pre-add window
+    //
+    // Key design: PreAddViewModel is an ObservableObject owned by the window.
+    // PreAddSheet observes it via @ObservedObject so every mutation
+    // (checkbox toggle, sort change, file priority) triggers a real SwiftUI diff.
+    // No fake Binding<T> over a reference box — that pattern silently swallows
+    // mutations because SwiftUI never sees a value change on the Binding itself.
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
-        let holder  = PreAddWindowHolder()
-        let pending = MutableBox(pending)
+        let holder = PreAddWindowHolder()
+        let model  = PreAddViewModel(pending: pending)
 
-        // Build the root view. The binding reads/writes the MutableBox.
         let rootView = PreAddSheet(
-            pending: Binding(
-                get: { pending.value },
-                set: { pending.value = $0 }
-            ),
+            model: model,
             onConfirm: { confirmed in
                 if let handle = magnetHandle {
                     engine.commitMagnet(handle: handle,
@@ -98,58 +100,33 @@ struct ContentView: View {
                 holder.window?.close()
             },
             onCancel: {
-                if let handle = magnetHandle {
-                    engine.cancelMagnet(handle: handle)
-                }
+                if let handle = magnetHandle { engine.cancelMagnet(handle: handle) }
                 holder.window?.close()
             }
         )
 
         let hosting = NSHostingController(rootView: rootView)
         let window  = NSWindow(contentViewController: hosting)
-        window.title = pending.value.name
+        window.title = pending.name
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
 
-        // Size the window to fill the visible screen (excluding menu bar + Dock)
         if let screen = NSScreen.main {
-            let frame = screen.visibleFrame
-            window.setFrame(frame, display: false)
+            window.setFrame(screen.visibleFrame, display: false)
         }
 
         window.makeKeyAndOrderFront(nil)
         holder.window = window
 
-        // For magnets: once metadata arrives, push updated file list into the window
-        if pending.value.isMagnet, let handle = magnetHandle {
-            engine.onMetadataReady(for: handle) { files in
+        // Magnet: push real file list into the model when metadata arrives.
+        // Because model is @Published, SwiftUI re-renders automatically.
+        if pending.isMagnet, let handle = magnetHandle {
+            engine.onMetadataReady(for: handle) { [weak model] files in
+                guard let model else { return }
                 DispatchQueue.main.async {
-                    let total = files.reduce(0) { $0 + $1.size }
-                    pending.value.files     = files
-                    pending.value.totalSize = total
-                    // Force the hosting controller to re-render
-                    hosting.rootView = PreAddSheet(
-                        pending: Binding(
-                            get: { pending.value },
-                            set: { pending.value = $0 }
-                        ),
-                        onConfirm: { confirmed in
-                            if let handle = magnetHandle {
-                                engine.commitMagnet(handle: handle,
-                                                    savePath: confirmed.savePath,
-                                                    files: confirmed.files)
-                            } else {
-                                engine.confirm(confirmed)
-                            }
-                            holder.window?.close()
-                        },
-                        onCancel: {
-                            if let handle = magnetHandle {
-                                engine.cancelMagnet(handle: handle)
-                            }
-                            holder.window?.close()
-                        }
-                    )
-                    window.title = pending.value.name
+                    model.pending.files     = files
+                    model.pending.totalSize = files.reduce(0) { $0 + $1.size }
+                    model.pending.name      = handle.name.isEmpty ? model.pending.name : handle.name
+                    window.title = model.pending.name
                 }
             }
         }
@@ -223,15 +200,16 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Helpers
+// MARK: - PreAddViewModel
+// ObservableObject so SwiftUI's diff engine sees every mutation.
 
-/// Retains the NSWindow so ARC doesn't kill it.
-private final class PreAddWindowHolder {
-    var window: NSWindow?
+final class PreAddViewModel: ObservableObject {
+    @Published var pending: PendingTorrent
+    init(pending: PendingTorrent) { self.pending = pending }
 }
 
-/// Simple reference wrapper so closures share mutable state.
-private final class MutableBox<T> {
-    var value: T
-    init(_ value: T) { self.value = value }
+// MARK: - Window holder (keeps NSWindow alive)
+
+private final class PreAddWindowHolder {
+    var window: NSWindow?
 }
