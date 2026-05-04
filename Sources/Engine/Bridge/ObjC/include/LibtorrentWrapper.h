@@ -49,6 +49,14 @@ typedef NS_ENUM(int, LTAlertType) {
 - (void)reannounce;
 - (void)setDownloadLimit:(int)limit;
 - (void)setUploadLimit:(int)limit;
+
+// File tree support
+@property (readonly) int fileCount;
+- (NSArray<NSNumber *> *)fileProgressAll;
+- (nullable NSString *)filePathAtIndex:(int)index
+                                  size:(int64_t *)outSize
+                              priority:(int *)outPriority;
+- (void)setFilePriority:(int)priority atIndex:(int)index;
 @end
 
 @interface LibtorrentSession : NSObject

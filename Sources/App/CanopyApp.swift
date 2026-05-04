@@ -1,9 +1,9 @@
-// qBittorrentApp.swift — app entry point
+// CanopyApp.swift — app entry point
 
 import SwiftUI
 
 @main
-struct QBittorrentApp: App {
+struct CanopyApp: App {
     @StateObject private var engine = TorrentEngine()
 
     var body: some Scene {

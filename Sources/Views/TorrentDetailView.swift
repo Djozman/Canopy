@@ -12,7 +12,15 @@ enum DetailTab: String, CaseIterable {
 
 struct TorrentDetailView: View {
     let torrent: TorrentStatus
+    let engine: TorrentEngine
     @State private var tab: DetailTab = .general
+    @StateObject private var fileTreeVM: FileTreeViewModel
+
+    init(torrent: TorrentStatus, engine: TorrentEngine) {
+        self.torrent = torrent
+        self.engine = engine
+        _fileTreeVM = StateObject(wrappedValue: FileTreeViewModel(torrent: torrent))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,7 +39,9 @@ struct TorrentDetailView: View {
                 case .general:  GeneralTab(torrent: torrent)
                 case .trackers: TrackersTab()
                 case .peers:    PeersTab()
-                case .files:    FilesTab()
+                case .files:    FilesTab(vm: fileTreeVM)
+                                    .onAppear { fileTreeVM.refresh(torrent: torrent) }
+                                    .onChange(of: torrent.totalDone) { fileTreeVM.refresh(torrent: torrent) }
                 case .content:  ContentTab()
                 }
             }
@@ -127,36 +137,6 @@ private struct PeersTab: View {
 
 private struct PeerRow: Identifiable {
     let id: Int; let ip: String; let client: String; let progress: Double; let down: String; let up: String
-}
-
-// MARK: - Files Tab
-
-private struct FilesTab: View {
-    var body: some View {
-        Table(mockFiles) {
-            TableColumn("File") { f in
-                Label(f.name, systemImage: f.icon).font(.caption)
-            }
-            TableColumn("Size") { Text(formatBytes($0.size)).font(.caption).monospacedDigit() }
-            TableColumn("Progress") {
-                ProgressView(value: $0.progress).tint(Color.accentColor).frame(width: 80)
-            }
-            TableColumn("Priority") {
-                Text($0.priority).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .padding()
-    }
-
-    let mockFiles: [FileRow] = [
-        FileRow(id: 0, name: "ubuntu-24.04.2-desktop-amd64.iso", icon: "opticaldisc", size: 5_300_000_000, progress: 1.0, priority: "Normal"),
-        FileRow(id: 1, name: "SHA256SUMS",                        icon: "doc.text",   size: 4_096,         progress: 1.0, priority: "Normal"),
-        FileRow(id: 2, name: "SHA256SUMS.gpg",                    icon: "lock.doc",   size: 2_048,         progress: 1.0, priority: "Normal"),
-    ]
-}
-
-private struct FileRow: Identifiable {
-    let id: Int; let name: String; let icon: String; let size: Int64; let progress: Double; let priority: String
 }
 
 // MARK: - Content Tab (piece map)

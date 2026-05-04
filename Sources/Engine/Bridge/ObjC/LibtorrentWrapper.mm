@@ -164,6 +164,45 @@ static int mapState(lt::torrent_status::state_t s) {
 - (void)setDownloadLimit:(int)limit { _handle.set_download_limit(limit); }
 - (void)setUploadLimit:(int)limit   { _handle.set_upload_limit(limit); }
 
+// ─── File tree ────────────────────────────────────────────────────────────
+
+- (int)fileCount {
+    auto ti = _handle.torrent_file();
+    return ti ? (int)ti->files().num_files() : 0;
+}
+
+- (NSArray<NSNumber *> *)fileProgressAll {
+    int count = [self fileCount];
+    if (count <= 0) return @[];
+    std::vector<int64_t> v;
+    _handle.file_progress(v, lt::torrent_handle::piece_granularity);
+    NSMutableArray *a = [NSMutableArray arrayWithCapacity:count];
+    int n = std::min((int)v.size(), count);
+    for (int i = 0; i < n; i++) {
+        [a addObject:@(v[i])];
+    }
+    for (int i = n; i < count; i++) {
+        [a addObject:@(0)];
+    }
+    return a;
+}
+
+- (nullable NSString *)filePathAtIndex:(int)index
+                                  size:(int64_t *)outSize
+                              priority:(int *)outPriority {
+    auto ti = _handle.torrent_file();
+    if (!ti || index < 0 || index >= ti->files().num_files()) return nil;
+    auto fs = ti->files();
+    if (outSize)     *outSize     = fs.file_size(lt::file_index_t{index});
+    if (outPriority) *outPriority = (int)_handle.file_priority(lt::file_index_t{index});
+    return [NSString stringWithUTF8String:fs.file_path(lt::file_index_t{index}).c_str()];
+}
+
+- (void)setFilePriority:(int)priority atIndex:(int)index {
+    _handle.file_priority(lt::file_index_t{index},
+                          lt::download_priority_t{(std::uint8_t)priority});
+}
+
 @end
 
 // ─── LibtorrentSession ─────────────────────────────────────────────────────

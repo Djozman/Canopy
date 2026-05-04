@@ -56,7 +56,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 380, ideal: 520)
         } detail: {
             if let t = vm.selectedTorrent {
-                TorrentDetailView(torrent: t)
+                TorrentDetailView(torrent: t, engine: engine)
             } else {
                 ContentUnavailableView("Select a torrent",
                     systemImage: "arrow.down.circle",
