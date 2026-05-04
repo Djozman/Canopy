@@ -109,6 +109,9 @@ public final class TorrentEngine: ObservableObject {
     private nonisolated(unsafe) var alertTimer: Timer?
     private let queue = DispatchQueue(label: "com.qbt.libtorrent", qos: .utility)
 
+    // Multiple callbacks per info-hash: one for the PreAdd window, one for the Files tab, etc.
+    private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
+
     public init() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -192,10 +195,10 @@ public final class TorrentEngine: ObservableObject {
             .first ?? NSHomeDirectory() + "/Downloads"
     }
 
-    // MARK: - Magnet metadata mode
+    // MARK: - Magnet metadata fetch
 
-    private var metadataCallbacks: [String: ([PendingFile]) -> Void] = [:]
-
+    /// Add magnet in paused/metadata-only mode. Returns handle immediately.
+    /// Register callbacks via `onMetadataReady(for:callback:)` before metadata arrives.
     public func fetchMetadata(
         uri: String,
         onFiles: @MainActor @escaping ([PendingFile]) -> Void,
@@ -210,11 +213,24 @@ public final class TorrentEngine: ObservableObject {
             DispatchQueue.main.async { onError() }
             return nil
         }
+        // Register the caller's callback
         let hash = h.infoHash
-        metadataCallbacks[hash] = { files in
+        metadataCallbacks[hash, default: []].append { files in
             DispatchQueue.main.async { onFiles(files) }
         }
         return h
+    }
+
+    /// Register an additional callback to be fired when metadata arrives for a given handle.
+    /// Safe to call multiple times — each callback is appended and all fire once.
+    public func onMetadataReady(
+        for handle: LTTorrentHandle,
+        callback: @escaping ([PendingFile]) -> Void
+    ) {
+        let hash = handle.infoHash
+        metadataCallbacks[hash, default: []].append { files in
+            DispatchQueue.main.async { callback(files) }
+        }
     }
 
     public func commitMagnet(handle: LTTorrentHandle, savePath: String, files: [PendingFile]) {
@@ -227,23 +243,27 @@ public final class TorrentEngine: ObservableObject {
     }
 
     public func cancelMagnet(handle: LTTorrentHandle) {
+        metadataCallbacks.removeValue(forKey: handle.infoHash)
         let session = self.session
         queue.async {
             session?.cancelMagnet(handle)
         }
     }
 
-    func handleMetadataReceived(infoHash: String, handle: LTTorrentHandle) {
-        guard let cb = metadataCallbacks.removeValue(forKey: infoHash) else { return }
+    // Called from drainAlerts when metadata_received_alert fires
+    private func handleMetadataReceived(infoHash: String, handle: LTTorrentHandle) {
+        guard let callbacks = metadataCallbacks.removeValue(forKey: infoHash) else { return }
         let count = Int(handle.fileCount)
         var files: [PendingFile] = []
         for i in 0..<count {
             var outSize: Int64 = 0
             var outPriority: Int32 = 0
-            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority) else { continue }
+            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority)
+            else { continue }
             files.append(PendingFile(id: i, path: path, size: outSize))
         }
-        cb(files)
+        // Fire every registered callback with the same file list
+        for cb in callbacks { cb(files) }
     }
 
     public func pause(_ torrent: TorrentStatus) {
