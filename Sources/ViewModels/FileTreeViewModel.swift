@@ -13,6 +13,10 @@ public final class FileTreeViewModel: ObservableObject {
     @Published public var sortOrder: FileSortOrder = .nameAsc
 
     private var torrent: TorrentStatus
+    /// Whether the tree has been built at least once. On first build we
+    /// replace roots entirely; on subsequent refreshes we patch in-place
+    /// so user-toggled isExpanded states are preserved.
+    private var treeBuilt = false
 
     public init(torrent: TorrentStatus) {
         self.torrent = torrent
@@ -58,10 +62,55 @@ public final class FileTreeViewModel: ObservableObject {
             infos.append((i, path, outSize, down, Int(outPriority)))
         }
 
-        roots = buildTree(infos)
-        var r = roots
-        applySort(&r, order: sortOrder)
-        roots = r
+        if !treeBuilt {
+            // First build: create all nodes fresh
+            roots = buildTree(infos)
+            var r = roots
+            applySort(&r, order: sortOrder)
+            roots = r
+            treeBuilt = true
+        } else {
+            // Subsequent refreshes: patch existing nodes in-place so
+            // isExpanded / user interactions survive the timer tick.
+            patchTree(&roots, infos: infos)
+            // Re-compute folder sizes without replacing nodes
+            for node in roots { computeFolderSize(node) }
+        }
+    }
+
+    /// Walk the existing tree and update mutable data (progress, priority).
+    /// Nodes are matched by fileIndex for leaves and by name for folders.
+    /// We never replace a node object — only mutate its properties.
+    private func patchTree(
+        _ nodes: inout [FileNode],
+        infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
+    ) {
+        // Build a flat index -> info map for O(1) lookup
+        var byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)] = [:]
+        for info in infos {
+            byIndex[info.index] = (info.size, info.downloaded, info.priority)
+        }
+        patchNodes(&nodes, byIndex: byIndex)
+    }
+
+    private func patchNodes(
+        _ nodes: inout [FileNode],
+        byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)]
+    ) {
+        for node in nodes {
+            if let idx = node.fileIndex, let info = byIndex[idx] {
+                // Leaf: update live data only, never touch isExpanded
+                node.downloaded = info.downloaded
+                // Only sync priority if libtorrent disagrees (e.g. after re-check)
+                if let p = FilePriority(rawValue: info.priority), p != node.priority {
+                    node.priority = p
+                }
+            } else if node.isFolder, var children = node.children {
+                // Folder: recurse, keep the same node object
+                patchNodes(&children, byIndex: byIndex)
+                node.children = children
+            }
+        }
     }
 
     private func applyPriority(_ priority: FilePriority, to node: FileNode) {
@@ -79,8 +128,10 @@ public final class FileTreeViewModel: ObservableObject {
         }
     }
 
-    private func buildTree(_ infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]) -> [FileNode] {
-        var rootDict: [String: FileNode] = [:]
+    private func buildTree(
+        _ infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
+    ) -> [FileNode] {
+        var rootDict:  [String: FileNode] = [:]
         var rootOrder: [String] = []
 
         for info in infos {
