@@ -3,11 +3,16 @@
 import SwiftUI
 
 struct PreAddSheet: View {
-    @Binding var pending: PendingTorrent
+    // ObservableObject owned by the NSWindow, not a Binding over a reference box.
+    // Every write to model.pending triggers @Published → SwiftUI diff → re-render.
+    @ObservedObject var model: PreAddViewModel
     let onConfirm: (PendingTorrent) -> Void
     let onCancel: () -> Void
 
     @State private var sortOrder: FileSortOrder = .nameAsc
+
+    // Convenience shorthands
+    private var pending: PendingTorrent { model.pending }
 
     private var sortedFiles: [PendingFile] {
         switch sortOrder {
@@ -64,7 +69,7 @@ struct PreAddSheet: View {
                     panel.canChooseDirectories = true
                     panel.allowsMultipleSelection = false
                     if panel.runModal() == .OK, let url = panel.url {
-                        pending.savePath = url.path
+                        model.pending.savePath = url.path
                     }
                 }
                 .font(.caption)
@@ -86,10 +91,7 @@ struct PreAddSheet: View {
             } else {
                 // Column header
                 HStack(spacing: 0) {
-                    // Select-all — Button so it's always hittable
-                    Button {
-                        toggleAll()
-                    } label: {
+                    Button { toggleAll() } label: {
                         TriStateCheckbox(state: allState)
                     }
                     .buttonStyle(.plain)
@@ -111,7 +113,7 @@ struct PreAddSheet: View {
 
                 List {
                     ForEach(sortedFiles) { file in
-                        PreAddFileRow(file: fileBinding(file))
+                        PreAddFileRow(model: model, fileID: file.id)
                             .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                             .listRowSeparator(.hidden)
                     }
@@ -123,9 +125,7 @@ struct PreAddSheet: View {
 
             // ── Bottom bar ────────────────────────────────────────
             HStack(spacing: 12) {
-                Button {
-                    toggleAll()
-                } label: {
+                Button { toggleAll() } label: {
                     HStack(spacing: 6) {
                         TriStateCheckbox(state: allState)
                         Text("Select all")
@@ -179,86 +179,88 @@ struct PreAddSheet: View {
 
     // MARK: - Helpers
 
-    private func fileBinding(_ file: PendingFile) -> Binding<PendingFile> {
-        Binding(
-            get: { pending.files.first(where: { $0.id == file.id }) ?? file },
-            set: { updated in
-                if let idx = pending.files.firstIndex(where: { $0.id == updated.id }) {
-                    pending.files[idx] = updated
-                }
-            }
-        )
-    }
-
     private func toggleAll() {
         let newPrio: FilePriority = allState == .on ? .dontDownload : .normal
-        for i in pending.files.indices { pending.files[i].priority = newPrio }
+        for i in model.pending.files.indices {
+            model.pending.files[i].priority = newPrio
+        }
     }
 }
 
 // MARK: - File row
+// Receives the shared ObservableObject + a stable file ID.
+// Writes go directly to model.pending.files[idx] — @Published fires, parent re-renders.
 
 private struct PreAddFileRow: View {
-    @Binding var file: PendingFile
+    @ObservedObject var model: PreAddViewModel
+    let fileID: Int
+
+    private var idx: Int? {
+        model.pending.files.firstIndex(where: { $0.id == fileID })
+    }
 
     var body: some View {
-        HStack(spacing: 8) {
+        // Guard: file might not exist yet (shouldn’t happen, but be safe)
+        guard let i = idx else { return AnyView(EmptyView()) }
+        let file = model.pending.files[i]
+        return AnyView(
+            HStack(spacing: 8) {
 
-            // Checkbox — Button so it's reliably tappable
-            Button {
-                file.priority = file.priority == .dontDownload ? .normal : .dontDownload
-            } label: {
-                TriStateCheckbox(state: file.priority == .dontDownload ? .off : .on)
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 8)
-
-            Image(systemName: fileIcon(file.name))
-                .foregroundStyle(.secondary)
-                .font(.system(size: 12))
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(file.name)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .strikethrough(file.priority == .dontDownload)
-                    .foregroundStyle(file.priority == .dontDownload ? .secondary : .primary)
-                if !file.directory.isEmpty {
-                    Text(file.directory)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                Button {
+                    model.pending.files[i].priority =
+                        model.pending.files[i].priority == .dontDownload ? .normal : .dontDownload
+                } label: {
+                    TriStateCheckbox(state: file.priority == .dontDownload ? .off : .on)
                 }
-            }
-            .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
 
-            Text(formatBytes(file.size))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 80, alignment: .trailing)
+                Image(systemName: fileIcon(file.name))
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12))
 
-            // Priority picker
-            Menu {
-                ForEach(FilePriority.allCases, id: \.self) { p in
-                    Button(p.label) { file.priority = p }
-                }
-            } label: {
-                HStack(spacing: 2) {
-                    Text(file.priority.label)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(file.name)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 7))
-                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .strikethrough(file.priority == .dontDownload)
+                        .foregroundStyle(file.priority == .dontDownload ? .secondary : .primary)
+                    if !file.directory.isEmpty {
+                        Text(file.directory)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
+                .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
+
+                Text(formatBytes(file.size))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 80, alignment: .trailing)
+
+                Menu {
+                    ForEach(FilePriority.allCases, id: \.self) { p in
+                        Button(p.label) { model.pending.files[i].priority = p }
+                    }
+                } label: {
+                    HStack(spacing: 2) {
+                        Text(file.priority.label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 7))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(width: 90)
             }
-            .frame(width: 90)
-        }
-        .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.3)
-        }
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+            .overlay(alignment: .bottom) {
+                Divider().opacity(0.3)
+            }
+        )
     }
 
     private func fileIcon(_ name: String) -> String {
