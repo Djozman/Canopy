@@ -64,13 +64,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showAddSheet) {
-            AddTorrentSheet { uri, saveDir, isMagnet in
-                if isMagnet {
-                    engine.addMagnetLink(uri, saveTo: saveDir)
-                } else {
-                    engine.addTorrentFile(at: uri, saveTo: saveDir)
-                }
-            }
+            AddTorrentSheet(engine: engine)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()

@@ -259,6 +259,54 @@ static int mapState(lt::torrent_status::state_t s) {
     } catch (...) { return nil; }
 }
 
+- (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
+                                    savePath:(NSString *)savePath
+                                  priorities:(nullable NSArray<NSNumber *> *)priorities {
+    try {
+        lt::add_torrent_params p;
+        lt::error_code ec;
+        auto ti = std::make_shared<lt::torrent_info>(std::string(path.UTF8String), ec);
+        if (ec) return nil;
+        p.ti = ti;
+        p.save_path = std::string(savePath.UTF8String);
+
+        if (priorities && (int)priorities.count == ti->num_files()) {
+            p.file_priorities.resize(ti->num_files());
+            for (int i = 0; i < (int)priorities.count; i++) {
+                p.file_priorities[i] = lt::download_priority_t{
+                    (std::uint8_t)[priorities[i] intValue]
+                };
+            }
+        }
+
+        lt::torrent_handle h = _session->add_torrent(p);
+        if (!h.is_valid()) return nil;
+
+        auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
+        [_handles addObject:wrapper];
+        return wrapper;
+    } catch (...) { return nil; }
+}
+
+- (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath {
+    try {
+        lt::error_code ec;
+        lt::torrent_info ti(std::string(torrentPath.UTF8String), ec);
+        if (ec) return nil;
+
+        NSMutableArray *result = [NSMutableArray array];
+        const auto &fs = ti.files();
+        for (int i = 0; i < fs.num_files(); i++) {
+            LTFileEntry *e = [[LTFileEntry alloc] init];
+            e.path  = [NSString stringWithUTF8String:fs.file_path(lt::file_index_t{i}).c_str()];
+            e.size  = fs.file_size(lt::file_index_t{i});
+            e.index = i;
+            [result addObject:e];
+        }
+        return result;
+    } catch (...) { return nil; }
+}
+
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
                                   savePath:(NSString *)savePath {
     try {
@@ -401,4 +449,7 @@ static int mapState(lt::torrent_status::state_t s) {
     _session->apply_settings(sp);
 }
 
+@end
+
+@implementation LTFileEntry
 @end

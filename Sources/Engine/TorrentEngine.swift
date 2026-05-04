@@ -147,6 +147,51 @@ public final class TorrentEngine: ObservableObject {
         }
     }
 
+    // MARK: - Pre-add parsing
+
+    public func parse(torrentPath: String) -> PendingTorrent? {
+        guard let session, let entries = session.parseFileList(torrentPath) else { return nil }
+        let files = entries.map { e in
+            PendingFile(id: Int(e.index), path: e.path, size: e.size)
+        }
+        let total = files.reduce(0) { $0 + $1.size }
+        let name = URL(fileURLWithPath: torrentPath).deletingPathExtension().lastPathComponent
+        return PendingTorrent(source: .file(path: torrentPath),
+                              name: name, totalSize: total,
+                              savePath: defaultSavePath, files: files)
+    }
+
+    public func pendingMagnet(uri: String) -> PendingTorrent {
+        var name = "Fetching metadata\u{2026}"
+        if let comps = URLComponents(string: uri),
+           let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+            name = dn
+        }
+        return PendingTorrent(source: .magnet(uri: uri),
+                              name: name, totalSize: 0,
+                              savePath: defaultSavePath, files: [])
+    }
+
+    public func confirm(_ pending: PendingTorrent) {
+        let priorities = pending.files.map { NSNumber(value: $0.priority.rawValue) }
+        let savePath = (pending.savePath as NSString).expandingTildeInPath
+        let session = self.session
+        queue.async {
+            switch pending.source {
+            case .file(let path):
+                _ = session?.addTorrentFile(path, savePath: savePath,
+                                            priorities: priorities.isEmpty ? nil : priorities)
+            case .magnet(let uri):
+                _ = session?.addMagnetURI(uri, savePath: savePath)
+            }
+        }
+    }
+
+    private var defaultSavePath: String {
+        NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
+            .first ?? NSHomeDirectory() + "/Downloads"
+    }
+
     public func pause(_ torrent: TorrentStatus) {
         if let h = torrent.handle { queue.async { h.pause() } }
     }

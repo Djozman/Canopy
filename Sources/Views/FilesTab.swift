@@ -24,7 +24,7 @@ struct FilesTab: View {
             Divider()
 
             ScrollView {
-                LazyVStack(spacing: 0) {
+                VStack(spacing: 0) {
                     ForEach(vm.roots) { node in
                         FileNodeRow(node: node, depth: 0, vm: vm)
                     }
@@ -137,11 +137,24 @@ private struct FileNodeRow: View {
         if p > 0    { return .blue  }
         return .secondary
     }
+
+    private func fileIcon(_ name: String) -> String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "mkv", "mp4", "avi", "mov", "webm": return "film"
+        case "mp3", "flac", "wav", "m4a":        return "music.note"
+        case "iso", "img", "dmg":                return "opticaldisc"
+        case "zip", "rar", "7z", "tar", "gz":    return "doc.zipper"
+        case "txt", "md", "nfo":                 return "doc.text"
+        case "jpg", "png", "gif", "webp":        return "photo"
+        default:                                  return "doc"
+        }
+    }
 }
 
 // MARK: - Tri-state Checkbox
 
-private struct TriStateCheckbox: View {
+struct TriStateCheckbox: View {
     let state: CheckState
 
     var body: some View {
@@ -165,18 +178,5 @@ private struct TriStateCheckbox: View {
             }
         }
         .frame(width: 14, height: 14)
-    }
-}
-
-private func fileIcon(_ name: String) -> String {
-    let ext = (name as NSString).pathExtension.lowercased()
-    switch ext {
-    case "mkv", "mp4", "avi", "mov", "webm": return "film"
-    case "mp3", "flac", "wav", "m4a":        return "music.note"
-    case "iso", "img", "dmg":                return "opticaldisc"
-    case "zip", "rar", "7z", "tar", "gz":    return "doc.zipper"
-    case "txt", "md", "nfo":                 return "doc.text"
-    case "jpg", "png", "gif", "webp":        return "photo"
-    default:                                  return "doc"
     }
 }

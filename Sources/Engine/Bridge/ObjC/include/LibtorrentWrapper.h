@@ -59,12 +59,22 @@ typedef NS_ENUM(int, LTAlertType) {
 - (void)setFilePriority:(int)priority atIndex:(int)index;
 @end
 
+@interface LTFileEntry : NSObject
+@property (nonatomic, copy)   NSString *path;
+@property (nonatomic, assign) int64_t   size;
+@property (nonatomic, assign) int       index;
+@end
+
 @interface LibtorrentSession : NSObject
 - (instancetype)init;
 - (nullable LTTorrentHandle *)addTorrentFile:(NSString *)filePath
                                     savePath:(NSString *)savePath;
+- (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
+                                    savePath:(NSString *)savePath
+                                  priorities:(nullable NSArray<NSNumber *> *)priorities;
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
                                   savePath:(NSString *)savePath;
+- (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath;
 - (NSArray<LTTorrentHandle *> *)allTorrents;
 - (void)removeTorrent:(LTTorrentHandle *)handle deleteFiles:(BOOL)deleteFiles;
 - (void)pause;

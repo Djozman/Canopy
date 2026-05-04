@@ -10,7 +10,11 @@ struct AddTorrentSheet: View {
     @State private var showFilePicker = false
     @State private var tab = 0
 
-    var onAdd: (String, String, Bool) -> Void  // (uri/path, saveDir, isMagnet)
+    @State private var pendingTorrent: PendingTorrent?
+    @State private var showingPreAdd = false
+    @State private var parseError: String?
+
+    let engine: TorrentEngine
 
     var body: some View {
         NavigationStack {
@@ -30,7 +34,7 @@ struct AddTorrentSheet: View {
                     }
                 } else {
                     Section(".torrent file") {
-                        Button("Choose file…") { showFilePicker = true }
+                        Button("Choose file\u{2026}") { showFilePicker = true }
                             .fileImporter(isPresented: $showFilePicker,
                                           allowedContentTypes: [UTType(filenameExtension: "torrent")!]) { result in
                                 if case .success(let url) = result {
@@ -58,14 +62,47 @@ struct AddTorrentSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        onAdd(magnetURI, saveDir, tab == 0)
-                        dismiss()
+                    Button("Next\u{2026}") {
+                        if tab == 0 {
+                            var pending = engine.pendingMagnet(uri: magnetURI)
+                            pending.savePath = saveDir
+                            pendingTorrent = pending
+                            showingPreAdd = true
+                        } else {
+                            if let pending = engine.parse(torrentPath: magnetURI) {
+                                var p = pending
+                                p.savePath = saveDir
+                                pendingTorrent = p
+                                showingPreAdd = true
+                            } else {
+                                parseError = "Failed to parse torrent file."
+                            }
+                        }
                     }
                     .disabled(magnetURI.isEmpty)
                 }
             }
         }
         .frame(minWidth: 440, minHeight: 340)
+        .sheet(isPresented: $showingPreAdd) {
+            if let binding = Binding($pendingTorrent) {
+                PreAddSheet(
+                    pending: binding,
+                    onConfirm: { confirmed in
+                        engine.confirm(confirmed)
+                        showingPreAdd = false
+                        dismiss()
+                    },
+                    onCancel: {
+                        showingPreAdd = false
+                    }
+                )
+            }
+        }
+        .alert("Error", isPresented: .constant(parseError != nil)) {
+            Button("OK") { parseError = nil }
+        } message: {
+            Text(parseError ?? "")
+        }
     }
 }
