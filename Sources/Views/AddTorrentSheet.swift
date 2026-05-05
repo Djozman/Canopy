@@ -94,7 +94,6 @@ struct AddTorrentSheet: View {
             displayName = dn
         }
 
-        // Build a stub pending with empty file list — sheet opens instantly
         let stub = PendingTorrent(
             source:    .magnet(uri: uri),
             name:      displayName,
@@ -104,18 +103,32 @@ struct AddTorrentSheet: View {
         )
 
         // Add magnet in paused/metadata-only mode, get handle back
-        let handle = engine.fetchMetadata(
+        var magnetHandle: LTTorrentHandle?
+        magnetHandle = engine.fetchMetadata(
             uri: uri,
-            onFiles: { _ in
-                // files are pushed directly into the window via the holder
-                // see ContentView.showPreAddWindow
+            onFiles: { files in
+                // Metadata arrived. Push the file list into the open
+                // PreAddSheet via the same notification ContentView listens
+                // to. ContentView.showPreAddWindow updates the existing
+                // window in-place when currentPreAddHolder is set.
+                let updated = PendingTorrent(
+                    source:    .magnet(uri: uri),
+                    name:      displayName,
+                    totalSize: files.reduce(0) { $0 + $1.size },
+                    savePath:  save,
+                    files:     files
+                )
+                NotificationCenter.default.post(
+                    name: .showPreAdd, object: nil,
+                    userInfo: ["pending": updated, "handle": magnetHandle as Any]
+                )
             },
             onError: {
                 parseError = "Could not fetch magnet metadata."
             }
         )
 
-        onNext(stub, handle)
+        onNext(stub, magnetHandle)
         dismiss()
     }
 

@@ -183,13 +183,19 @@ public final class TorrentEngine: ObservableObject {
         let priorities = pending.files.map { NSNumber(value: $0.priority.rawValue) }
         let savePath = (pending.savePath as NSString).expandingTildeInPath
         let session = self.session
+        let source = pending.source
+        let fileCount = pending.files.count
+        let name = pending.name
+        NSLog("[Canopy] confirm(\(name)): savePath=\(savePath), fileCount=\(fileCount)")
         queue.async {
-            switch pending.source {
+            switch source {
             case .file(let path):
-                _ = session?.addTorrentFile(path, savePath: savePath,
-                                            priorities: priorities.isEmpty ? nil : priorities)
+                let result = session?.addTorrentFile(path, savePath: savePath,
+                                                    priorities: priorities.isEmpty ? nil : priorities)
+                NSLog("[Canopy] confirm: addTorrentFile(\(path)) -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")")
             case .magnet(let uri):
-                _ = session?.addMagnetURI(uri, savePath: savePath)
+                let result = session?.addMagnetURI(uri, savePath: savePath)
+                NSLog("[Canopy] confirm: addMagnetURI -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")")
             }
         }
     }
