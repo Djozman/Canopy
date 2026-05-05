@@ -266,22 +266,34 @@ public final class TorrentEngine: ObservableObject {
     }
 
     public func pause(_ torrent: TorrentStatus) {
-        if let h = torrent.handle { queue.async { h.pause() } }
+        guard let h = torrent.handle else { NSLog("[Canopy] pause: no handle for \(torrent.name)"); return }
+        NSLog("[Canopy] pause(\(torrent.name))")
+        queue.async { h.pause() }
     }
     public func resume(_ torrent: TorrentStatus) {
-        if let h = torrent.handle { queue.async { h.resume() } }
+        guard let h = torrent.handle else { NSLog("[Canopy] resume: no handle for \(torrent.name)"); return }
+        NSLog("[Canopy] resume(\(torrent.name))")
+        queue.async { h.resume() }
     }
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
+        guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
+        NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(deleteFiles))")
         let session = self.session
-        if let h = torrent.handle {
-            queue.async { session?.removeTorrent(h, deleteFiles: deleteFiles) }
+        let id = torrent.id
+        queue.async { [weak self] in
+            session?.removeTorrent(h, deleteFiles: deleteFiles)
+            DispatchQueue.main.async { self?.torrents.removeAll { $0.id == id } }
         }
     }
     public func recheck(_ torrent: TorrentStatus) {
-        if let h = torrent.handle { queue.async { h.recheck() } }
+        guard let h = torrent.handle else { NSLog("[Canopy] recheck: no handle for \(torrent.name)"); return }
+        NSLog("[Canopy] recheck(\(torrent.name))")
+        queue.async { h.recheck() }
     }
     public func reannounce(_ torrent: TorrentStatus) {
-        if let h = torrent.handle { queue.async { h.reannounce() } }
+        guard let h = torrent.handle else { NSLog("[Canopy] reannounce: no handle for \(torrent.name)"); return }
+        NSLog("[Canopy] reannounce(\(torrent.name))")
+        queue.async { h.reannounce() }
     }
     public func pauseSession()  { let s = session; queue.async { s?.pause() } }
     public func resumeSession() { let s = session; queue.async { s?.resume() } }

@@ -7,7 +7,6 @@ import ClibtorrentBridge
 @main
 struct CanopyApp: App {
     private let engine = TorrentEngine()
-    @State private var pendingURL: URL?
 
     init() {
         claimDefaultHandlers()
@@ -18,19 +17,11 @@ struct CanopyApp: App {
             ContentView(engine: engine)
                 .environmentObject(engine)
                 .onOpenURL { url in
-                    pendingURL = url
-                }
-                .onAppear {
-                    if let url = pendingURL {
-                        handleIncomingURL(url)
-                        pendingURL = nil
-                    }
-                }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willBecomeActiveNotification)) { _ in
-                    if let url = pendingURL {
-                        handleIncomingURL(url)
-                        pendingURL = nil
-                    }
+                    // Process directly. Stashing into @State and reading on
+                    // .onAppear / willBecomeActive races against the URL
+                    // arriving when the app is already foregrounded — neither
+                    // hook fires reliably in that case.
+                    handleIncomingURL(url)
                 }
         }
         .windowStyle(.titleBar)
