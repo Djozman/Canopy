@@ -404,8 +404,14 @@ static int mapState(lt::torrent_status::state_t s) {
                         pos = full.rfind('/', pos - 1);
                     }
                 }
+            } else {
+                NSLog(@"[Canopy] removeTorrent: torrent_file() is null, cannot collect file paths for deletion");
             }
+        } else {
+            NSLog(@"[Canopy] removeTorrent: savePath is empty");
         }
+    } else {
+        NSLog(@"[Canopy] removeTorrent: deleteFiles is NO");
     }
 
     lt::remove_flags_t flags = lt::session_handle::delete_partfile;
@@ -415,7 +421,12 @@ static int mapState(lt::torrent_status::state_t s) {
     if (deleteFiles) {
         // Unlink files synchronously
         for (const auto &p : filePaths) {
-            unlink(p.c_str());
+            int rc = unlink(p.c_str());
+            if (rc != 0) {
+                NSLog(@"[Canopy] Failed to unlink: %s (errno=%d)", p.c_str(), errno);
+            } else {
+                NSLog(@"[Canopy] Deleted: %s", p.c_str());
+            }
         }
         // Clean up empty parent directories deepest-first
         if (!dirs.empty()) {
