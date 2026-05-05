@@ -1,6 +1,7 @@
 // CanopyApp.swift — app entry point
 
 import SwiftUI
+import AppKit
 
 @main
 struct CanopyApp: App {
@@ -13,6 +14,9 @@ struct CanopyApp: App {
                 .onOpenURL { url in
                     handleIncomingURL(url)
                 }
+                .onAppear {
+                    claimDefaultHandlers()
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
@@ -24,6 +28,12 @@ struct CanopyApp: App {
                 .keyboardShortcut("n", modifiers: .command)
             }
         }
+    }
+
+    private func claimDefaultHandlers() {
+        let bundleID = "com.canopy.client"
+        LSSetDefaultHandlerForURLScheme("magnet" as CFString, bundleID as CFString)
+        LSSetDefaultRoleHandlerForContentType("org.bittorrent.torrent" as CFString, .all, bundleID as CFString)
     }
 
     private func handleIncomingURL(_ url: URL) {
