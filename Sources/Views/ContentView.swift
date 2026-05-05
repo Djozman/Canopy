@@ -73,9 +73,45 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .onOpenURL { url in
+            handleIncomingURL(url)
+        }
     }
 
     // MARK: - Pre-add window
+
+    private func handleIncomingURL(_ url: URL) {
+        let saveDir = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
+            .first ?? NSHomeDirectory() + "/Downloads"
+
+        if url.scheme == "magnet" {
+            let handle = engine.fetchMetadata(
+                uri: url.absoluteString,
+                onFiles: { files in
+                    var name = url.absoluteString
+                    if let comps = URLComponents(string: url.absoluteString),
+                       let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+                        name = dn
+                    }
+                    let pending = PendingTorrent(
+                        source: .magnet(uri: url.absoluteString),
+                        name: name,
+                        totalSize: files.reduce(0) { $0 + $1.size },
+                        savePath: saveDir,
+                        files: files
+                    )
+                    showPreAddWindow(pending: pending, magnetHandle: handle)
+                },
+                onError: {}
+            )
+        } else if url.isFileURL, url.pathExtension.lowercased() == "torrent" {
+            if let pending = engine.parse(torrentPath: url.path) {
+                var p = pending
+                p.savePath = saveDir
+                showPreAddWindow(pending: p, magnetHandle: nil)
+            }
+        }
+    }
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
         let holder = PreAddWindowHolder()
