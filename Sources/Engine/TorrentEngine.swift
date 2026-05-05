@@ -113,11 +113,11 @@ public final class TorrentEngine: ObservableObject {
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
 
     public init() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            let s = LibtorrentSession()
-            DispatchQueue.main.async { self.session = s }
+        session = LibtorrentSession()
+        if session == nil {
+            sessionError = "Failed to create libtorrent session."
         }
+    }
     }
 
     deinit {

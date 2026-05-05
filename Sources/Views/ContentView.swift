@@ -73,47 +73,14 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .incomingURL)) { notif in
-            if let url = notif.object as? URL {
-                handleIncomingURL(url)
-            }
+        .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
+            guard let pending = notif.object as? PendingTorrent else { return }
+            let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
+            showPreAddWindow(pending: pending, magnetHandle: handle)
         }
     }
 
     // MARK: - Pre-add window
-
-    private func handleIncomingURL(_ url: URL) {
-        let saveDir = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
-            .first ?? NSHomeDirectory() + "/Downloads"
-
-        if url.scheme == "magnet" {
-            let handle = engine.fetchMetadata(
-                uri: url.absoluteString,
-                onFiles: { files in
-                    var name = url.absoluteString
-                    if let comps = URLComponents(string: url.absoluteString),
-                       let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
-                        name = dn
-                    }
-                    let pending = PendingTorrent(
-                        source: .magnet(uri: url.absoluteString),
-                        name: name,
-                        totalSize: files.reduce(0) { $0 + $1.size },
-                        savePath: saveDir,
-                        files: files
-                    )
-                    showPreAddWindow(pending: pending, magnetHandle: handle)
-                },
-                onError: {}
-            )
-        } else if url.isFileURL, url.pathExtension.lowercased() == "torrent" {
-            if let pending = engine.parse(torrentPath: url.path) {
-                var p = pending
-                p.savePath = saveDir
-                showPreAddWindow(pending: p, magnetHandle: nil)
-            }
-        }
-    }
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
         let holder = PreAddWindowHolder()
