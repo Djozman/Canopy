@@ -284,13 +284,22 @@ public final class TorrentEngine: ObservableObject {
         guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
         NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(deleteFiles))")
         let id = torrent.id
-        // Update UI synchronously, BEFORE dispatching the slow libtorrent work.
+        let savePath = deleteFiles ? torrent.savePath : nil
         pendingRemovals.insert(id)
         torrents.removeAll { $0.id == id }
         let session = self.session
         queue.async {
-            session?.removeTorrent(h, deleteFiles: deleteFiles)
+            session?.removeTorrent(h, deleteFiles: false)
+            if deleteFiles, let path = savePath {
+                Thread.sleep(forTimeInterval: 0.5)
+                let fm = FileManager.default
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                    try? fm.removeItem(atPath: path)
+                }
+            }
         }
+    }
     }
     public func recheck(_ torrent: TorrentStatus) {
         guard let h = torrent.handle else { NSLog("[Canopy] recheck: no handle for \(torrent.name)"); return }

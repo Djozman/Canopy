@@ -139,8 +139,6 @@ struct ContentView: View {
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
         currentPreAddHolder = holder
-            }
-        }
     }
 
     // MARK: - Empty state
