@@ -92,12 +92,19 @@ struct ContentView: View {
     // MARK: - Pre-add window
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
-        // Close any existing PreAddSheet before opening a new one
-        currentPreAddHolder?.window?.close()
-        currentPreAddHolder = nil
+        // If window already exists, update model in-place
+        if let holder = currentPreAddHolder, let model = holder.model {
+            model.pending = pending
+            model.rebuildTree()
+            if !pending.name.isEmpty { holder.window?.title = pending.name }
+            holder.magnetHandle = magnetHandle
+            return
+        }
 
         let holder = PreAddWindowHolder()
         let model  = PreAddViewModel(pending: pending)
+        holder.model = model
+        holder.magnetHandle = magnetHandle
 
         let rootView = PreAddSheet(
             model: model,
@@ -214,6 +221,8 @@ struct ContentView: View {
 
 private final class PreAddWindowHolder {
     var window: NSWindow?
+    var model: PreAddViewModel?
+    var magnetHandle: LTTorrentHandle?
 }
 
 // MARK: - Update sheet
