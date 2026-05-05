@@ -114,6 +114,7 @@ struct ContentView: View {
         }
 
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         holder.window = window
 
         // Magnet: when metadata arrives, populate the file list and rebuild the tree

@@ -444,12 +444,20 @@ static int mapState(lt::torrent_status::state_t s) {
         LTAlertType type = LTAlertTypeUnknown;
         LTTorrentHandle * _Nullable wrapper = nil;
         int errorCode = 0;
+        NSString *removedHashMsg = nil;
 
         if      (auto *x = lt::alert_cast<lt::add_torrent_alert>(a))      {
             type = LTAlertTypeTorrentAdded;
             wrapper = [[LTTorrentHandle alloc] initWithHandle:x->handle];
         }
-        else if (auto *x = lt::alert_cast<lt::torrent_removed_alert>(a))  { type = LTAlertTypeTorrentRemoved; }
+        else if (auto *x = lt::alert_cast<lt::torrent_removed_alert>(a))  {
+            type = LTAlertTypeTorrentRemoved;
+            if (x->info_hashes.has_v1()) {
+                std::ostringstream ss;
+                ss << x->info_hashes.v1;
+                removedHashMsg = [NSString stringWithUTF8String:ss.str().c_str()];
+            }
+        }
         else if (auto *x = lt::alert_cast<lt::torrent_finished_alert>(a)) {
             type = LTAlertTypeTorrentFinished;
             wrapper = [[LTTorrentHandle alloc] initWithHandle:x->handle];
@@ -477,7 +485,12 @@ static int mapState(lt::torrent_status::state_t s) {
             wrapper = [[LTTorrentHandle alloc] initWithHandle:x->handle];
         }
 
-        NSString *msg = [NSString stringWithUTF8String:a->message().c_str()];
+        NSString *msg;
+        if (type == LTAlertTypeTorrentRemoved) {
+            msg = removedHashMsg ?: @"";
+        } else {
+            msg = [NSString stringWithUTF8String:a->message().c_str()];
+        }
         callback(type, wrapper, msg, errorCode);
     }
 }

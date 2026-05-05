@@ -302,7 +302,7 @@ public final class TorrentEngine: ObservableObject {
         let session = self.session
         queue.async { [weak self] in
             guard let self, let session else { return }
-            session.popAlerts { type, h, _, _ in
+            session.popAlerts { type, h, msg, _ in
                 if type == LTAlertType.torrentFinished {
                     DispatchQueue.main.async {
                         NotificationCenter.default.post(name: .torrentFinished, object: nil)
@@ -312,6 +312,11 @@ public final class TorrentEngine: ObservableObject {
                     let hash = h.infoHash
                     DispatchQueue.main.async {
                         self.handleMetadataReceived(infoHash: hash, handle: h)
+                    }
+                }
+                if type == LTAlertType.torrentRemoved, let hash = msg, !hash.isEmpty {
+                    DispatchQueue.main.async {
+                        self.torrents.removeAll { $0.id == hash }
                     }
                 }
             }
