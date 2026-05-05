@@ -327,7 +327,7 @@ static int mapState(lt::torrent_status::state_t s) {
         lt::torrent_handle h = _session->add_torrent(params);
         if (!h.is_valid()) return nil;
         auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
-        [_handles addObject:wrapper];
+        // NOT added to _handles — hidden from UI until commitMagnet
         return wrapper;
     } catch (...) { return nil; }
 }
@@ -352,6 +352,10 @@ static int mapState(lt::torrent_status::state_t s) {
     h.unset_flags(lt::torrent_flags::paused | lt::torrent_flags::upload_mode);
     h.set_flags(lt::torrent_flags::auto_managed);
     h.resume();
+
+    if (![_handles containsObject:handle]) {
+        [_handles addObject:handle];
+    }
 }
 
 - (void)cancelMagnet:(LTTorrentHandle *)handle {
