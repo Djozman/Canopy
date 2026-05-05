@@ -27,8 +27,11 @@ struct CanopyApp: App {
     }
 
     private func handleIncomingURL(_ url: URL) {
-        guard url.scheme == "magnet" else { return }
-        engine.addMagnetLink(url.absoluteString, saveTo: defaultSavePath)
+        if url.scheme == "magnet" {
+            engine.addMagnetLink(url.absoluteString, saveTo: defaultSavePath)
+        } else if url.isFileURL, url.pathExtension.lowercased() == "torrent" {
+            engine.addTorrentFile(at: url.path, saveTo: defaultSavePath)
+        }
     }
 
     private var defaultSavePath: String {
