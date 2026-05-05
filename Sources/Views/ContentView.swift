@@ -10,7 +10,10 @@ struct ContentView: View {
     @State private var showAddSheet  = false
     @State private var showSettings  = false
     @State private var showUpdateSheet = false
-    @State private var currentPreAddHolder: PreAddWindowHolder?
+    // Note: NOT @State. SwiftUI can re-evaluate body before a state write
+    // is observable, which would let two showPreAdd notifications both see
+    // a nil holder and each create a window. Using a process-wide singleton
+    // makes the check reliable across rapid successive calls.
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -92,13 +95,22 @@ struct ContentView: View {
     // MARK: - Pre-add window
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
-        // If window already exists, update model in-place
-        if let holder = currentPreAddHolder, let model = holder.model {
+        // If a pre-add window already exists, update it in place. This makes
+        // a second magnet click reuse the existing window instead of opening
+        // a new one. We also bring it to front in case it was hidden.
+        if let holder = PreAddCoordinator.shared.holder, let model = holder.model, let window = holder.window, window.isVisible {
             model.pending = pending
             model.rebuildTree()
             if !pending.name.isEmpty { holder.window?.title = pending.name }
             holder.magnetHandle = magnetHandle
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
             return
+        }
+
+        // Stale holder (window already closed) — discard so we create fresh.
+        if PreAddCoordinator.shared.holder?.window?.isVisible != true {
+            PreAddCoordinator.shared.holder = nil
         }
 
         let holder = PreAddWindowHolder()
@@ -117,12 +129,12 @@ struct ContentView: View {
                     engine.confirm(confirmed)
                 }
                 holder.window?.close()
-                currentPreAddHolder = nil
+                PreAddCoordinator.shared.holder = nil
             },
             onCancel: {
                 if let handle = holder.magnetHandle { engine.cancelMagnet(handle: handle) }
                 holder.window?.close()
-                currentPreAddHolder = nil
+                PreAddCoordinator.shared.holder = nil
             }
         )
 
@@ -135,10 +147,22 @@ struct ContentView: View {
             window.setFrame(screen.visibleFrame, display: false)
         }
 
+        // Clear the singleton if user closes via X / Cmd-W (otherwise we'd
+        // be left with a stale holder.window that was already torn down).
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window, queue: .main
+        ) { _ in
+            if PreAddCoordinator.shared.holder?.window === window {
+                PreAddCoordinator.shared.holder = nil
+            }
+        }
+        holder.closeObserver = observer
+
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
-        currentPreAddHolder = holder
+        PreAddCoordinator.shared.holder = holder
     }
 
     // MARK: - Empty state
@@ -217,10 +241,22 @@ struct ContentView: View {
 
 // MARK: - Window holder
 
-private final class PreAddWindowHolder {
+final class PreAddWindowHolder {
     var window: NSWindow?
     var model: PreAddViewModel?
     var magnetHandle: LTTorrentHandle?
+    var closeObserver: NSObjectProtocol?
+}
+
+/// Process-wide single-instance guard for the pre-add window. Plain stored
+/// var on a singleton — set/read are synchronous on the main thread, no
+/// SwiftUI re-evaluation latency, no risk of two notifications both seeing
+/// nil and each creating a window.
+@MainActor
+final class PreAddCoordinator {
+    static let shared = PreAddCoordinator()
+    var holder: PreAddWindowHolder?
+    private init() {}
 }
 
 // MARK: - Update sheet

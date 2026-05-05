@@ -5,10 +5,40 @@ import AppKit
 import ClibtorrentBridge
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// De-duplicate URL openings. macOS sometimes calls open(urls:) twice in
+    /// rapid succession for the same magnet (e.g. when LaunchServices is
+    /// confused), and apps that just register multiple times can also hit
+    /// this. We reject duplicate URLs that arrive within a 2 s window.
+    private var recentURLs: [(url: URL, at: Date)] = []
+    private let dedupeWindow: TimeInterval = 2.0
+
     func application(_ application: NSApplication, open urls: [URL]) {
+        let now = Date()
+        recentURLs.removeAll { now.timeIntervalSince($0.at) > dedupeWindow }
         for url in urls {
+            if recentURLs.contains(where: { $0.url == url }) {
+                NSLog("[Canopy] dedupe: ignoring duplicate URL \(url.absoluteString.prefix(80))")
+                continue
+            }
+            recentURLs.append((url, now))
             CanopyApp.handleIncomingURL(url)
         }
+        // Always reactivate the existing instance so macOS doesn't spawn
+        // another window — and bring the main window to front.
+        NSApp.activate(ignoringOtherApps: true)
+        if let win = NSApp.windows.first(where: { $0.canBecomeMain && $0.isVisible }) {
+            win.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Dock-icon click / Reopen → bring existing main window forward instead
+    /// of showing the launch window again.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag, let win = NSApp.windows.first(where: { $0.canBecomeMain }) {
+            win.makeKeyAndOrderFront(nil)
+            return false
+        }
+        return true
     }
 }
 
