@@ -3,17 +3,27 @@
 import SwiftUI
 import AppKit
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            NotificationCenter.default.post(name: .incomingURL, object: url)
+        }
+    }
+}
+
 @main
 struct CanopyApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var engine = TorrentEngine()
+
+    init() {
+        claimDefaultHandlers()
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView(engine: engine)
                 .environmentObject(engine)
-                .onAppear {
-                    claimDefaultHandlers()
-                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
@@ -36,4 +46,5 @@ struct CanopyApp: App {
 
 extension Notification.Name {
     static let openAddTorrent = Notification.Name("OpenAddTorrent")
+    static let incomingURL = Notification.Name("IncomingURL")
 }

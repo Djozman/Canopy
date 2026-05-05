@@ -73,8 +73,10 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
-        .onOpenURL { url in
-            handleIncomingURL(url)
+        .onReceive(NotificationCenter.default.publisher(for: .incomingURL)) { notif in
+            if let url = notif.object as? URL {
+                handleIncomingURL(url)
+            }
         }
     }
 
