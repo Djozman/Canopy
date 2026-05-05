@@ -118,7 +118,6 @@ public final class TorrentEngine: ObservableObject {
             sessionError = "Failed to create libtorrent session."
         }
     }
-    }
 
     deinit {
         pollTimer?.invalidate()
@@ -314,9 +313,9 @@ public final class TorrentEngine: ObservableObject {
                         self.handleMetadataReceived(infoHash: hash, handle: h)
                     }
                 }
-                if type == LTAlertType.torrentRemoved, let hash = msg, !hash.isEmpty {
+                if type == LTAlertType.torrentRemoved, !msg.isEmpty {
                     DispatchQueue.main.async {
-                        self.torrents.removeAll { $0.id == hash }
+                        self.torrents.removeAll { $0.id == msg }
                     }
                 }
             }

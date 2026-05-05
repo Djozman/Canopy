@@ -2,6 +2,7 @@
 
 import SwiftUI
 import AppKit
+import ClibtorrentBridge
 
 @main
 struct CanopyApp: App {
@@ -49,7 +50,8 @@ struct CanopyApp: App {
             .first ?? NSHomeDirectory() + "/Downloads"
 
         if url.scheme == "magnet" {
-            let handle = engine.fetchMetadata(
+            var magnetHandle: LTTorrentHandle?
+            magnetHandle = engine.fetchMetadata(
                 uri: url.absoluteString,
                 onFiles: { files in
                     var name = url.absoluteString
@@ -64,7 +66,8 @@ struct CanopyApp: App {
                         savePath: saveDir,
                         files: files
                     )
-                    NotificationCenter.default.post(name: .showPreAdd, object: pending, userInfo: ["handle": handle as Any])
+                    let info: [String: Any] = ["handle": magnetHandle as Any]
+                    NotificationCenter.default.post(name: .showPreAdd, object: pending, userInfo: info)
                 },
                 onError: {}
             )
