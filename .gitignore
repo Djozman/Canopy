@@ -4,3 +4,5 @@
 .DS_Store
 Canopy.app
 Canopy-2.0.dmg
+build/
+Canopy-2.0.*.dmg
