@@ -132,18 +132,6 @@ struct ContentView: View {
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
         currentPreAddHolder = holder
-
-        // Magnet: when metadata arrives, populate the file list and rebuild the tree
-        if pending.isMagnet, let handle = magnetHandle {
-            engine.onMetadataReady(for: handle) { [weak model] files in
-                guard let model else { return }
-                DispatchQueue.main.async {
-                    model.pending.files     = files
-                    model.pending.totalSize = files.reduce(0) { $0 + $1.size }
-                    if !handle.name.isEmpty { model.pending.name = handle.name }
-                    model.rebuildTree()          // ← build folder tree from new file list
-                    window.title = model.pending.name
-                }
             }
         }
     }
