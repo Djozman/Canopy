@@ -264,37 +264,54 @@ final class PreAddCoordinator {
 private struct UpdateSheet: View {
     @ObservedObject var updater: UpdateChecker
     @Environment(\.dismiss) private var dismiss
-    @State private var isDownloading = false
 
     var body: some View {
         VStack(spacing: 20) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.blue)
-            Text("Update Available")
-                .font(.title2.weight(.semibold))
-            Text("Canopy \(updater.latestVersion ?? "") is ready to install.\nYour current version will be replaced.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-
-            HStack(spacing: 12) {
-                Button("Later") { dismiss() }
-                    .keyboardShortcut(.escape)
-                Button {
-                    isDownloading = true
-                    updater.downloadAndInstall()
-                } label: {
-                    if isDownloading {
-                        ProgressView().controlSize(.small)
-                    }
-                    Text("Update Now")
+            if case .error(let msg) = updater.installState {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 48)).foregroundStyle(.red)
+                Text("Update Failed")
+                    .font(.title2.weight(.semibold))
+                Text(msg).font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                HStack(spacing: 12) {
+                    Button("Close") { dismiss() }
+                    Button("Retry") { updater.resetError() }
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(isDownloading)
+            } else if updater.installState == .relaunching {
+                ProgressView()
+                Text("Relaunching\u{2026}").font(.body)
+            } else if updater.installState != .idle {
+                ProgressView()
+                Text(stateLabel(updater.installState)).font(.body)
+            } else {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 48)).foregroundStyle(.blue)
+                Text("Update Available")
+                    .font(.title2.weight(.semibold))
+                Text("Canopy \(updater.latestVersion ?? "") is ready to install.")
+                    .font(.body).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button("Later") { dismiss() }.keyboardShortcut(.escape)
+                    Button { updater.downloadAndInstall() } label: {
+                        Text("Update Now")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
         }
         .padding(40)
         .frame(width: 400, height: 280)
+    }
+
+    private func stateLabel(_ state: UpdateChecker.InstallState) -> String {
+        switch state {
+        case .idle:        return ""
+        case .downloading: return "Downloading\u{2026}"
+        case .mounting:    return "Mounting DMG\u{2026}"
+        case .copying:     return "Installing\u{2026}"
+        case .relaunching: return "Relaunching\u{2026}"
+        case .error:       return ""
+        }
     }
 }
