@@ -82,7 +82,7 @@ struct ContentView: View {
             Task { await updater.checkForUpdate() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
-            guard let pending = notif.object as? PendingTorrent else { return }
+            guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
             let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
             showPreAddWindow(pending: pending, magnetHandle: handle)
         }

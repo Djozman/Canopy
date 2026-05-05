@@ -4,11 +4,21 @@ import SwiftUI
 import AppKit
 import ClibtorrentBridge
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            CanopyApp.handleIncomingURL(url)
+        }
+    }
+}
+
 @main
 struct CanopyApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     private let engine = TorrentEngine()
 
     init() {
+        CanopyApp.engine = engine
         claimDefaultHandlers()
     }
 
@@ -17,11 +27,7 @@ struct CanopyApp: App {
             ContentView(engine: engine)
                 .environmentObject(engine)
                 .onOpenURL { url in
-                    // Process directly. Stashing into @State and reading on
-                    // .onAppear / willBecomeActive races against the URL
-                    // arriving when the app is already foregrounded — neither
-                    // hook fires reliably in that case.
-                    handleIncomingURL(url)
+                    CanopyApp.handleIncomingURL(url)
                 }
         }
         .windowStyle(.titleBar)
@@ -36,7 +42,9 @@ struct CanopyApp: App {
         }
     }
 
-    private func handleIncomingURL(_ url: URL) {
+    static var engine: TorrentEngine!
+
+    static func handleIncomingURL(_ url: URL) {
         let saveDir = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
             .first ?? NSHomeDirectory() + "/Downloads"
 
@@ -57,8 +65,10 @@ struct CanopyApp: App {
                         savePath: saveDir,
                         files: files
                     )
-                    let info: [String: Any] = ["handle": magnetHandle as Any]
-                    NotificationCenter.default.post(name: .showPreAdd, object: pending, userInfo: info)
+                    NotificationCenter.default.post(
+                        name: .showPreAdd, object: nil,
+                        userInfo: ["pending": pending, "handle": magnetHandle as Any]
+                    )
                 },
                 onError: {}
             )
@@ -66,7 +76,10 @@ struct CanopyApp: App {
             if let pending = engine.parse(torrentPath: url.path) {
                 var p = pending
                 p.savePath = saveDir
-                NotificationCenter.default.post(name: .showPreAdd, object: p, userInfo: ["handle": NSNull()])
+                NotificationCenter.default.post(
+                    name: .showPreAdd, object: nil,
+                    userInfo: ["pending": p, "handle": NSNull()]
+                )
             }
         }
     }
