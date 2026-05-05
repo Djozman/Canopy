@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var showAddSheet  = false
     @State private var showSettings  = false
     @State private var showUpdateSheet = false
+    @State private var currentPreAddHolder: PreAddWindowHolder?
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -91,6 +92,10 @@ struct ContentView: View {
     // MARK: - Pre-add window
 
     private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
+        // Close any existing PreAddSheet before opening a new one
+        currentPreAddHolder?.window?.close()
+        currentPreAddHolder = nil
+
         let holder = PreAddWindowHolder()
         let model  = PreAddViewModel(pending: pending)
 
@@ -105,10 +110,12 @@ struct ContentView: View {
                     engine.confirm(confirmed)
                 }
                 holder.window?.close()
+                currentPreAddHolder = nil
             },
             onCancel: {
                 if let handle = magnetHandle { engine.cancelMagnet(handle: handle) }
                 holder.window?.close()
+                currentPreAddHolder = nil
             }
         )
 
@@ -124,6 +131,7 @@ struct ContentView: View {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
+        currentPreAddHolder = holder
 
         // Magnet: when metadata arrives, populate the file list and rebuild the tree
         if pending.isMagnet, let handle = magnetHandle {
