@@ -382,43 +382,50 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (void)removeTorrent:(LTTorrentHandle *)handle deleteFiles:(BOOL)deleteFiles {
-    lt::remove_flags_t flags = {};
-    if (deleteFiles) {
-        flags = lt::session_handle::delete_files | lt::session_handle::delete_partfile;
-    }
-
-    // Collect directory paths before removal for cleanup
+    // Collect file paths before removal for manual cleanup.
+    // bitfield_flag values are sequential, not bitmasks, so we can't reliably
+    // combine delete_files | delete_partfile. We delete files ourselves.
+    std::set<std::string> filePaths;
     std::set<std::string> dirs;
     if (deleteFiles) {
         auto ti = handle.handle.torrent_file();
         auto status = handle.handle.status();
         std::string savePath = status.save_path;
-        if (ti && !savePath.empty()) {
+        if (!savePath.empty()) {
             if (savePath.back() != '/') savePath += '/';
-            const auto &fs = ti->files();
-            for (int i = 0; i < fs.num_files(); i++) {
-                std::string full = savePath + fs.file_path(lt::file_index_t{i});
-                size_t pos = full.rfind('/');
-                while (pos != std::string::npos) {
-                    dirs.insert(full.substr(0, pos));
-                    pos = full.rfind('/', pos - 1);
+            if (ti) {
+                const auto &fs = ti->files();
+                for (int i = 0; i < fs.num_files(); i++) {
+                    std::string full = savePath + fs.file_path(lt::file_index_t{i});
+                    filePaths.insert(full);
+                    size_t pos = full.rfind('/');
+                    while (pos != std::string::npos) {
+                        dirs.insert(full.substr(0, pos));
+                        pos = full.rfind('/', pos - 1);
+                    }
                 }
             }
         }
     }
 
+    lt::remove_flags_t flags = lt::session_handle::delete_partfile;
     _session->remove_torrent(handle.handle, flags);
     [_handles removeObject:handle];
 
-    // Clean up empty parent directories
-    if (deleteFiles && !dirs.empty()) {
-        // Sort deepest-first so we remove children before parents
-        std::vector<std::string> sorted(dirs.begin(), dirs.end());
-        std::sort(sorted.begin(), sorted.end(), [](const std::string &a, const std::string &b) {
-            return std::count(a.begin(), a.end(), '/') > std::count(b.begin(), b.end(), '/');
-        });
-        for (const auto &d : sorted) {
-            rmdir(d.c_str());
+    if (deleteFiles) {
+        // Unlink files synchronously
+        for (const auto &p : filePaths) {
+            unlink(p.c_str());
+        }
+        // Clean up empty parent directories deepest-first
+        if (!dirs.empty()) {
+            std::vector<std::string> sorted(dirs.begin(), dirs.end());
+            std::sort(sorted.begin(), sorted.end(), [](const std::string &a, const std::string &b) {
+                return std::count(a.begin(), a.end(), '/') > std::count(b.begin(), b.end(), '/');
+            });
+            for (const auto &d : sorted) {
+                rmdir(d.c_str());
+            }
         }
     }
 }
