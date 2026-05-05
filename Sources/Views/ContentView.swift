@@ -109,7 +109,7 @@ struct ContentView: View {
         let rootView = PreAddSheet(
             model: model,
             onConfirm: { confirmed in
-                if let handle = magnetHandle {
+                if let handle = holder.magnetHandle {
                     engine.commitMagnet(handle: handle,
                                         savePath: confirmed.savePath,
                                         files: confirmed.files)
@@ -120,7 +120,7 @@ struct ContentView: View {
                 currentPreAddHolder = nil
             },
             onCancel: {
-                if let handle = magnetHandle { engine.cancelMagnet(handle: handle) }
+                if let handle = holder.magnetHandle { engine.cancelMagnet(handle: handle) }
                 holder.window?.close()
                 currentPreAddHolder = nil
             }
