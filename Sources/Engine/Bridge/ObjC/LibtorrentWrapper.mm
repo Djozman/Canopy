@@ -31,15 +31,18 @@ namespace lt = libtorrent;
 // ─── LTTorrentHandle ───────────────────────────────────────────────────────
 
 @interface LTTorrentHandle ()
-@property lt::torrent_handle handle;
+- (lt::torrent_handle)cppHandle;
 - (instancetype)initWithHandle:(lt::torrent_handle)handle;
 - (void)refresh;
 @end
 
 @implementation LTTorrentHandle {
+    lt::torrent_handle _handle;
     lt::torrent_status _cachedStatus;
     BOOL _cached;
 }
+
+- (lt::torrent_handle)cppHandle { return _handle; }
 
 - (instancetype)initWithHandle:(lt::torrent_handle)handle {
     if (self = [super init]) {
@@ -332,7 +335,7 @@ static int mapState(lt::torrent_status::state_t s) {
 - (void)commitMagnet:(LTTorrentHandle *)handle
             savePath:(NSString *)savePath
           priorities:(nullable NSArray<NSNumber *> *)priorities {
-    auto h = handle.handle;
+    auto h = [handle cppHandle];
     if (!h.is_valid()) return;
 
     h.move_storage(std::string(savePath.UTF8String));
@@ -352,7 +355,7 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (void)cancelMagnet:(LTTorrentHandle *)handle {
-    auto h = handle.handle;
+    auto h = [handle cppHandle];
     if (h.is_valid()) {
         _session->remove_torrent(h);
     }
@@ -388,8 +391,8 @@ static int mapState(lt::torrent_status::state_t s) {
     std::set<std::string> filePaths;
     std::set<std::string> dirs;
     if (deleteFiles) {
-        auto ti = handle.handle.torrent_file();
-        auto status = handle.handle.status();
+        auto ti = [handle cppHandle].torrent_file();
+        auto status = [handle cppHandle].status();
         std::string savePath = status.save_path;
         if (!savePath.empty()) {
             if (savePath.back() != '/') savePath += '/';
@@ -415,7 +418,7 @@ static int mapState(lt::torrent_status::state_t s) {
     }
 
     lt::remove_flags_t flags = lt::session_handle::delete_partfile;
-    _session->remove_torrent(handle.handle, flags);
+    _session->remove_torrent([handle cppHandle], flags);
     [_handles removeObject:handle];
 
     if (deleteFiles) {
