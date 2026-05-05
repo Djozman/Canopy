@@ -6,8 +6,10 @@ import ClibtorrentBridge
 
 struct ContentView: View {
     @StateObject private var vm: TorrentListViewModel
+    @StateObject private var updater = UpdateChecker(owner: "Djozman", repo: "Canopy")
     @State private var showAddSheet  = false
     @State private var showSettings  = false
+    @State private var showUpdateSheet = false
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -72,6 +74,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showUpdateSheet) {
+            UpdateSheet(updater: updater)
+        }
+        .onAppear {
+            Task { await updater.checkForUpdate() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
             guard let pending = notif.object as? PendingTorrent else { return }
@@ -156,6 +164,12 @@ struct ContentView: View {
     @ToolbarContentBuilder
     private var listToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            if updater.updateAvailable {
+                Button { showUpdateSheet = true } label: {
+                    Label("Update", systemImage: "arrow.down.circle.fill")
+                }
+                .foregroundStyle(.blue)
+            }
             Button { showAddSheet = true } label: {
                 Label("Add Torrent", systemImage: "plus")
             }
@@ -204,4 +218,44 @@ struct ContentView: View {
 
 private final class PreAddWindowHolder {
     var window: NSWindow?
+}
+
+// MARK: - Update sheet
+
+private struct UpdateSheet: View {
+    @ObservedObject var updater: UpdateChecker
+    @Environment(\.dismiss) private var dismiss
+    @State private var isDownloading = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.blue)
+            Text("Update Available")
+                .font(.title2.weight(.semibold))
+            Text("Canopy \(updater.latestVersion ?? "") is ready to install.\nYour current version will be replaced.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 12) {
+                Button("Later") { dismiss() }
+                    .keyboardShortcut(.escape)
+                Button {
+                    isDownloading = true
+                    updater.downloadAndInstall()
+                } label: {
+                    if isDownloading {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text("Update Now")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isDownloading)
+            }
+        }
+        .padding(40)
+        .frame(width: 400, height: 280)
+    }
 }
