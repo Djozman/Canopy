@@ -6,7 +6,7 @@ import ClibtorrentBridge
 
 @main
 struct CanopyApp: App {
-    @StateObject private var engine = TorrentEngine()
+    private let engine = TorrentEngine()
     @State private var pendingURL: URL?
 
     init() {
