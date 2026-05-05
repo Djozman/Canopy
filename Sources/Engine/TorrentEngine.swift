@@ -108,6 +108,11 @@ public final class TorrentEngine: ObservableObject {
     private nonisolated(unsafe) var pollTimer: Timer?
     private nonisolated(unsafe) var alertTimer: Timer?
     private let queue = DispatchQueue(label: "com.qbt.libtorrent", qos: .utility)
+    /// IDs of torrents the user has asked to remove but libtorrent hasn't
+    /// finished tearing down yet. Polled results are filtered against this so
+    /// a still-in-libtorrent handle can't reappear in the UI while removal is
+    /// in flight (deleteFiles=true on big torrents takes ~1–2s of unlink calls).
+    private var pendingRemovals: Set<String> = []
 
     // Multiple callbacks per info-hash: one for the PreAdd window, one for the Files tab, etc.
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
@@ -278,11 +283,13 @@ public final class TorrentEngine: ObservableObject {
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
         guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
         NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(deleteFiles))")
-        let session = self.session
         let id = torrent.id
-        queue.async { [weak self] in
+        // Update UI synchronously, BEFORE dispatching the slow libtorrent work.
+        pendingRemovals.insert(id)
+        torrents.removeAll { $0.id == id }
+        let session = self.session
+        queue.async {
             session?.removeTorrent(h, deleteFiles: deleteFiles)
-            DispatchQueue.main.async { self?.torrents.removeAll { $0.id == id } }
         }
     }
     public func recheck(_ torrent: TorrentStatus) {
@@ -305,7 +312,11 @@ public final class TorrentEngine: ObservableObject {
             guard let self, let session else { return }
             let handles = session.allTorrents()
             let results = handles.map { TorrentStatus(from: $0) }
-            DispatchQueue.main.async { self.torrents = results }
+            DispatchQueue.main.async {
+                // Don't resurrect rows the user has asked to remove while
+                // libtorrent is still finishing the removal.
+                self.torrents = results.filter { !self.pendingRemovals.contains($0.id) }
+            }
         }
     }
 
@@ -328,6 +339,7 @@ public final class TorrentEngine: ObservableObject {
                 if type == LTAlertType.torrentRemoved, !msg.isEmpty {
                     DispatchQueue.main.async {
                         self.torrents.removeAll { $0.id == msg }
+                        self.pendingRemovals.remove(msg)
                     }
                 }
             }
