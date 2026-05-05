@@ -106,13 +106,13 @@ public final class UpdateChecker: ObservableObject {
         detach.launch()
         detach.waitUntilExit()
 
-        // Relaunch
-        let relaunch = Process()
-        relaunch.launchPath = "/usr/bin/open"
-        relaunch.arguments = ["-n", destPath]
-        relaunch.launch()
-
-        // Quit current instance
+        // Relaunch new version, quit current
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let relaunch = Process()
+            relaunch.launchPath = "/usr/bin/open"
+            relaunch.arguments = [destPath]
+            relaunch.launch()
+        }
         NSApp.terminate(nil)
     }
 

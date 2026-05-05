@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     private let engine = TorrentEngine()
+    @State var pendingPreAdd: PendingTorrent?
+    @State var pendingMagnetHandle: LTTorrentHandle?
 
     init() {
         CanopyApp.engine = engine
@@ -26,8 +28,19 @@ struct CanopyApp: App {
         WindowGroup {
             ContentView(engine: engine)
                 .environmentObject(engine)
-                .onOpenURL { url in
-                    CanopyApp.handleIncomingURL(url)
+                .onAppear {
+                    if let p = pendingPreAdd {
+                        pendingPreAdd = nil
+                        let h = pendingMagnetHandle
+                        pendingMagnetHandle = nil
+                        NotificationCenter.default.post(
+                            name: .showPreAdd, object: nil,
+                            userInfo: ["pending": p, "handle": h as Any]
+                        )
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
+                    // handled by ContentView's own onReceive
                 }
         }
         .windowStyle(.titleBar)
@@ -49,16 +62,26 @@ struct CanopyApp: App {
             .first ?? NSHomeDirectory() + "/Downloads"
 
         if url.scheme == "magnet" {
+            var name = url.absoluteString
+            if let comps = URLComponents(string: url.absoluteString),
+               let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+                name = dn
+            }
+            // Show PreAddSheet immediately with spinner while fetching
+            let pending = PendingTorrent(
+                source: .magnet(uri: url.absoluteString),
+                name: name, totalSize: 0, savePath: saveDir, files: []
+            )
+            NotificationCenter.default.post(
+                name: .showPreAdd, object: nil,
+                userInfo: ["pending": pending, "handle": NSNull(), "fetching": true]
+            )
+            // Start metadata fetch in background
             var magnetHandle: LTTorrentHandle?
             magnetHandle = engine.fetchMetadata(
                 uri: url.absoluteString,
                 onFiles: { files in
-                    var name = url.absoluteString
-                    if let comps = URLComponents(string: url.absoluteString),
-                       let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
-                        name = dn
-                    }
-                    let pending = PendingTorrent(
+                    let newPending = PendingTorrent(
                         source: .magnet(uri: url.absoluteString),
                         name: name,
                         totalSize: files.reduce(0) { $0 + $1.size },
@@ -67,7 +90,7 @@ struct CanopyApp: App {
                     )
                     NotificationCenter.default.post(
                         name: .showPreAdd, object: nil,
-                        userInfo: ["pending": pending, "handle": magnetHandle as Any]
+                        userInfo: ["pending": newPending, "handle": magnetHandle as Any]
                     )
                 },
                 onError: {}
