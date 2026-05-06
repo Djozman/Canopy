@@ -69,23 +69,22 @@ struct LeechOnly {
                 }
                 if let p = chosenPiece {
                     print("[LeechOnly] Seeder has piece \(p) — requesting")
-                    try? await conn.send(.request(piece: p, begin: 0, length: 16384))
-                    try? await conn.send(.request(piece: p, begin: 16384, length: 16384))
-                    try? await conn.send(.request(piece: p, begin: 32768, length: 16384))
-                    try? await conn.send(.request(piece: p, begin: 49152, length: 16384))
-                    try? await conn.send(.request(piece: p, begin: 65536, length: 16384))
+                    await requestBlocks(for: p, conn: conn, pm: pieceManager)
                 }
 
             case .unchoke:
                 print("[LeechOnly] ✨ Unchoked")
+                if let p = chosenPiece {
+                    await requestBlocks(for: p, conn: conn, pm: pieceManager)
+                }
 
             case .piece(let piece, let begin, let data):
                 print("[LeechOnly] 📦 Received piece \(piece) begin=\(begin) len=\(data.count)")
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
-                // Request more blocks if we don't have all
-                if begin + data.count < 262144 {
-                    let next = begin + data.count
-                    try? await conn.send(.request(piece: piece, begin: next, length: 16384))
+                // Request more blocks for this piece
+                let requests = await pieceManager.nextBlockRequests(for: piece)
+                for req in requests {
+                    try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
                 }
 
                 if let assembled = await pieceManager.tryAssemble(piece: piece) {
@@ -103,5 +102,12 @@ struct LeechOnly {
             }
         }
         print("[LeechOnly] ⛔ Disconnected")
+    }
+
+    static func requestBlocks(for piece: Int, conn: PeerConnection, pm: PieceManager) async {
+        let requests = await pm.nextBlockRequests(for: piece)
+        for req in requests {
+            try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
+        }
     }
 }
