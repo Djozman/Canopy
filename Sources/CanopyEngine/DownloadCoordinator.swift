@@ -124,6 +124,7 @@ public actor DownloadCoordinator {
                         await pieceManager.cancelPending(for: piece)
                         assignedPieces.remove(piece)
                         pieceAssignedAt.removeValue(forKey: piece)
+                        pieceBlockSources.removeValue(forKey: piece)
                         if let peerKey = peerPieces.first(where: { $0.value == piece })?.key {
                             peerPieces.removeValue(forKey: peerKey)
                         }
