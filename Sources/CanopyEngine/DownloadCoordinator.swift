@@ -239,6 +239,7 @@ public actor DownloadCoordinator {
                             offset += blockSize
                         }
                     }
+                    peerPieces.removeValue(forKey: key)  // clear the delivering peer too
                     pieceAssignedAt.removeValue(forKey: piece)
                     await writePieceToDisk(piece: piece, data: verified)
                     completedPieces.insert(piece)
