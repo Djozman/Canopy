@@ -14,18 +14,17 @@ public enum TrackerEvent: String {
     case started
     case stopped
     case completed
-    case empty
+    // No `.empty` case — use nil for periodic re-announce (event param omitted)
 }
 
 public struct TrackerAnnounce {
-    public let infoHash: Data      // 20 bytes, raw
-    public let peerID: Data        // 20 bytes
+    public let infoHash: Data
+    public let peerID: Data
     public let port: UInt16
     public let uploaded: Int64
     public let downloaded: Int64
     public let left: Int64
-    public let event: TrackerEvent
-    public let compact: Bool
+    public let event: TrackerEvent?  // nil = periodic re-announce (no event param)
 
     public init(
         infoHash: Data,
@@ -34,8 +33,7 @@ public struct TrackerAnnounce {
         uploaded: Int64 = 0,
         downloaded: Int64 = 0,
         left: Int64,
-        event: TrackerEvent = .started,
-        compact: Bool = true
+        event: TrackerEvent? = nil
     ) {
         self.infoHash = infoHash
         self.peerID = peerID
@@ -44,7 +42,6 @@ public struct TrackerAnnounce {
         self.downloaded = downloaded
         self.left = left
         self.event = event
-        self.compact = compact
     }
 
     /// Build the URL-encoded query string for an HTTP tracker announce.
@@ -69,8 +66,8 @@ public struct TrackerAnnounce {
             ("uploaded", "\(uploaded)"),
             ("downloaded", "\(downloaded)"),
             ("left", "\(left)"),
-            ("compact", compact ? "1" : "0"),
-            ("event", event == .empty ? "" : event.rawValue),
+            ("compact", "1"),
+            ("event", event?.rawValue ?? ""),
         ]
 
         return params

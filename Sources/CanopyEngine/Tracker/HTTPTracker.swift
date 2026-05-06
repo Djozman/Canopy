@@ -42,8 +42,14 @@ public struct HTTPTracker {
         return try parseResponse(data)
     }
 
-    /// Announce to all tracker URLs in order until one succeeds (tier failover).
-    /// - Parameter urls: Tiered tracker URLs (flat list, already ordered by tier).
+    /// Announce to all tracker URLs in order until one succeeds.
+    /// - Parameter urls: Tracker URLs in priority order.
+    ///
+    /// NOTE: This flattens BEP 12 tiered `announce-list` into a single sequence.
+    /// A proper implementation would shuffle URLs within each tier, try them
+    /// sequentially until one succeeds (promoting it), and only move to the
+    /// next tier if the entire current tier fails. Private trackers depend on
+    /// this behavior. The flat fallback is correct for public trackers.
     public static func announceWithFailover(
         to urls: [String],
         with params: TrackerAnnounce
@@ -151,13 +157,12 @@ public struct HTTPTracker {
     /// Parse compact peer format: 6 bytes per peer (4 IP + 2 port, network byte order).
     static func parseCompactPeers(_ data: Data) -> [Peer] {
         guard data.count % 6 == 0 else { return [] }
+        let bytes = Array(data) // Avoid Data slice absolute-index gotcha
         var peers: [Peer] = []
         var offset = 0
-        while offset + 6 <= data.count {
-            let ipBytes = data[offset..<offset+4]
-            let ip = ipBytes.map { String($0) }.joined(separator: ".")
-            let portBytes = data[offset+4..<offset+6]
-            let port = (UInt16(portBytes[0]) << 8) | UInt16(portBytes[1])
+        while offset + 6 <= bytes.count {
+            let ip = "\(bytes[offset]).\(bytes[offset+1]).\(bytes[offset+2]).\(bytes[offset+3])"
+            let port = (UInt16(bytes[offset+4]) << 8) | UInt16(bytes[offset+5])
             peers.append(Peer(ip: ip, port: port))
             offset += 6
         }

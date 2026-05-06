@@ -30,7 +30,7 @@ final class TrackerAnnounceTests: XCTestCase {
         let announce = TrackerAnnounce(
             infoHash: Data(repeating: 0, count: 20),
             peerID: Data(repeating: 0, count: 20),
-            port: 0, left: 0, event: .empty
+            port: 0, left: 0, event: nil
         )
         let qs = announce.queryString()
         XCTAssertFalse(qs.contains("event"))
