@@ -62,10 +62,12 @@ public actor PeerConnection {
         }
         guard let h = Handshake.decode(from: hsBuf) else {
             conn.cancel()
+            print("[Peer] ❌ Invalid handshake from \(peer)")
             throw PeerConnectionError.handshakeFailed("Invalid handshake")
         }
         guard h.infoHash == infoHash else {
             conn.cancel()
+            print("[Peer] ❌ Info hash mismatch from \(peer): got \(h.infoHash.hexString.prefix(16))")
             throw PeerConnectionError.handshakeFailed("Info hash mismatch")
         }
 

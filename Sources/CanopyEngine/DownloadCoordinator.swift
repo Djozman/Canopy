@@ -89,8 +89,11 @@ public actor DownloadCoordinator {
     }
 
     private func handlePeer(key: String, conn: PeerConnection) async {
-        guard let stream = try? await conn.connect() else {
-            print("[Coordinator] ⚠️ Failed to connect to \(key)")
+        let stream: AsyncStream<PeerMessage>
+        do {
+            stream = try await conn.connect()
+        } catch {
+            print("[Coordinator] ⚠️ Failed to connect to \(key): \(error)")
             return
         }
         print("[Coordinator] ✅ Connected to \(key)")
