@@ -1,7 +1,7 @@
 import Foundation
 
-/// Coordinates downloading a single torrent: tracker announces, peer connections,
-/// piece requests, and disk writes.
+/// Coordinates downloading and seeding a single torrent: tracker announces,
+/// peer connections, piece requests, disk I/O, and upload/choke algorithm.
 public actor DownloadCoordinator {
     private let torrent: TorrentFile
     private let pieceManager: PieceManager
@@ -21,6 +21,12 @@ public actor DownloadCoordinator {
     private var pieceBlockSources: [Int: [Int: String]] = [:]  // piece → blockBegin → peerKey
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
+
+    // Seeding state
+    private var uploadRate: [String: [(timestamp: Date, bytes: Int)]] = [:]
+    private var interestedPeers: Set<String> = []
+    private var unchokedPeers: Set<String> = []
+    private var lastChokeRound: Date = .distantPast
 
     public init(torrent: TorrentFile, savePath: String) {
         self.torrent = torrent
@@ -68,14 +74,11 @@ public actor DownloadCoordinator {
         try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    /// Download the entire torrent. Blocks until complete or error.
+    /// Download the entire torrent. Returns when complete.
+    /// Call `seed()` afterwards to serve uploads to the swarm.
     public func download() async throws {
         await loadResumeData()
         fileHandles = try diskMapper.openFiles(at: savePath)
-        defer {
-            fileHandles?.forEach { try? $0.close() }
-            fileHandles = nil
-        }
 
         let response = try await trackerSession.announce()
         print("[Coordinator] Tracker returned \(response.peers.count) peers, interval=\(response.interval)")
@@ -116,6 +119,11 @@ public actor DownloadCoordinator {
                             spawned += 1
                         }
                     }
+                    // Choke algorithm runs every 30s (during download, keeps peers open for upload too)
+                    if Date().timeIntervalSince(lastChokeRound) >= 30 {
+                        lastChokeRound = Date()
+                        runChokeAlgorithm()
+                    }
                     try? await Task.sleep(for: .seconds(10))
                     // Check for stall — re-queue pieces taking >30s
                     let now = Date()
@@ -130,6 +138,13 @@ public actor DownloadCoordinator {
                         }
                         print("[Coordinator] ⏱ Piece \(piece) timed out, re-queuing")
                     }
+                }
+                // Download complete — signal caller but keep connections alive for seeding
+                try? FileManager.default.removeItem(atPath: resumeFilePath())
+                await trackerSession.completed()
+                if let c = completionContinuation {
+                    completionContinuation = nil
+                    c.resume()
                 }
             }
         }
@@ -199,16 +214,6 @@ public actor DownloadCoordinator {
                     saveResumeData()
                     // Announce new piece to all OTHER connected peers
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
-                    if await pieceManager.isComplete {
-                        if let cont = completionContinuation {
-                            completionContinuation = nil
-                            cont.resume()
-                        }
-                        try? FileManager.default.removeItem(atPath: resumeFilePath())
-                        try? await trackerSession.completed()
-                        for p in peers.values { await p.disconnect() }
-                        return
-                    }
                     await requestBlocks(key: key, conn: conn)
                 } else if wasComplete {
                     // Hash mismatch — blame all peers that contributed to this piece
@@ -249,6 +254,28 @@ public actor DownloadCoordinator {
                     pieceAssignedAt.removeValue(forKey: piece)
                 }
 
+            case .interested:
+                interestedPeers.insert(key)
+                // Immediately try to unchoke an interested peer if we have slots
+                if unchokedPeers.count < 4 && !unchokedPeers.contains(key) {
+                    unchokedPeers.insert(key)
+                    try? await conn.send(.unchoke)
+                }
+
+            case .notInterested:
+                interestedPeers.remove(key)
+
+            case .request(let piece, let begin, let length):
+                // Only serve if we have the piece and the peer is unchoked
+                guard await pieceManager.hasPiece(piece), unchokedPeers.contains(key) else { break }
+                if let data = readBlockFromDisk(piece: piece, begin: begin, length: length) {
+                    try? await conn.send(.piece(piece: piece, begin: begin, data: data))
+                    let now = Date()
+                    uploadRate[key, default: []].append((now, data.count))
+                    // Prune entries older than 20s
+                    uploadRate[key] = uploadRate[key]?.filter { now.timeIntervalSince($0.timestamp) <= 20 }
+                }
+
             default:
                 break
             }
@@ -264,6 +291,9 @@ public actor DownloadCoordinator {
             assignedPieces.remove(piece)
             peerPieces.removeValue(forKey: key)
         }
+        uploadRate.removeValue(forKey: key)
+        interestedPeers.remove(key)
+        unchokedPeers.remove(key)
         if peers.isEmpty, !bannedPeers.contains(key), let cont = completionContinuation {
             completionContinuation = nil
             cont.resume(throwing: DownloadError.allPeersDisconnected)
@@ -328,6 +358,109 @@ public actor DownloadCoordinator {
             try? handles[seg.fileIndex].write(contentsOf: chunk)
             cursor += seg.length
         }
+    }
+
+    private func readBlockFromDisk(piece: Int, begin: Int, length: Int) -> Data? {
+        guard let handles = fileHandles else { return nil }
+        let segments = diskMapper.map(piece: piece, blockBegin: begin, blockLength: length)
+        var result = Data(capacity: length)
+        for seg in segments {
+            guard seg.fileIndex < handles.count else { return nil }
+            do {
+                try handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
+                if let chunk = try handles[seg.fileIndex].read(upToCount: seg.length) {
+                    result.append(chunk)
+                }
+            } catch {
+                return nil
+            }
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    /// Run the choke algorithm: unchoke top 4 peers by upload rate,
+    /// plus one random optimistic unchoke for choked interested peers.
+    private func runChokeAlgorithm() {
+        let now = Date()
+        // Calculate upload rates (bytes/sec) over last 20s window
+        var rates: [(key: String, rate: Double)] = []
+        for (key, history) in uploadRate {
+            let recent = history.filter { now.timeIntervalSince($0.timestamp) <= 20 }
+            let totalBytes = recent.reduce(0) { $0 + $1.bytes }
+            let elapsed = recent.isEmpty ? 20.0 : max(now.timeIntervalSince(recent[0].timestamp), 1)
+            let rate = Double(totalBytes) / elapsed
+            rates.append((key, rate))
+        }
+        rates.sort { $0.rate > $1.rate }
+
+        // Top 4 by upload rate (tit-for-tat)
+        let top4 = Set(rates.prefix(4).map(\.key))
+
+        // Optimistic unchoke: one random choked interested peer
+        let choked = Set(peers.keys).subtracting(unchokedPeers)
+        let eligible = choked.intersection(interestedPeers)
+        let optimistic = eligible.randomElement().map { Set([$0]) } ?? []
+
+        let newUnchoked = top4.union(optimistic)
+
+        // Apply changes — unchoke or choke each peer
+        for key in peers.keys {
+            let shouldUnchoke = newUnchoked.contains(key)
+            if shouldUnchoke, !unchokedPeers.contains(key) {
+                Task { try? await peers[key]?.send(.unchoke) }
+                print("[Coordinator] 🌱 Unchoked \(key)")
+            } else if !shouldUnchoke, unchokedPeers.contains(key) {
+                Task { try? await peers[key]?.send(.choke) }
+                print("[Coordinator] 🔒 Choked \(key)")
+            }
+        }
+        unchokedPeers = newUnchoked
+        print("[Coordinator] Choke round: \(unchokedPeers.count) unchoked (\(top4.count) top, \(optimistic.count) optimistic)")
+    }
+
+    /// Seed after download completes. Keeps connections alive and runs choke cycles.
+    /// Call shutdown() to stop.
+    public func seed() async {
+        guard fileHandles != nil else { return }
+        print("[Coordinator] 🌱 Entering seeding mode")
+        while true {
+            if Task.isCancelled { break }
+            if peers.isEmpty {
+                print("[Coordinator] 🔄 All peers dropped while seeding — re-announcing...")
+                if let response = try? await trackerSession.announce(uploaded: 0, downloaded: 0) {
+                    for peer in response.peers {
+                        let key = "\(peer.ip):\(peer.port)"
+                        if bannedPeers.contains(key) { continue }
+                        let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                        peers[key] = conn
+                    }
+                }
+            }
+            // Spawn tasks for new peers
+            let maxPeers = 50
+            let alreadyActive = peerBitfields.count
+            var spawned = 0
+            for (key, conn) in peers {
+                if alreadyActive + spawned >= maxPeers { break }
+                if bannedPeers.contains(key) { continue }
+                if peerBitfields[key] == nil && peerPieces[key] == nil {
+                    Task { await self.handlePeer(key: key, conn: conn) }
+                    spawned += 1
+                }
+            }
+            runChokeAlgorithm()
+            try? await Task.sleep(for: .seconds(10))
+        }
+    }
+
+    /// Shut down seeding: close all connections and file handles.
+    public func shutdown() async {
+        print("[Coordinator] 🛑 Shutting down")
+        for p in peers.values { await p.disconnect() }
+        peers.removeAll()
+        fileHandles?.forEach { try? $0.close() }
+        fileHandles = nil
+        await trackerSession.stop()
     }
 }
 

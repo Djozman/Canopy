@@ -1,4 +1,4 @@
-/// Standalone runner for Phase 4 live download test.
+/// Standalone runner for Phase 6 live download + seed test.
 /// Run: swift run -c debug LiveDownload 2>&1 | grep -v "^warning:"
 /// (XCTest runner SIGTRAPs on Network.framework usage — this bypasses it.)
 
@@ -8,7 +8,7 @@ import CanopyEngine
 @main
 struct LiveDownload {
     static func main() async {
-        print("[LiveTest] Phase 4 live download test — connecting to real tracker...")
+        print("[LiveTest] Phase 6 live download + seed test — connecting to real tracker...")
 
         // Use the debian netinst torrent (small, well-seeded)
         let torrentPath = "Tests/CanopyEngine/TestTorrents/debian-13.4.0-amd64-netinst.iso.torrent"
@@ -62,6 +62,14 @@ struct LiveDownload {
                 print("[LiveTest] ❌ No files downloaded")
             }
         }
+
+        // Seed for 60s
+        print("[LiveTest] 🌱 Seeding for 60s...")
+        let seedTask = Task { await coord.seed() }
+        try? await Task.sleep(for: .seconds(60))
+        seedTask.cancel()
+        await coord.shutdown()
+        print("[LiveTest] 🛑 Shutdown complete")
     }
 }
 

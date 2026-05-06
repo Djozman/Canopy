@@ -52,7 +52,7 @@ public struct DiskMapper {
             if !fm.fileExists(atPath: filePath) {
                 fm.createFile(atPath: filePath, contents: nil)
             }
-            guard let fh = FileHandle(forWritingAtPath: filePath) else {
+            guard let fh = FileHandle(forUpdatingAtPath: filePath) else {
                 throw NSError(domain: "DiskMapper", code: 1,
                     userInfo: [NSLocalizedDescriptionKey: "Cannot open \(filePath)"])
             }
