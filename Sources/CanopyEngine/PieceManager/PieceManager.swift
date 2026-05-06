@@ -73,6 +73,9 @@ public actor PieceManager {
     public func cancelPending(for piece: Int) {
         pendingBlocks = pendingBlocks.filter { $0.piece != piece }
     }
+
+    /// Store a downloaded block.
+    public func storeBlock(piece: Int, begin: Int, data: Data) {
         downloadedBlocks[piece, default: [:]][begin] = data
         pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
     }
