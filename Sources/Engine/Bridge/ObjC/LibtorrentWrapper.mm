@@ -366,6 +366,15 @@ static int mapState(lt::torrent_status::state_t s) {
     [_handles removeObject:handle];
 }
 
+- (void)setAlertNotify:(void (^)(void))block {
+    id copied = [block copy];
+    _session->set_alert_notify([copied] {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ((void (^)(void))copied)();
+        });
+    });
+}
+
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
                                   savePath:(NSString *)savePath {
     try {

@@ -106,7 +106,6 @@ public final class TorrentEngine: ObservableObject {
 
     private var session: LibtorrentSession?
     private nonisolated(unsafe) var pollTimer: Timer?
-    private nonisolated(unsafe) var alertTimer: Timer?
     private let queue = DispatchQueue(label: "com.qbt.libtorrent", qos: .utility)
     /// IDs of torrents the user has asked to remove but libtorrent hasn't
     /// finished tearing down yet. Polled results are filtered against this so
@@ -122,19 +121,19 @@ public final class TorrentEngine: ObservableObject {
         if session == nil {
             sessionError = "Failed to create libtorrent session."
         }
+        session?.setAlertNotify { [weak self] in
+            self?.drainAlerts()
+        }
     }
 
     deinit {
         pollTimer?.invalidate()
-        alertTimer?.invalidate()
     }
 
-    public func startPolling(interval: TimeInterval = 0.5) {
+    /// Start polling. Alerts are event-driven; status poll runs every 2s as a fallback.
+    public func startPolling(interval: TimeInterval = 2.0) {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.poll()
-        }
-        alertTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            self?.drainAlerts()
         }
     }
 

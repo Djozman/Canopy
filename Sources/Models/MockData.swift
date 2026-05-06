@@ -2,6 +2,7 @@
 
 import Foundation
 
+#if DEBUG
 extension TorrentStatus {
     static let mockList: [TorrentStatus] = [
         TorrentStatus(id: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", name: "Ubuntu 24.04 LTS Desktop amd64",
@@ -42,3 +43,4 @@ extension TorrentStatus {
                       errorMessage: "Tracker: connection timed out", handle: nil),
     ]
 }
+#endif

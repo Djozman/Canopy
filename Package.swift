@@ -6,7 +6,7 @@ let libtorrentPrefix = "/opt/homebrew/opt/libtorrent-rasterbar"
 
 let package = Package(
     name: "Canopy",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS(.v14)],
     products: [
         .executable(name: "Canopy", targets: ["Canopy"])
     ],
@@ -39,6 +39,11 @@ let package = Package(
             swiftSettings: [
                 .interoperabilityMode(.C),
             ]
+        ),
+        .testTarget(
+            name: "CanopyTests",
+            dependencies: ["Canopy"],
+            path: "Tests"
         ),
     ]
 )

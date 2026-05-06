@@ -131,7 +131,7 @@ public final class UpdateChecker: ObservableObject {
         }
     }
 
-    private static func mountDMG(at path: String) throws -> String {
+    private nonisolated static func mountDMG(at path: String) throws -> String {
         let proc = Process()
         proc.launchPath = "/usr/bin/hdiutil"
         proc.arguments = ["attach", path, "-nobrowse", "-readonly", "-plist"]
@@ -156,7 +156,7 @@ public final class UpdateChecker: ObservableObject {
         return mountPoint
     }
 
-    private static func detachVolume(_ mountPoint: String) throws {
+    private nonisolated static func detachVolume(_ mountPoint: String) throws {
         let proc = Process()
         proc.launchPath = "/usr/bin/hdiutil"
         proc.arguments = ["detach", mountPoint, "-force"]
