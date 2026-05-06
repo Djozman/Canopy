@@ -62,7 +62,7 @@ public actor DownloadCoordinator {
     private func saveResumeData() {
         let path = resumeFilePath()
         guard let data = try? JSONEncoder().encode(completedPieces.sorted()) else { return }
-        try? data.write(to: URL(fileURLWithPath: path))
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     /// Download the entire torrent. Blocks until complete or error.
@@ -185,6 +185,7 @@ public actor DownloadCoordinator {
                             completionContinuation = nil
                             cont.resume()
                         }
+                        try? FileManager.default.removeItem(atPath: resumeFilePath())
                         try? await trackerSession.completed()
                         for p in peers.values { await p.disconnect() }
                         return
@@ -207,7 +208,9 @@ public actor DownloadCoordinator {
         // Peer disconnected — clean up and check if we're out of peers
         print("[Coordinator] ⛔ Disconnected from \(key)")
         peers.removeValue(forKey: key)
-        peerBitfields.removeValue(forKey: key)
+        if let bf = peerBitfields.removeValue(forKey: key) {
+            for piece in bf { pieceFrequency[piece, default: 1] -= 1 }
+        }
         if let piece = peerPieces[key] {
             await pieceManager.cancelPending(for: piece)
             assignedPieces.remove(piece)
@@ -228,10 +231,10 @@ public actor DownloadCoordinator {
             return
         }
 
-        // Endgame: >95% done — request from ALL peers simultaneously
-        if await pieceManager.progress > 0.95 {
+        // Endgame: fewer than 5% of pieces remaining — request from ALL peers
+        let remaining = Double(torrent.pieces.count - completedPieces.count)
+        if remaining < Double(torrent.pieces.count) * 0.05 {
             guard let piece = await pieceManager.nextNeededPiece(excluding: []) else { return }
-            assignedPieces.insert(piece)
             peerPieces[key] = piece
             pieceAssignedAt[piece] = Date()
             let requests = await pieceManager.nextBlockRequests(for: piece)
