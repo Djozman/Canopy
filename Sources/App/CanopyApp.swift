@@ -40,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return true
     }
+    func applicationWillTerminate(_ notification: Notification) {
+        CanopyApp.engine.shutdown()
+    }
 }
 
 @main
