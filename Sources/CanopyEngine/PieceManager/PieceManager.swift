@@ -15,8 +15,7 @@ public actor PieceManager {
 
     private var bitfield: Bitfield
     private var pendingBlocks: Set<BlockRequest> = []
-    private var downloadedBlocks: [Int: Data] = [:]  // blockBegin → data
-    private var failedHashes: Set<Int> = []  // piece indices that failed SHA1
+    private var downloadedBlocks: [Int: [Int: Data]] = [:]  // piece → (blockBegin → data)
 
     public init(pieceCount: Int, pieceLength: Int64, totalSize: Int64, expectedHashes: [Data]) {
         self.pieceCount = pieceCount
@@ -32,7 +31,7 @@ public actor PieceManager {
 
     /// Get the next needed piece (rarest-first selection happens at a higher level).
     public func nextNeededPiece() -> Int? {
-        for i in 0..<pieceCount where !bitfield.isSet(i) && !failedHashes.contains(i) {
+        for i in 0..<pieceCount where !bitfield.isSet(i) {
             return i
         }
         return nil
@@ -55,11 +54,12 @@ public actor PieceManager {
         let blockCount = (actualSize + blockSize - 1) / blockSize
 
         var requests: [BlockRequest] = []
+        let pieceBlocks = downloadedBlocks[piece] ?? [:]
         for blk in 0..<blockCount {
             let begin = blk * blockSize
             let length = min(blockSize, actualSize - begin)
             let req = BlockRequest(piece: piece, begin: begin, length: length)
-            if !downloadedBlocks.keys.contains(begin) && !pendingBlocks.contains(req) {
+            if !pieceBlocks.keys.contains(begin) && !pendingBlocks.contains(req) {
                 requests.append(req)
                 pendingBlocks.insert(req)
                 if requests.count >= count { break }
@@ -70,7 +70,7 @@ public actor PieceManager {
 
     /// Store a downloaded block.
     public func storeBlock(piece: Int, begin: Int, data: Data) {
-        downloadedBlocks[begin] = data
+        downloadedBlocks[piece, default: [:]][begin] = data
         pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
     }
 
@@ -81,23 +81,23 @@ public actor PieceManager {
             : Int(pieceLength)
         let blockCount = (actualSize + blockSize - 1) / blockSize
 
+        let pieceBlocks = downloadedBlocks[piece] ?? [:]
         var assembled = Data(capacity: actualSize)
         for blk in 0..<blockCount {
             let begin = blk * blockSize
-            guard let data = downloadedBlocks[begin] else { return nil }
+            guard let data = pieceBlocks[begin] else { return nil }
             assembled.append(data)
         }
 
         // SHA1 verify
         let hash = SHA1.hash(assembled)
         guard hash == expectedHashes[piece] else {
-            // Hash mismatch — discard all blocks for this piece
+            // Hash mismatch — discard all blocks for this piece, will re-request
             for blk in 0..<blockCount {
                 let begin = blk * blockSize
-                downloadedBlocks.removeValue(forKey: begin)
+                downloadedBlocks[piece]?.removeValue(forKey: begin)
                 pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: min(blockSize, actualSize - begin)))
             }
-            failedHashes.insert(piece)
             return nil
         }
 

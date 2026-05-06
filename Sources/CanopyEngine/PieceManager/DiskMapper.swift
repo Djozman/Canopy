@@ -19,37 +19,43 @@ public struct DiskMapper {
         }
     }
 
-    /// Given a piece index and a byte offset within that piece, return the
-    /// file index, offset within that file, and how many bytes to write
-    /// (clamped to the file boundary).
-    public func map(piece: Int, blockBegin: Int) -> (fileIndex: Int, fileOffset: Int64, length: Int) {
-        let absoluteOffset = Int64(piece) * pieceLength + Int64(blockBegin)
-        guard let fileIdx = fileOffsets.lastIndex(where: { $0 <= absoluteOffset }) else {
-            return (0, absoluteOffset, min(Int(pieceLength) - blockBegin, Int(files[0].size)))
+    /// Map a block within a piece to file segments. Returns an array because
+    /// a single block can span multiple files when it crosses a file boundary.
+    public func map(piece: Int, blockBegin: Int, blockLength: Int) -> [(fileIndex: Int, fileOffset: Int64, length: Int)] {
+        var result: [(Int, Int64, Int)] = []
+        var remaining: Int64 = Int64(blockLength)
+        var absoluteOffset = Int64(piece) * pieceLength + Int64(blockBegin)
+
+        while remaining > 0 {
+            guard let fileIdx = fileOffsets.lastIndex(where: { $0 <= absoluteOffset }) else { break }
+            let fileStart = fileOffsets[fileIdx]
+            let fileEnd = fileStart + files[fileIdx].size
+            let fileOffset = absoluteOffset - fileStart
+            let remainingInFile = fileEnd - absoluteOffset
+            let chunk = min(remaining, remainingInFile)
+            result.append((fileIdx, fileOffset, Int(chunk)))
+            absoluteOffset += chunk
+            remaining -= chunk
         }
-        let fileStart = fileOffsets[fileIdx]
-        let fileEnd = fileStart + files[fileIdx].size
-        let fileOffset = absoluteOffset - fileStart
-        let remainingInFile = fileEnd - absoluteOffset
-        let remainingInBlock = Int(pieceLength) - blockBegin
-        let length = min(Int(remainingInFile), remainingInBlock)
-        return (fileIdx, fileOffset, length)
+        return result
     }
 
-    /// Return file handles for all files, created/opened at the given path prefix.
+    /// Return file handles for all files, created/opened at the given root path.
+    /// Preserves the torrent's directory structure.
     public func openFiles(at rootPath: String) throws -> [FileHandle] {
         let root = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
         let fm = FileManager.default
-        try fm.createDirectory(atPath: root, withIntermediateDirectories: true)
         return try files.map { entry in
-            let filePath = root + entry.path.replacingOccurrences(of: "/", with: "-")
+            let filePath = root + entry.path
+            let dir = (filePath as NSString).deletingLastPathComponent
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
             if !fm.fileExists(atPath: filePath) {
                 fm.createFile(atPath: filePath, contents: nil)
             }
             guard let fh = FileHandle(forWritingAtPath: filePath) else {
-                throw NSError(domain: "DiskMapper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot open \(filePath)"])
+                throw NSError(domain: "DiskMapper", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Cannot open \(filePath)"])
             }
-            fh.seekToEndOfFile()
             return fh
         }
     }

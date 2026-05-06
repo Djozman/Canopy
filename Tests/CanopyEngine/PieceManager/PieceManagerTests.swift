@@ -104,10 +104,11 @@ final class DiskMapperTests: XCTestCase {
     func testSingleFileMapping() {
         let files = [TorrentFile.FileEntry(path: "test.iso", size: 1000000)]
         let mapper = DiskMapper(files: files, pieceLength: 262144)
-        let (fileIdx, fileOffset, length) = mapper.map(piece: 0, blockBegin: 0)
-        XCTAssertEqual(fileIdx, 0)
-        XCTAssertEqual(fileOffset, 0)
-        XCTAssertEqual(length, 262144) // block fits within file
+        let segments = mapper.map(piece: 0, blockBegin: 0, blockLength: 16384)
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments[0].fileIndex, 0)
+        XCTAssertEqual(segments[0].fileOffset, 0)
+        XCTAssertEqual(segments[0].length, 16384)
     }
 
     func testMultiFileMapping() {
@@ -116,16 +117,14 @@ final class DiskMapperTests: XCTestCase {
             TorrentFile.FileEntry(path: "b.txt", size: 50000),
         ]
         let mapper = DiskMapper(files: files, pieceLength: 16384)
-        // Block within first file — clamped to file boundary
-        let (f0, o0, l0) = mapper.map(piece: 0, blockBegin: 0)
-        XCTAssertEqual(f0, 0)
-        XCTAssertEqual(o0, 0)
-        XCTAssertEqual(l0, 1000)  // clamped to first file boundary
-
-        // Block spanning into second file
-        let (f1, o1, l1) = mapper.map(piece: 0, blockBegin: 1000)
-        XCTAssertEqual(f1, 1)
-        XCTAssertEqual(o1, 0)
-        XCTAssertEqual(l1, 15384) // 16384 - 1000
+        // Block at file boundary: spans a.txt (1000 bytes) into b.txt
+        let segments = mapper.map(piece: 0, blockBegin: 0, blockLength: 16384)
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].fileIndex, 0)
+        XCTAssertEqual(segments[0].fileOffset, 0)
+        XCTAssertEqual(segments[0].length, 1000)
+        XCTAssertEqual(segments[1].fileIndex, 1)
+        XCTAssertEqual(segments[1].fileOffset, 0)
+        XCTAssertEqual(segments[1].length, 15384)
     }
 }
