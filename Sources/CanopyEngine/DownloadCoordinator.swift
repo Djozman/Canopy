@@ -154,12 +154,12 @@ public actor DownloadCoordinator {
                     // Announce new piece to all OTHER connected peers
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
                     if await pieceManager.isComplete {
-                        try? await trackerSession.completed()
-                        for p in peers.values { await p.disconnect() }
                         if let cont = completionContinuation {
                             completionContinuation = nil
                             cont.resume()
                         }
+                        try? await trackerSession.completed()
+                        for p in peers.values { await p.disconnect() }
                         return
                     }
                     await requestBlocks(key: key, conn: conn)
