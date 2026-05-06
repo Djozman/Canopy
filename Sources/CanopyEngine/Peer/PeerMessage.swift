@@ -17,8 +17,8 @@ public enum PeerMessage: Equatable {
 
     /// Parse a single message from a byte stream. Returns nil if more data is needed.
     public static func decode(from data: inout Data) -> PeerMessage? {
-        guard data.count >= 4 else { return nil }
-        let bytes = Array(data) // Safe byte access, avoids Data subscript crashes
+        let bytes = Array(data) // Avoid Data subscript crashes on ARM64 macOS 26
+        guard bytes.count >= 4 else { return nil }
         let length = (Int(bytes[0]) << 24) | (Int(bytes[1]) << 16) | (Int(bytes[2]) << 8) | Int(bytes[3])
         if length == 0 {
             data.removeFirst(4)
@@ -26,9 +26,9 @@ public enum PeerMessage: Equatable {
         }
         guard bytes.count >= 4 + length else { return nil }
         let id = bytes[4]
-        let payload = data[5..<(4 + length)]
+        let payload = Data(bytes[5..<(4 + length)])
         data.removeFirst(4 + length)
-        return messageFrom(id: id, payload: Data(payload))
+        return messageFrom(id: id, payload: payload)
     }
 
     public func encode() -> Data {
