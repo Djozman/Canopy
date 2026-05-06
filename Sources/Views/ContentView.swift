@@ -64,11 +64,17 @@ struct ContentView: View {
             if let t = vm.selectedTorrent {
                 TorrentDetailView(torrent: t, engine: engine)
             } else {
-                ContentUnavailableView(
-                    "Select a torrent",
-                    systemImage: "arrow.down.circle",
-                    description: Text("Pick a torrent from the list to see details.")
-                )
+                VStack(spacing: 16) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("Select a torrent")
+                        .font(.title2)
+                    Text("Pick a torrent from the list to see details.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .sheet(isPresented: $showAddSheet) {
@@ -170,14 +176,16 @@ struct ContentView: View {
     // MARK: - Empty state
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label(vm.searchText.isEmpty ? "No torrents" : "No results",
-                  systemImage: vm.searchText.isEmpty ? "tray" : "magnifyingglass")
-        } description: {
+        VStack(spacing: 16) {
+            Image(systemName: vm.searchText.isEmpty ? "tray" : "magnifyingglass")
+                .font(.system(size: 48))
+                .foregroundStyle(.tertiary)
+            Text(vm.searchText.isEmpty ? "No torrents" : "No results")
+                .font(.title2)
             Text(vm.searchText.isEmpty
                  ? "Add a torrent or magnet link to get started."
                  : "Try a different search term.")
-        } actions: {
+                .foregroundStyle(.secondary)
             if vm.searchText.isEmpty {
                 Button("Add Torrent") { showAddSheet = true }
                     .buttonStyle(.borderedProminent)
