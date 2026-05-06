@@ -263,7 +263,7 @@ public actor DownloadCoordinator {
             assignedPieces.remove(piece)
             peerPieces.removeValue(forKey: key)
         }
-        if peers.isEmpty, let cont = completionContinuation {
+        if peers.isEmpty, !bannedPeers.contains(key), let cont = completionContinuation {
             completionContinuation = nil
             cont.resume(throwing: DownloadError.allPeersDisconnected)
         }
