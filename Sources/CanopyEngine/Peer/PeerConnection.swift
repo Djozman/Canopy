@@ -25,7 +25,7 @@ public actor PeerConnection {
     /// The peer's reserved bytes from the handshake (for BEP 10 bit 20 check).
     public private(set) var peerReservedBytes: [UInt8] = []
     /// Parsed extension handshake from this peer (nil until received).
-    var peerExtensions: PeerExtensions?
+    var peerExtensions: PeerExtensions?  // internal — read/written by DownloadCoordinator
 
     func setExtensions(_ ext: PeerExtensions) { self.peerExtensions = ext }
 
