@@ -284,6 +284,13 @@ public actor DownloadCoordinator {
                             }
                         }
                     }
+                    // Clean up tracking and re-queue the piece immediately
+                    assignedPieces.remove(piece)
+                    pieceAssignedAt.removeValue(forKey: piece)
+                    if let p = peerPieces.removeValue(forKey: key) {
+                        await pieceManager.cancelPending(for: p)
+                    }
+                    await requestBlocks(key: key, conn: conn)
 
                 case .incomplete:
                     break  // not all blocks arrived yet
