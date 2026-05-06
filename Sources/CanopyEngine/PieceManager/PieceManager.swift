@@ -30,9 +30,17 @@ public actor PieceManager {
     public func hasPiece(_ piece: Int) -> Bool { bitfield.isSet(piece) }
 
     /// Get the next needed piece (rarest-first selection happens at a higher level).
-    /// Get the next needed piece, optionally excluding pieces already assigned to other peers.
-    public func nextNeededPiece(excluding: Set<Int> = []) -> Int? {
-        for i in 0..<pieceCount where !bitfield.isSet(i) && !excluding.contains(i) {
+    /// Get the next needed piece, optionally excluding pieces already assigned to other peers
+    /// and restricted to pieces available from a specific peer.
+    public func nextNeededPiece(excluding: Set<Int> = [], availableIn: Set<Int> = []) -> Int? {
+        guard !availableIn.isEmpty else {
+            // No bitfield info — try any needed piece
+            for i in 0..<pieceCount where !bitfield.isSet(i) && !excluding.contains(i) {
+                return i
+            }
+            return nil
+        }
+        for i in 0..<pieceCount where !bitfield.isSet(i) && !excluding.contains(i) && availableIn.contains(i) {
             return i
         }
         return nil

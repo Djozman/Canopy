@@ -1,7 +1,7 @@
 import Foundation
 
 /// Coordinates downloading a single torrent: tracker announces, peer connections,
-/// piece requests, and disk writes. All state lives in the PieceManager actor.
+/// piece requests, and disk writes.
 public actor DownloadCoordinator {
     private let torrent: TorrentFile
     private let pieceManager: PieceManager
@@ -9,13 +9,12 @@ public actor DownloadCoordinator {
     private let trackerSession: TrackerSession
     private let savePath: String
 
-    /// Track which pieces each peer has (from their bitfield).
-    /// Used to select which peer to request from, NOT for our own completion tracking.
     private var peerBitfields: [String: Set<Int>] = [:]
     private var peers: [String: PeerConnection] = [:]
     private var peerPieces: [String: Int] = [:]
     private var assignedPieces: Set<Int> = []
     private var fileHandles: [FileHandle]?
+    private var completionContinuation: CheckedContinuation<Void, Error>?
 
     public init(torrent: TorrentFile, savePath: String) {
         self.torrent = torrent
@@ -43,6 +42,7 @@ public actor DownloadCoordinator {
         )
     }
 
+    /// Download the entire torrent. Blocks until complete or error.
     public func download() async throws {
         fileHandles = try diskMapper.openFiles(at: savePath)
 
@@ -55,9 +55,16 @@ public actor DownloadCoordinator {
             peers[key] = conn
         }
 
-        await withTaskGroup(of: Void.self) { group in
-            for (key, conn) in peers {
-                group.addTask { await self.handlePeer(key: key, conn: conn) }
+        // Suspend until download completes
+        try await withCheckedThrowingContinuation { cont in
+            completionContinuation = cont
+            Task {
+                await withTaskGroup(of: Void.self) { group in
+                    for (key, conn) in peers {
+                        group.addTask { await self.handlePeer(key: key, conn: conn) }
+                    }
+                }
+                // Don't resume here — only resume on completion or error
             }
         }
     }
@@ -70,7 +77,6 @@ public actor DownloadCoordinator {
             switch msg {
 
             case .bitfield(let bf):
-                // Store what this PEER has, not what we have
                 var peerSet = Set<Int>()
                 for (byteIdx, byte) in bf.enumerated() {
                     for bit in 0..<8 {
@@ -89,7 +95,6 @@ public actor DownloadCoordinator {
 
             case .piece(let piece, let begin, let data):
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
-                // Re-fill pipeline immediately after each block arrives
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
                 }
@@ -97,9 +102,13 @@ public actor DownloadCoordinator {
                     assignedPieces.remove(piece)
                     peerPieces.removeValue(forKey: key)
                     await writePieceToDisk(piece: piece, data: verified)
+                    // Announce new piece to all connected peers
+                    for c in peers.values { try? await c.send(.have(piece: piece)) }
                     if await pieceManager.isComplete {
                         try? await trackerSession.completed()
                         for p in peers.values { await p.disconnect() }
+                        completionContinuation?.resume()
+                        completionContinuation = nil
                         return
                     }
                     await requestBlocks(key: key, conn: conn)
@@ -119,7 +128,6 @@ public actor DownloadCoordinator {
     }
 
     private func requestBlocks(key: String, conn: PeerConnection) async {
-        // If this peer already has an assigned piece, continue requesting blocks
         if let piece = peerPieces[key] {
             let requests = await pieceManager.nextBlockRequests(for: piece)
             for req in requests {
@@ -128,11 +136,10 @@ public actor DownloadCoordinator {
             return
         }
 
-        // Find a new piece this peer has that isn't assigned to anyone
         let peersPieces = peerBitfields[key] ?? []
-        guard let piece = await pieceManager.nextNeededPiece(excluding: assignedPieces) else { return }
-        // Only assign if this peer actually has it (or if we don't know, try anyway)
-        guard peersPieces.isEmpty || peersPieces.contains(piece) else { return }
+        guard let piece = await pieceManager.nextNeededPiece(excluding: assignedPieces, availableIn: peersPieces) else {
+            return
+        }
 
         assignedPieces.insert(piece)
         peerPieces[key] = piece
