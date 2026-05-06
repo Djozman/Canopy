@@ -8,8 +8,6 @@ public struct UDPTracker {
     private let host: String
     private let port: UInt16
 
-    private static var connectionIDCache: [String: (id: UInt64, expiry: Date)] = [:]
-
     public init(url: String) throws {
         self.url = url
         guard let parsed = URL(string: url),
@@ -26,61 +24,58 @@ public struct UDPTracker {
         conn.start(queue: .global())
         defer { conn.cancel() }
 
-        // Get or fetch connection ID
         let cid = try await getConnectionID(on: conn)
 
-        // Build announce request
         let txID = UInt32.random(in: 0...UInt32.max)
         let request = encodeAnnounce(cid: cid, txID: txID, announce: announce)
-        try await conn.send(content: request)
 
-        // Receive response with retries
-        let response: TrackerResponse? = try await withRetries(maxRetries: 4) {
-            let data = try await withTimeout(seconds: 5) {
-                try await conn.receive(minimumIncompleteLength: 1, maximumLength: 4096)
+        // Re-send + retry loop
+        for i in 0..<4 {
+            try await conn.send(content: request)
+            do {
+                let data = try await withTimeout(seconds: 5) {
+                    try await conn.receive(minimumIncompleteLength: 1, maximumLength: 4096)
+                }
+                if let response = try decodeResponse(data: data, expectedTxID: txID) {
+                    return response
+                }
+            } catch is TimeoutError {
+                // retry with backoff
             }
-            return try decodeResponse(data: data, expectedTxID: txID)
+            try? await Task.sleep(for: .seconds(TimeInterval(min(15 * (1 << i), 300))))
         }
-        guard let response = response else {
-            throw TrackerError.noResponse
-        }
-        return response
+        throw TrackerError.noResponse
     }
 
     // MARK: - Connection ID
 
     private func getConnectionID(on conn: NWConnection) async throws -> UInt64 {
-        // Check cache
         let key = cacheKey
-        if let entry = Self.connectionIDCache[key], Date() < entry.expiry {
-            return entry.id
+        if let cached = await ConnectionIDCache.shared.get(key) {
+            return cached
         }
-        // Handshake
+
         let txID = UInt32.random(in: 0...UInt32.max)
         let connectReq = encodeConnect(txID: txID)
-        try await conn.send(content: connectReq)
 
-        var attempt = 0
-        while attempt < 4 {
-            let data: Data
+        // Re-send + retry loop
+        for _ in 0..<4 {
+            try await conn.send(content: connectReq)
             do {
-                data = try await withTimeout(seconds: 5) {
+                let data = try await withTimeout(seconds: 5) {
                     try await conn.receive(minimumIncompleteLength: 1, maximumLength: 16)
                 }
-            } catch {
-                attempt += 1
-                continue
+                guard data.count >= 16 else { continue }
+                let action = readUInt32(data, at: 0)
+                guard action == 0 else { continue }
+                let respTxID = readUInt32(data, at: 4)
+                guard respTxID == txID else { continue }
+                let cid = readUInt64(data, at: 8)
+                await ConnectionIDCache.shared.set(key, id: cid)
+                return cid
+            } catch is TimeoutError {
+                // retry
             }
-            if data.count < 16 { attempt += 1; continue }
-            // Verify it's a connect response
-            let action = readUInt32(data, at: 0)
-            guard action == 0 else { attempt += 1; continue }
-            let respTxID = readUInt32(data, at: 4)
-            guard respTxID == txID else { attempt += 1; continue }
-            let cid = readUInt64(data, at: 8)
-            // Cache for 2 minutes
-            Self.connectionIDCache[key] = (cid, Date().addingTimeInterval(120))
-            return cid
         }
         throw TrackerError.noResponse
     }
@@ -190,18 +185,26 @@ public struct UDPTracker {
     }
 }
 
-// MARK: - Retry helper
+// MARK: - Connection ID cache (actor-safe)
 
-private func withRetries<T>(maxRetries: Int, op: () async throws -> T?) async throws -> T? {
-    for i in 0..<maxRetries {
-        if let result = try? await op() {
-            return result
-        }
-        let delay = UInt64(min(15 * (1 << i), 300))
-        try? await Task.sleep(for: .seconds(delay))
+private actor ConnectionIDCache {
+    private var entries: [String: UInt64] = [:]
+    private var expiry: [String: Date] = [:]
+
+    func get(_ key: String) -> UInt64? {
+        guard let id = entries[key], let exp = expiry[key], Date() < exp else { return nil }
+        return id
     }
-    return nil
+
+    func set(_ key: String, id: UInt64) {
+        entries[key] = id
+        expiry[key] = Date().addingTimeInterval(120)
+    }
+
+    static let shared = ConnectionIDCache()
 }
+
+// MARK: - Timeout helper
 
 private func withTimeout<T>(seconds: TimeInterval, op: @escaping () async throws -> T) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
@@ -217,27 +220,3 @@ private func withTimeout<T>(seconds: TimeInterval, op: @escaping () async throws
 }
 
 private struct TimeoutError: Error {}
-
-// MARK: - NWConnection async helpers
-
-private extension NWConnection {
-    func send(content: Data) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            self.send(content: content, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed({ error in
-                if let error { cont.resume(throwing: error) }
-                else { cont.resume() }
-            }))
-        }
-    }
-
-    func receive(minimumIncompleteLength: Int, maximumLength: Int) async throws -> Data {
-        try await withCheckedThrowingContinuation { cont in
-            self.receive(minimumIncompleteLength: minimumIncompleteLength, maximumLength: maximumLength) { data, _, isComplete, error in
-                if let error { cont.resume(throwing: error) }
-                else if let data, !data.isEmpty { cont.resume(returning: data) }
-                else if isComplete { cont.resume(throwing: TrackerError.noResponse) }
-                else { cont.resume(throwing: TrackerError.noResponse) }
-            }
-        }
-    }
-}
