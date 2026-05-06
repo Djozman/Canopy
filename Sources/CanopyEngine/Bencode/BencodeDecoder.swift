@@ -53,8 +53,9 @@ public struct BencodeDecoder {
         let lenStr = String(data: data[index..<colonIndex], encoding: .ascii) ?? ""
         guard let length = Int(lenStr) else { throw BencodeError.invalidStringLength }
         index = data.index(after: colonIndex)
-        let end = data.index(index, offsetBy: length, limitedBy: data.endIndex) ?? data.endIndex
-        guard end <= data.endIndex else { throw BencodeError.unexpectedEnd }
+        guard let end = data.index(index, offsetBy: length, limitedBy: data.endIndex) else {
+            throw BencodeError.unexpectedEnd
+        }
         let bytes = data[index..<end]
         index = end
         return Data(bytes)

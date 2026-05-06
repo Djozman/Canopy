@@ -14,7 +14,6 @@ public actor PeerConnection {
     private let infoHash: Data
     private let localPeerID: Data
     private var connection: NWConnection?
-    private var buffer = Data()
     private var handshakeDone = false
     private var receiveTask: Task<Void, Never>?
 

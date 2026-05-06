@@ -12,6 +12,7 @@ public actor TrackerSession {
     private var currentInterval: Int = 0
     private var currentMinInterval: Int = 0
     private var lastEvent: TrackerEvent? = nil
+    private var hasSentStarted = false
     private var totalUploaded: Int64 = 0
     private var totalDownloaded: Int64 = 0
     private var totalLeft: Int64
@@ -45,13 +46,13 @@ public actor TrackerSession {
         totalDownloaded = downloaded
         if let left { totalLeft = left }
 
-        // Determine event: .started on first call, nil on regular re-announces
-        let event: TrackerEvent? = lastEvent == nil ? .started : nil
-        lastEvent = event
+        // Determine event: .started on first call, nil on subsequent calls
+        let event: TrackerEvent? = hasSentStarted ? nil : .started
+        hasSentStarted = true
 
         // Check interval — don't re-announce too early
         let now = Date()
-        let minWait = TimeInterval(max(currentMinInterval, min(currentInterval, 30)))
+        let minWait = TimeInterval(max(currentMinInterval, currentInterval))
         if now.timeIntervalSince(lastAnnounceTime) < minWait {
             throw TrackerError.noResponse // caller can retry later
         }
