@@ -45,6 +45,10 @@ public actor DownloadCoordinator {
     /// Download the entire torrent. Blocks until complete or error.
     public func download() async throws {
         fileHandles = try diskMapper.openFiles(at: savePath)
+        defer {
+            fileHandles?.forEach { try? $0.close() }
+            fileHandles = nil
+        }
 
         let response = try await trackerSession.announce()
         guard !response.peers.isEmpty else { throw DownloadError.noPeers }
@@ -102,13 +106,15 @@ public actor DownloadCoordinator {
                     assignedPieces.remove(piece)
                     peerPieces.removeValue(forKey: key)
                     await writePieceToDisk(piece: piece, data: verified)
-                    // Announce new piece to all connected peers
-                    for c in peers.values { try? await c.send(.have(piece: piece)) }
+                    // Announce new piece to all OTHER connected peers
+                    for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
                     if await pieceManager.isComplete {
                         try? await trackerSession.completed()
                         for p in peers.values { await p.disconnect() }
-                        completionContinuation?.resume()
-                        completionContinuation = nil
+                        if let cont = completionContinuation {
+                            completionContinuation = nil
+                            cont.resume()
+                        }
                         return
                     }
                     await requestBlocks(key: key, conn: conn)
@@ -124,6 +130,18 @@ public actor DownloadCoordinator {
             default:
                 break
             }
+        }
+        // Peer disconnected — clean up and check if we're out of peers
+        peers.removeValue(forKey: key)
+        peerBitfields.removeValue(forKey: key)
+        if let piece = peerPieces[key] {
+            await pieceManager.cancelPending(for: piece)
+            assignedPieces.remove(piece)
+            peerPieces.removeValue(forKey: key)
+        }
+        if peers.isEmpty, let cont = completionContinuation {
+            completionContinuation = nil
+            cont.resume(throwing: DownloadError.allPeersDisconnected)
         }
     }
 
@@ -165,4 +183,5 @@ public actor DownloadCoordinator {
 
 public enum DownloadError: Error {
     case noPeers
+    case allPeersDisconnected
 }
