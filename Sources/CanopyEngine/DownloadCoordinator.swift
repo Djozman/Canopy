@@ -14,6 +14,8 @@ public actor DownloadCoordinator {
     private var peerPieces: [String: Int] = [:]
     private var assignedPieces: Set<Int> = []
     private var pieceAssignedAt: [Int: Date] = [:]
+    private var completedPieces: Set<Int> = []     // resume: which pieces are done
+    private var pieceFrequency: [Int: Int] = [:]   // rarest-first: peer count per piece
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
 
@@ -43,8 +45,29 @@ public actor DownloadCoordinator {
         )
     }
 
+    private func resumeFilePath() -> String {
+        "\(savePath)/.canopy_resume"
+    }
+
+    private func loadResumeData() async {
+        let path = resumeFilePath()
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let indices = try? JSONDecoder().decode([Int].self, from: data) else { return }
+        for piece in indices {
+            await pieceManager.markHave(piece: piece)
+            completedPieces.insert(piece)
+        }
+    }
+
+    private func saveResumeData() {
+        let path = resumeFilePath()
+        guard let data = try? JSONEncoder().encode(completedPieces.sorted()) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+
     /// Download the entire torrent. Blocks until complete or error.
     public func download() async throws {
+        await loadResumeData()
         fileHandles = try diskMapper.openFiles(at: savePath)
         defer {
             fileHandles?.forEach { try? $0.close() }
@@ -127,7 +150,9 @@ public actor DownloadCoordinator {
                 for (byteIdx, byte) in bf.enumerated() {
                     for bit in 0..<8 {
                         if (byte >> (7 - bit)) & 1 == 1 {
-                            peerSet.insert(byteIdx * 8 + bit)
+                            let pieceIdx = byteIdx * 8 + bit
+                            peerSet.insert(pieceIdx)
+                            pieceFrequency[pieceIdx, default: 0] += 1
                         }
                     }
                 }
@@ -151,6 +176,8 @@ public actor DownloadCoordinator {
                     peerPieces.removeValue(forKey: key)
                     pieceAssignedAt.removeValue(forKey: piece)
                     await writePieceToDisk(piece: piece, data: verified)
+                    completedPieces.insert(piece)
+                    saveResumeData()
                     // Announce new piece to all OTHER connected peers
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
                     if await pieceManager.isComplete {
@@ -201,10 +228,22 @@ public actor DownloadCoordinator {
             return
         }
 
-        let peersPieces = peerBitfields[key] ?? []
-        guard let piece = await pieceManager.nextNeededPiece(excluding: assignedPieces, availableIn: peersPieces) else {
+        // Endgame: >95% done — request from ALL peers simultaneously
+        if await pieceManager.progress > 0.95 {
+            guard let piece = await pieceManager.nextNeededPiece(excluding: []) else { return }
+            assignedPieces.insert(piece)
+            peerPieces[key] = piece
+            pieceAssignedAt[piece] = Date()
+            let requests = await pieceManager.nextBlockRequests(for: piece)
+            for req in requests {
+                try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
+            }
             return
         }
+
+        // Rarest-first: pick the piece this peer has that fewest OTHER peers also have
+        let peersPieces = peerBitfields[key] ?? []
+        guard let piece = await rarestPiece(available: peersPieces, excluding: assignedPieces) else { return }
 
         assignedPieces.insert(piece)
         peerPieces[key] = piece
@@ -214,6 +253,19 @@ public actor DownloadCoordinator {
         for req in requests {
             try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
         }
+    }
+
+    private func rarestPiece(available: Set<Int>, excluding: Set<Int>) async -> Int? {
+        guard !available.isEmpty else {
+            return await pieceManager.nextNeededPiece(excluding: excluding)
+        }
+        var best: Int?; var bestCount = Int.max
+        for piece in available {
+            guard !excluding.contains(piece), !(await pieceManager.hasPiece(piece)) else { continue }
+            let freq = pieceFrequency[piece] ?? 0
+            if freq < bestCount { bestCount = freq; best = piece }
+        }
+        return best
     }
 
     private func writePieceToDisk(piece: Int, data: Data) async {
