@@ -206,8 +206,6 @@ public actor DownloadCoordinator {
         }
         defer { keepaliveTask.cancel() }
 
-        var utPEXID: UInt8?          // remote's ID for ut_pex (outgoing sends)
-
         for await msg in stream {
             switch msg {
 
@@ -340,7 +338,6 @@ public actor DownloadCoordinator {
                 // Extension handshake response
                 if let ext = parseExtensionHandshake(from: data) {
                     await conn.setExtensions(ext)
-                    utPEXID = ext.utPEX
                     print("[Coordinator] 🔌 Extensions from \(key): ut_pex=\(ext.utPEX != nil) ut_metadata=\(ext.utMetadata != nil) metadata_size=\(ext.metadataSize ?? 0)")
                 }
 
