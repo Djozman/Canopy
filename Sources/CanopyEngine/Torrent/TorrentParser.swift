@@ -168,8 +168,8 @@ public struct TorrentParser {
                 guard i < data.endIndex else { return false }
                 guard let len = Int(String(data: data[start..<i], encoding: .ascii) ?? "") else { return false }
                 i = data.index(after: i)
-                i = data.index(i, offsetBy: len, limitedBy: data.endIndex) ?? data.endIndex
-                guard i <= data.endIndex else { return false }
+                guard let newI = data.index(i, offsetBy: len, limitedBy: data.endIndex) else { return false }
+                i = newI
             default:
                 return false
             }
@@ -188,7 +188,7 @@ public struct TorrentParser {
             guard index < data.endIndex else { return nil }
             guard let keyLen = Int(String(data: data[keyStart..<index], encoding: .ascii) ?? "") else { return nil }
             index = data.index(after: index)
-            let keyEnd = data.index(index, offsetBy: keyLen, limitedBy: data.endIndex) ?? data.endIndex
+            guard let keyEnd = data.index(index, offsetBy: keyLen, limitedBy: data.endIndex) else { return nil }
             let key = String(data: data[index..<keyEnd], encoding: .ascii)
             index = keyEnd
 

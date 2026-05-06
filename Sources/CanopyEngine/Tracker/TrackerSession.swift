@@ -11,7 +11,6 @@ public actor TrackerSession {
     private var lastAnnounceTime: Date = .distantPast
     private var currentInterval: Int = 0
     private var currentMinInterval: Int = 0
-    private var lastEvent: TrackerEvent? = nil
     private var hasSentStarted = false
     private var totalUploaded: Int64 = 0
     private var totalDownloaded: Int64 = 0
