@@ -168,6 +168,7 @@ struct Bitfield {
 
     mutating func set(_ index: Int) {
         let byte = index / 8
+        guard byte < bits.count else { return }
         let bit = index % 8
         if (bits[byte] & (1 << (7 - bit))) == 0 {
             bits[byte] |= (1 << (7 - bit))
@@ -176,8 +177,9 @@ struct Bitfield {
     }
 
     func isSet(_ index: Int) -> Bool {
+        guard index >= 0 else { return false }
         let byte = index / 8
-        let bit = index % 8
-        return (bits[byte] & (1 << (7 - bit))) != 0
+        guard byte < bits.count else { return false }
+        return (bits[byte] & (1 << (7 - (index % 8)))) != 0
     }
 }
