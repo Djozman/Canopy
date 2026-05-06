@@ -226,7 +226,19 @@ public actor DownloadCoordinator {
                     pieceBlockSources.removeValue(forKey: piece)
                     assignedPieces.remove(piece)
                     // Clear piece from ALL peers (endgame may have multiple peers on same piece)
-                    for (k, p) in peerPieces where p == piece { peerPieces.removeValue(forKey: k) }
+                    let otherPeers = peerPieces.filter { $0.value == piece && $0.key != key }
+                    for (k, _) in otherPeers {
+                        peerPieces.removeValue(forKey: k)
+                        // Send cancel for all blocks of this piece to the other peer
+                        let pieceSize = (piece == torrent.pieces.count - 1)
+                            ? Int(torrent.totalSize - (Int64(piece) * torrent.pieceLength))
+                            : Int(torrent.pieceLength)
+                        var offset = 0
+                        while offset < pieceSize {
+                            try? await peers[k]?.send(.cancel(piece: piece, begin: offset, length: min(blockSize, pieceSize - offset)))
+                            offset += blockSize
+                        }
+                    }
                     pieceAssignedAt.removeValue(forKey: piece)
                     await writePieceToDisk(piece: piece, data: verified)
                     completedPieces.insert(piece)
@@ -315,10 +327,6 @@ public actor DownloadCoordinator {
         uploadRate.removeValue(forKey: key)
         interestedPeers.remove(key)
         unchokedPeers.remove(key)
-        if peers.isEmpty, !bannedPeers.contains(key), let cont = completionContinuation {
-            completionContinuation = nil
-            cont.resume(throwing: DownloadError.allPeersDisconnected)
-        }
     }
 
     private func requestBlocks(key: String, conn: PeerConnection) async {
@@ -485,7 +493,8 @@ public actor DownloadCoordinator {
     /// Call shutdown() to stop.
     public func seed() async {
         guard fileHandles != nil else { return }
-        peers.removeAll()
+        // Announce once so tracker knows we're seeding
+        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0, left: 0)
         print("[Coordinator] 🌱 Entering seeding mode (inbound only)")
         while !isShutdown {
             if Task.isCancelled { break }
@@ -501,6 +510,10 @@ public actor DownloadCoordinator {
     public func shutdown() async {
         print("[Coordinator] 🛑 Shutting down")
         isShutdown = true
+        if let cont = completionContinuation {
+            completionContinuation = nil
+            cont.resume(throwing: CancellationError())
+        }
         listener?.cancel()
         listener = nil
         for p in peers.values { await p.disconnect() }
