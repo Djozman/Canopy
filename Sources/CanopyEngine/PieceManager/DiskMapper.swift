@@ -27,7 +27,7 @@ public struct DiskMapper {
         var absoluteOffset = Int64(piece) * pieceLength + Int64(blockBegin)
 
         while remaining > 0 {
-            guard let fileIdx = fileOffsets.lastIndex(where: { $0 <= absoluteOffset }) else { break }
+            guard let fileIdx = fileIndex(for: absoluteOffset) else { break }
             let fileStart = fileOffsets[fileIdx]
             let fileEnd = fileStart + files[fileIdx].size
             let fileOffset = absoluteOffset - fileStart
@@ -58,5 +58,25 @@ public struct DiskMapper {
             }
             return fh
         }
+    }
+
+    /// Binary search for the file containing an absolute byte offset. Returns the index
+    /// of the file whose range covers the offset, or nil if out of bounds.
+    private func fileIndex(for offset: Int64) -> Int? {
+        guard !fileOffsets.isEmpty else { return nil }
+        var lo = 0
+        var hi = fileOffsets.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if fileOffsets[mid] <= offset {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        let idx = hi
+        guard idx >= 0, idx < files.count else { return nil }
+        let fileEnd = fileOffsets[idx] + files[idx].size
+        return offset < fileEnd ? idx : nil
     }
 }

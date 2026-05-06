@@ -21,6 +21,7 @@ public actor DownloadCoordinator {
     private var pieceBlockSources: [Int: [Int: String]] = [:]  // piece → blockBegin → peerKey
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
+    private var isShutdown = false
 
     // Seeding state
     private var uploadRate: [String: [(timestamp: Date, bytes: Int)]] = [:]
@@ -162,7 +163,11 @@ public actor DownloadCoordinator {
             return
         }
         print("[Coordinator] ✅ Connected to \(key)")
-        try? await conn.send(.interested)
+        if await pieceManager.isComplete {
+            try? await conn.send(.notInterested)
+        } else {
+            try? await conn.send(.interested)
+        }
         // Send our bitfield so the peer knows what pieces we have
         let bf = await pieceManager.encodedBitfield()
         if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
@@ -186,6 +191,7 @@ public actor DownloadCoordinator {
                     for bit in 0..<8 {
                         if (byte >> (7 - bit)) & 1 == 1 {
                             let pieceIdx = byteIdx * 8 + bit
+                            guard pieceIdx < torrent.pieces.count else { continue }
                             peerSet.insert(pieceIdx)
                             pieceFrequency[pieceIdx, default: 0] += 1
                         }
@@ -248,6 +254,7 @@ public actor DownloadCoordinator {
                 }
 
             case .have(let piece):
+                guard piece < torrent.pieces.count else { break }
                 peerBitfields[key, default: []].insert(piece)
                 pieceFrequency[piece, default: 0] += 1
 
@@ -434,7 +441,7 @@ public actor DownloadCoordinator {
     public func seed() async {
         guard fileHandles != nil else { return }
         print("[Coordinator] 🌱 Entering seeding mode")
-        while true {
+        while !isShutdown {
             if Task.isCancelled { break }
             if peers.isEmpty {
                 print("[Coordinator] 🔄 All peers dropped while seeding — re-announcing...")
@@ -470,8 +477,19 @@ public actor DownloadCoordinator {
     /// Shut down seeding: close all connections and file handles.
     public func shutdown() async {
         print("[Coordinator] 🛑 Shutting down")
+        isShutdown = true
         for p in peers.values { await p.disconnect() }
         peers.removeAll()
+        peerBitfields.removeAll()
+        peerPieces.removeAll()
+        assignedPieces.removeAll()
+        pieceAssignedAt.removeAll()
+        pieceFrequency.removeAll()
+        peerHashFailures.removeAll()
+        pieceBlockSources.removeAll()
+        uploadRate.removeAll()
+        interestedPeers.removeAll()
+        unchokedPeers.removeAll()
         fileHandles?.forEach { try? $0.close() }
         fileHandles = nil
         await trackerSession.stop()
