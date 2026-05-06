@@ -124,12 +124,7 @@ public final class TorrentEngine: ObservableObject {
         }
         session?.setAlertNotify { [weak self] in
             self?.drainAlerts()
-    public func shutdown() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-            }
         }
-        
     }
 
     public func shutdown() {
@@ -138,6 +133,7 @@ public final class TorrentEngine: ObservableObject {
     }
 
     deinit {}
+
     public func startPolling(interval: TimeInterval = 2.0) {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
