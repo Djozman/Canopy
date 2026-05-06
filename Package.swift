@@ -34,7 +34,7 @@ let package = Package(
             name: "Canopy",
             dependencies: ["ClibtorrentBridge"],
             path: "Sources",
-            exclude: ["Engine/Bridge", "README.md", "Info.plist"],
+            exclude: ["Engine/Bridge", "README.md", "Info.plist", "CanopyEngine"],
             resources: [.process("Assets.xcassets")],
             swiftSettings: [
                 .interoperabilityMode(.C),
@@ -43,7 +43,18 @@ let package = Package(
         .testTarget(
             name: "CanopyTests",
             dependencies: ["Canopy"],
-            path: "Tests"
+            path: "Tests",
+            exclude: ["CanopyEngine"]
+        ),
+        .target(
+            name: "CanopyEngine",
+            path: "Sources/CanopyEngine"
+        ),
+        .testTarget(
+            name: "CanopyEngineTests",
+            dependencies: ["CanopyEngine"],
+            path: "Tests/CanopyEngine",
+            resources: [.copy("TestTorrents")]
         ),
     ]
 )
