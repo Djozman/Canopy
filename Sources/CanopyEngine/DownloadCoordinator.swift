@@ -100,7 +100,7 @@ public actor DownloadCoordinator {
                     if await pieceManager.isComplete {
                         // Send completed, stop tracker, cleanup
                         try? await trackerSession.completed()
-                        for p in peers.values { p.disconnect() }
+                        for p in peers.values { await p.disconnect() }
                         return
                     }
                     // Request next piece
@@ -119,8 +119,8 @@ public actor DownloadCoordinator {
 
     private func requestBlocks(key: String, conn: PeerConnection) async {
         // If this peer already has an assigned piece, continue requesting blocks
-        if let piece = peerPieces[key],
-           let requests = await pieceManager.nextBlockRequests(for: piece) {
+        if let piece = peerPieces[key] {
+            let requests = await pieceManager.nextBlockRequests(for: piece)
             for req in requests {
                 try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
             }
@@ -132,7 +132,7 @@ public actor DownloadCoordinator {
         assignedPieces.insert(piece)
         peerPieces[key] = piece
 
-        guard let requests = await pieceManager.nextBlockRequests(for: piece) else { return }
+        let requests = await pieceManager.nextBlockRequests(for: piece)
         for req in requests {
             try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
         }
