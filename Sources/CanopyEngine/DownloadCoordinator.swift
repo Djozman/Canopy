@@ -77,6 +77,16 @@ public actor DownloadCoordinator {
         guard let stream = try? await conn.connect() else { return }
         try? await conn.send(.interested)
 
+        // Send keepalive every 90s to prevent peer timeout
+        let keepaliveTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(90))
+                if Task.isCancelled { break }
+                try? await conn.send(.keepAlive)
+            }
+        }
+        defer { keepaliveTask.cancel() }
+
         for await msg in stream {
             switch msg {
 
