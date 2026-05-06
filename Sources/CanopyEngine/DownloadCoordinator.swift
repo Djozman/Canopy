@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// Coordinates downloading and seeding a single torrent: tracker announces,
 /// peer connections, piece requests, disk I/O, and upload/choke algorithm.
@@ -23,6 +24,7 @@ public actor DownloadCoordinator {
     private var completionContinuation: CheckedContinuation<Void, Error>?
     private var isShutdown = false
     private var totalUploaded: Int64 = 0
+    private var listener: NWListener?
 
     // Seeding state
     private var uploadRate: [String: [(timestamp: Date, bytes: Int)]] = [:]
@@ -164,14 +166,14 @@ public actor DownloadCoordinator {
             return
         }
         print("[Coordinator] ✅ Connected to \(key)")
+        // Send our bitfield first (BEP 3: must be first message after handshake if we have pieces)
+        let bf = await pieceManager.encodedBitfield()
+        if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
         if await pieceManager.isComplete {
             try? await conn.send(.notInterested)
         } else {
             try? await conn.send(.interested)
         }
-        // Send our bitfield so the peer knows what pieces we have
-        let bf = await pieceManager.encodedBitfield()
-        if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
 
         // Send keepalive every 90s to prevent peer timeout
         let keepaliveTask = Task {
@@ -438,7 +440,43 @@ public actor DownloadCoordinator {
         print("[Coordinator] Choke round: \(unchokedPeers.count) unchoked (\(top4.count) top, \(optimistic.count) optimistic)")
     }
 
-    /// Seed after download completes. Keeps connections alive and runs choke cycles.
+    /// Start listening for inbound peer connections on the announced port.
+    public func startListener() throws {
+        let port = NWEndpoint.Port(rawValue: 6881)!
+        listener = try NWListener(using: .tcp, on: port)
+        listener?.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .global())
+            guard let self = self else { connection.cancel(); return }
+            Task { await self.acceptInbound(connection: connection) }
+        }
+        listener?.start(queue: .global())
+        print("[Coordinator] 👂 Listening on port 6881")
+    }
+
+    private func acceptInbound(connection: NWConnection) async {
+        let peerIP: String
+        let peerPort: UInt16
+        switch connection.endpoint {
+        case .hostPort(let host, let port):
+            peerIP = "\(host)"
+            peerPort = port.rawValue
+        default:
+            connection.cancel()
+            return
+        }
+        let key = "\(peerIP):\(peerPort)"
+        let conn = PeerConnection(peer: Peer(ip: peerIP, port: peerPort), infoHash: torrent.infoHash, localPeerID: PeerID.current)
+        do {
+            _ = try await conn.accept(connection: connection)
+            if peerBitfields.count >= 50 { await conn.disconnect(); return }
+            print("[Coordinator] 🔗 Inbound connection from \(key)")
+            peers[key] = conn
+            Task { await self.handlePeer(key: key, conn: conn) }
+        } catch {
+            print("[Coordinator] ⚠️ Inbound handshake failed from \(key): \(error)")
+            connection.cancel()
+        }
+    }
     /// Call shutdown() to stop.
     public func seed() async {
         guard fileHandles != nil else { return }
@@ -480,6 +518,8 @@ public actor DownloadCoordinator {
     public func shutdown() async {
         print("[Coordinator] 🛑 Shutting down")
         isShutdown = true
+        listener?.cancel()
+        listener = nil
         for p in peers.values { await p.disconnect() }
         peers.removeAll()
         peerBitfields.removeAll()

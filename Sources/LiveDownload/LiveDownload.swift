@@ -10,7 +10,7 @@ struct LiveDownload {
     static func main() async {
         print("[LiveTest] Phase 6 live download + seed test — connecting to real tracker...")
 
-        // Use the debian netinst torrent (small, well-seeded)
+        // Use the debian netinst torrent (~791MB, HTTP tracker)
         let torrentPath = "Tests/CanopyEngine/TestTorrents/debian-13.4.0-amd64-netinst.iso.torrent"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: torrentPath)) else {
             print("[LiveTest] ❌ Could not read torrent file at \(torrentPath)")
@@ -34,8 +34,14 @@ struct LiveDownload {
         let coord = DownloadCoordinator(torrent: torrent, savePath: savePath)
 
         do {
+            try await coord.startListener()
+        } catch {
+            print("[LiveTest] ⚠️ Could not start listener: \(error)")
+        }
+
+        do {
             print("[LiveTest] Starting download (300s timeout)...")
-            try await withTimeout(seconds: 300) { try await coord.download() }
+            try await withTimeout(seconds: 3600) { try await coord.download() }
             print("[LiveTest] ✅ Download complete!")
         } catch DownloadError.allPeersDisconnected {
             print("[LiveTest] ⚠️ All peers disconnected, retrying once...")
@@ -63,10 +69,10 @@ struct LiveDownload {
             }
         }
 
-        // Seed for 60s
-        print("[LiveTest] 🌱 Seeding for 60s...")
+        // Seed for 120s
+        print("[LiveTest] 🌱 Seeding for 120s...")
         let seedTask = Task { await coord.seed() }
-        try? await Task.sleep(for: .seconds(60))
+        try? await Task.sleep(for: .seconds(120))
         seedTask.cancel()
         await coord.shutdown()
         print("[LiveTest] 🛑 Shutdown complete")

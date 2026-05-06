@@ -49,7 +49,38 @@ public actor PeerConnection {
             conn.start(queue: .global())
         }
 
-        // Perform handshake — buffer across potential TCP fragmentation
+        return try await handshake(on: conn)
+    }
+
+    /// Accept an already-established inbound connection, perform handshake, return stream.
+    /// Inbound handshake order: receive theirs first, verify, then send ours.
+    public func accept(connection conn: NWConnection) async throws -> AsyncStream<PeerMessage> {
+        // Receive their handshake first
+        var hsBuf = Data()
+        while hsBuf.count < 68 {
+            let chunk = try await conn.receive(minimumIncompleteLength: 1, maximumLength: 68 - hsBuf.count)
+            hsBuf.append(chunk)
+        }
+        guard let h = Handshake.decode(from: hsBuf) else {
+            conn.cancel()
+            print("[Peer] ❌ Invalid inbound handshake from \(peer)")
+            throw PeerConnectionError.handshakeFailed("Invalid handshake")
+        }
+        guard h.infoHash == infoHash else {
+            conn.cancel()
+            print("[Peer] ❌ Info hash mismatch from inbound \(peer): got \(h.infoHash.hexString.prefix(16))")
+            throw PeerConnectionError.handshakeFailed("Info hash mismatch")
+        }
+        // Now send our handshake
+        let hs = Handshake(infoHash: infoHash, peerID: localPeerID, extensions: [0,0,0,0,0,0x10,0,0])
+        try await conn.send(content: hs.encode())
+
+        connection = conn
+        handshakeDone = true
+        return try await startMessageStream(on: conn)
+    }
+
+    private func handshake(on conn: NWConnection) async throws -> AsyncStream<PeerMessage> {
         let handshake = Handshake(infoHash: infoHash, peerID: localPeerID, extensions: [0,0,0,0,0,0x10,0,0])
         try await conn.send(content: handshake.encode())
 
@@ -72,6 +103,10 @@ public actor PeerConnection {
         connection = conn
         handshakeDone = true
 
+        return try await startMessageStream(on: conn)
+    }
+
+    private func startMessageStream(on conn: NWConnection) async throws -> AsyncStream<PeerMessage> {
         var messageContinuation: AsyncStream<PeerMessage>.Continuation?
         let stream = AsyncStream<PeerMessage> { cont in
             messageContinuation = cont
