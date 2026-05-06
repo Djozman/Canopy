@@ -54,7 +54,7 @@ public func parseExtensionHandshake(from data: Data) -> PeerExtensions? {
 
 /// Build a PEX message (added/dropped peer lists). Returns nil if utPEXID is nil.
 public func buildPEXMessage(added: [Peer], dropped: [Peer], utPEXID: UInt8?) -> PeerMessage? {
-    guard let utPEXID else { return nil }
+    guard let utPEXID, !added.isEmpty || !dropped.isEmpty else { return nil }
     let addedBlob = Data(added.flatMap { encodeCompactPeer($0) })
     let droppedBlob = Data(dropped.flatMap { encodeCompactPeer($0) })
     let dict: BencodeValue = .dict([
