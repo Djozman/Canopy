@@ -112,6 +112,7 @@ public final class TorrentEngine: ObservableObject {
     /// a still-in-libtorrent handle can't reappear in the UI while removal is
     /// in flight (deleteFiles=true on big torrents takes ~1–2s of unlink calls).
     private var pendingRemovals: Set<String> = []
+    private var pendingFileDeletions: [String: String] = [:]
 
     // Multiple callbacks per info-hash: one for the PreAdd window, one for the Files tab, etc.
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
@@ -129,8 +130,6 @@ public final class TorrentEngine: ObservableObject {
     deinit {
         pollTimer?.invalidate()
     }
-
-    /// Start polling. Alerts are event-driven; status poll runs every 2s as a fallback.
     public func startPolling(interval: TimeInterval = 2.0) {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -289,32 +288,18 @@ public final class TorrentEngine: ObservableObject {
         guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
         NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(deleteFiles))")
         let id = torrent.id
-        // torrent.savePath is the PARENT directory (e.g. ~/Downloads). The
-        // torrent content lives at savePath/torrent.name. Never pass savePath
-        // alone to removeItem — that would wipe the entire Downloads folder.
-        let contentPath: String? = {
-            guard deleteFiles else { return nil }
-            let parent = (torrent.savePath as NSString).expandingTildeInPath
-            let name = torrent.name
-            guard !name.isEmpty else { return nil }
-            return (parent as NSString).appendingPathComponent(name)
-        }()
+        let savePath = deleteFiles ? torrent.savePath : nil
         pendingRemovals.insert(id)
         torrents.removeAll { $0.id == id }
         let session = self.session
         queue.async {
             session?.removeTorrent(h, deleteFiles: false)
-            if let path = contentPath {
-                // Give libtorrent a moment to release file handles
-                Thread.sleep(forTimeInterval: 0.5)
-                let fm = FileManager.default
-                if fm.fileExists(atPath: path) {
-                    do {
-                        try fm.removeItem(atPath: path)
-                        NSLog("[Canopy] deleted: \(path)")
-                    } catch {
-                        NSLog("[Canopy] delete failed for \(path): \(error)")
-                    }
+        }
+        // File deletion happens when torrentRemoved alert fires
+        if deleteFiles, let path = savePath {
+            pendingFileDeletions[id] = path
+        }
+    }
                 } else {
                     NSLog("[Canopy] no file/dir at \(path) to delete")
                 }
@@ -369,6 +354,10 @@ public final class TorrentEngine: ObservableObject {
                     DispatchQueue.main.async {
                         self.torrents.removeAll { $0.id == msg }
                         self.pendingRemovals.remove(msg)
+                        if let path = self.pendingFileDeletions.removeValue(forKey: msg) {
+                            let url = URL(fileURLWithPath: path)
+                            try? FileManager.default.removeItem(at: url)
+                        }
                     }
                 }
             }
