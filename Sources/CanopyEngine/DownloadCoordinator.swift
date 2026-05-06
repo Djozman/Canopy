@@ -235,15 +235,14 @@ public actor DownloadCoordinator {
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
                 }
-                let wasComplete = await pieceManager.isPieceFullyDownloaded(piece: piece)
-                if let verified = await pieceManager.tryAssemble(piece: piece) {
+                let result = await pieceManager.tryAssemble(piece: piece)
+                switch result {
+                case .verified(let data):
                     pieceBlockSources.removeValue(forKey: piece)
                     assignedPieces.remove(piece)
-                    // Clear piece from ALL peers (endgame may have multiple peers on same piece)
                     let otherPeers = peerPieces.filter { $0.value == piece && $0.key != key }
                     for (k, _) in otherPeers {
                         peerPieces.removeValue(forKey: k)
-                        // Send cancel for all blocks of this piece to the other peer
                         let pieceSize = (piece == torrent.pieces.count - 1)
                             ? Int(torrent.totalSize - (Int64(piece) * torrent.pieceLength))
                             : Int(torrent.pieceLength)
@@ -253,16 +252,15 @@ public actor DownloadCoordinator {
                             offset += blockSize
                         }
                     }
-                    peerPieces.removeValue(forKey: key)  // clear the delivering peer too
+                    peerPieces.removeValue(forKey: key)
                     pieceAssignedAt.removeValue(forKey: piece)
-                    await writePieceToDisk(piece: piece, data: verified)
+                    await writePieceToDisk(piece: piece, data: data)
                     completedPieces.insert(piece)
                     saveResumeData()
-                    // Announce new piece to all OTHER connected peers
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
                     await requestBlocks(key: key, conn: conn)
-                } else if wasComplete {
-                    // Hash mismatch — blame all peers that contributed to this piece
+
+                case .hashMismatch:
                     if let sources = pieceBlockSources.removeValue(forKey: piece) {
                         let contributors = Set(sources.values)
                         for peerKey in contributors {
@@ -286,8 +284,10 @@ public actor DownloadCoordinator {
                             }
                         }
                     }
-                }
 
+                case .incomplete:
+                    break  // not all blocks arrived yet
+                }
             case .have(let piece):
                 guard piece < torrent.pieces.count else { break }
                 peerBitfields[key, default: []].insert(piece)

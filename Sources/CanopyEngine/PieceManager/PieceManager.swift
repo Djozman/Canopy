@@ -6,6 +6,12 @@ public let maxPipelineDepth = 5
 /// Standard block size for requests (16 KB).
 public let blockSize = 16384
 
+public enum AssembleResult {
+    case incomplete
+    case hashMismatch
+    case verified(Data)
+}
+
 /// Tracks download state for a single piece.
 public actor PieceManager {
     public let pieceCount: Int
@@ -83,21 +89,8 @@ public actor PieceManager {
         pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
     }
 
-    /// Whether all blocks for a piece have been downloaded (regardless of hash verification).
-    public func isPieceFullyDownloaded(piece: Int) -> Bool {
-        let actualSize: Int = (piece == pieceCount - 1)
-            ? Int(totalSize - (Int64(piece) * pieceLength))
-            : Int(pieceLength)
-        let blockCount = (actualSize + blockSize - 1) / blockSize
-        let pieceBlocks = downloadedBlocks[piece] ?? [:]
-        for blk in 0..<blockCount {
-            if pieceBlocks[blk * blockSize] == nil { return false }
-        }
-        return true
-    }
-
-    /// Try to assemble and verify a complete piece. Returns verified data, or nil if incomplete/wrong.
-    public func tryAssemble(piece: Int) -> Data? {
+    /// Try to assemble and verify a complete piece.
+    public func tryAssemble(piece: Int) -> AssembleResult {
         let actualSize: Int = (piece == pieceCount - 1)
             ? Int(totalSize - (Int64(piece) * pieceLength))
             : Int(pieceLength)
@@ -105,21 +98,16 @@ public actor PieceManager {
 
         let pieceBlocks = downloadedBlocks[piece] ?? [:]
         // Check if we have all blocks
-        var missing: [Int] = []
         for blk in 0..<blockCount {
             if pieceBlocks[blk * blockSize] == nil {
-                missing.append(blk * blockSize)
+                return .incomplete
             }
-        }
-        if !missing.isEmpty {
-            // Incomplete — not all blocks arrived yet
-            return nil
         }
 
         var assembled = Data(capacity: actualSize)
         for blk in 0..<blockCount {
             let begin = blk * blockSize
-            guard var data = pieceBlocks[begin] else { return nil }
+            guard var data = pieceBlocks[begin] else { return .incomplete }
             let remaining = actualSize - assembled.count
             if data.count > remaining {
                 data = data.prefix(remaining) // truncate padded last block
@@ -137,14 +125,13 @@ public actor PieceManager {
                 downloadedBlocks[piece]?.removeValue(forKey: begin)
                 pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: min(blockSize, actualSize - begin)))
             }
-            return nil
+            return .hashMismatch
         }
 
         print("[Piece] ✅ Verified piece \(piece)")
-        // Success — mark as owned and free block memory
         bitfield.set(piece)
         downloadedBlocks.removeValue(forKey: piece)
-        return assembled
+        return .verified(assembled)
     }
 }
 

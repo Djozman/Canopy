@@ -66,9 +66,9 @@ final class PieceManagerTests: XCTestCase {
         await pm.storeBlock(piece: 0, begin: 0, data: Data(repeating: 0xFF, count: 16384))
         await pm.storeBlock(piece: 0, begin: 16384, data: Data(repeating: 0xFF, count: 16384))
         // Try assemble
-        let assembled = await pm.tryAssemble(piece: 0)
-        XCTAssertNotNil(assembled)
-        XCTAssertEqual(assembled?.count, 32768)
+        let result = await pm.tryAssemble(piece: 0)
+        guard case .verified(let assembled) = result else { XCTFail("Expected verified"); return }
+        XCTAssertEqual(assembled.count, 32768)
         let complete = await pm.isComplete
         XCTAssertTrue(complete)
     }
@@ -80,8 +80,8 @@ final class PieceManagerTests: XCTestCase {
             expectedHashes: [wrongHash]
         )
         await pm.storeBlock(piece: 0, begin: 0, data: Data(repeating: 0xFF, count: 16384))
-        let assembled = await pm.tryAssemble(piece: 0)
-        XCTAssertNil(assembled, "Should fail SHA1")
+        let result = await pm.tryAssemble(piece: 0)
+        guard case .hashMismatch = result else { XCTFail("Should fail SHA1"); return }
         // Block should be discarded — next requests should re-request it
         let requests = await pm.nextBlockRequests(for: 0)
         XCTAssertEqual(requests.count, 1)

@@ -69,11 +69,14 @@ struct LeechOnly {
                     try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
                 }
 
-                if let assembled = await pieceManager.tryAssemble(piece: piece) {
+                switch await pieceManager.tryAssemble(piece: piece) {
+                case .verified(let assembled):
                     print("[LeechOnly] 🎉 PIECE VERIFIED! Piece \(piece) SHA1 matches")
                     print("[LeechOnly] ✅ UPLOAD WORKS — bytes transferred: \(assembled.count)")
                     await conn.disconnect()
                     return
+                default:
+                    break
                 }
 
             case .choke:
