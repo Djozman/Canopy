@@ -93,7 +93,7 @@ public enum PeerMessage: Equatable {
 
 private extension Int {
     func encodeBigEndian() -> Data {
-        var val = UInt32(self).bigEndian
+        var val = UInt32(clamping: self).bigEndian
         return Data(bytes: &val, count: 4)
     }
 }

@@ -16,6 +16,7 @@ public actor PeerConnection {
     private var connection: NWConnection?
     private var buffer = Data()
     private var handshakeDone = false
+    private var receiveTask: Task<Void, Never>?
 
     /// The peer's bitfield (nil until received).
     public private(set) var bitfield: Data?
@@ -31,7 +32,7 @@ public actor PeerConnection {
     }
 
     /// Connect, perform handshake, return message stream.
-    public func connect(timeout: TimeInterval = 10) async throws -> AsyncStream<PeerMessage> {
+    public func connect() async throws -> AsyncStream<PeerMessage> {
         let host = NWEndpoint.Host(peer.ip)
         let port = NWEndpoint.Port(integerLiteral: peer.port)
         let conn = NWConnection(host: host, port: port, using: .tcp)
@@ -71,27 +72,30 @@ public actor PeerConnection {
         connection = conn
         handshakeDone = true
 
-        return AsyncStream { continuation in
-            Task {
-                var buf = Data()
-                while true {
-                    guard let chunk = try? await conn.receive(minimumIncompleteLength: 1, maximumLength: 16384),
-                          !chunk.isEmpty else {
-                        continuation.finish()
-                        return
-                    }
-                    buf.append(chunk)
-                    while let msg = PeerMessage.decode(from: &buf) {
-                        if case .bitfield(let bf) = msg { await setBitfield(bf) }
-                        if case .choke = msg { await setChoked(true) }
-                        if case .unchoke = msg { await setChoked(false) }
-                        if case .interested = msg { await setInterested(true) }
-                        if case .notInterested = msg { await setInterested(false) }
-                        continuation.yield(msg)
-                    }
+        var messageContinuation: AsyncStream<PeerMessage>.Continuation?
+        let stream = AsyncStream<PeerMessage> { cont in
+            messageContinuation = cont
+        }
+
+        receiveTask = Task {
+            var buf = Data()
+            while !Task.isCancelled {
+                guard let chunk = try? await conn.receive(minimumIncompleteLength: 1, maximumLength: 16384),
+                      !chunk.isEmpty else { break }
+                buf.append(chunk)
+                while let msg = PeerMessage.decode(from: &buf) {
+                    if case .bitfield(let bf) = msg { await setBitfield(bf) }
+                    if case .choke = msg { await setChoked(true) }
+                    if case .unchoke = msg { await setChoked(false) }
+                    if case .interested = msg { await setInterested(true) }
+                    if case .notInterested = msg { await setInterested(false) }
+                    messageContinuation?.yield(msg)
                 }
             }
+            messageContinuation?.finish()
         }
+
+        return stream
     }
 
     private func setBitfield(_ bf: Data) { bitfield = bf }
@@ -104,6 +108,8 @@ public actor PeerConnection {
     }
 
     public func disconnect() {
+        receiveTask?.cancel()
+        receiveTask = nil
         connection?.cancel()
         connection = nil
     }

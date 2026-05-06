@@ -81,6 +81,22 @@ final class PeerMessageTests: XCTestCase {
         XCTAssertEqual(decoded, .request(piece: 5, begin: 16384, length: 16384))
     }
 
+    func testPieceRoundTrip() {
+        let block = Data(repeating: 0xFF, count: 16384)
+        let msg = PeerMessage.piece(piece: 3, begin: 0, data: block)
+        var data = msg.encode()
+        let decoded = PeerMessage.decode(from: &data)
+        XCTAssertEqual(decoded, .piece(piece: 3, begin: 0, data: block))
+        XCTAssertEqual(data.count, 0)
+    }
+
+    func testCancelRoundTrip() {
+        let msg = PeerMessage.cancel(piece: 7, begin: 32768, length: 16384)
+        var data = msg.encode()
+        let decoded = PeerMessage.decode(from: &data)
+        XCTAssertEqual(decoded, .cancel(piece: 7, begin: 32768, length: 16384))
+    }
+
     func testMultipleMessages() {
         var data = PeerMessage.unchoke.encode() + PeerMessage.interested.encode() + PeerMessage.choke.encode()
         XCTAssertEqual(PeerMessage.decode(from: &data), .unchoke)
