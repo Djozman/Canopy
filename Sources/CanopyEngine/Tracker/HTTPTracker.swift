@@ -154,21 +154,6 @@ public struct HTTPTracker {
         return []
     }
 
-    /// Parse compact peer format: 6 bytes per peer (4 IP + 2 port, network byte order).
-    static func parseCompactPeers(_ data: Data) -> [Peer] {
-        guard data.count % 6 == 0 else { return [] }
-        let bytes = Array(data) // Avoid Data slice absolute-index gotcha
-        var peers: [Peer] = []
-        var offset = 0
-        while offset + 6 <= bytes.count {
-            let ip = "\(bytes[offset]).\(bytes[offset+1]).\(bytes[offset+2]).\(bytes[offset+3])"
-            let port = (UInt16(bytes[offset+4]) << 8) | UInt16(bytes[offset+5])
-            peers.append(Peer(ip: ip, port: port))
-            offset += 6
-        }
-        return peers
-    }
-
     /// Parse non-compact peer list (list of dicts with "ip" and "port" keys).
     static func parsePlainPeers(_ list: [BencodeValue]) throws -> [Peer] {
         var peers: [Peer] = []

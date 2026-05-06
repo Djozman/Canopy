@@ -27,9 +27,9 @@ public struct UDPTracker {
         let cid = try await getConnectionID(on: conn)
 
         let txID = UInt32.random(in: 0...UInt32.max)
-        let request = encodeAnnounce(cid: cid, txID: txID, announce: announce)
+        let key = UInt32.random(in: 0...UInt32.max)  // stable across retries
+        let request = encodeAnnounce(cid: cid, txID: txID, announce: announce, key: key)
 
-        // Re-send + retry loop
         for i in 0..<4 {
             try await conn.send(content: request)
             do {
@@ -47,18 +47,12 @@ public struct UDPTracker {
         throw TrackerError.noResponse
     }
 
-    // MARK: - Connection ID
+    // MARK: - Connection ID (always handshake — per-announce socket)
 
     private func getConnectionID(on conn: NWConnection) async throws -> UInt64 {
-        let key = cacheKey
-        if let cached = await ConnectionIDCache.shared.get(key) {
-            return cached
-        }
-
         let txID = UInt32.random(in: 0...UInt32.max)
         let connectReq = encodeConnect(txID: txID)
 
-        // Re-send + retry loop
         for _ in 0..<4 {
             try await conn.send(content: connectReq)
             do {
@@ -70,17 +64,13 @@ public struct UDPTracker {
                 guard action == 0 else { continue }
                 let respTxID = readUInt32(data, at: 4)
                 guard respTxID == txID else { continue }
-                let cid = readUInt64(data, at: 8)
-                await ConnectionIDCache.shared.set(key, id: cid)
-                return cid
+                return readUInt64(data, at: 8)
             } catch is TimeoutError {
                 // retry
             }
         }
         throw TrackerError.noResponse
     }
-
-    private var cacheKey: String { "\(host):\(port)" }
 
     // MARK: - Wire encoding
 
@@ -92,7 +82,7 @@ public struct UDPTracker {
         return data
     }
 
-    private func encodeAnnounce(cid: UInt64, txID: UInt32, announce: TrackerAnnounce) -> Data {
+    private func encodeAnnounce(cid: UInt64, txID: UInt32, announce: TrackerAnnounce, key: UInt32) -> Data {
         var data = Data(capacity: 98)
         data.append(writeUInt64(cid))
         data.append(writeUInt32(1))               // action = announce
@@ -112,7 +102,7 @@ public struct UDPTracker {
         }()
         data.append(writeUInt32(event))
         data.append(writeUInt32(0))               // ip = 0 (use sender's)
-        data.append(writeUInt32(UInt32.random(in: 0...UInt32.max))) // key
+        data.append(writeUInt32(key))
         data.append(writeInt32(-1))               // num_want = -1
         data.append(writeUInt16(announce.port))
         return data
@@ -133,7 +123,7 @@ public struct UDPTracker {
             let leechers = Int(readUInt32(data, at: 12))
             let seeders = Int(readUInt32(data, at: 16))
             let peerData = data.count > 20 ? data.subdata(in: 20..<data.count) : Data()
-            let peers = HTTPTracker.parseCompactPeers(peerData)
+            let peers = parseCompactPeers(peerData)
             return TrackerResponse(
                 interval: interval,
                 complete: seeders,
@@ -183,25 +173,6 @@ public struct UDPTracker {
         for byte in b.prefix(4) { result = (result << 8) | UInt32(byte) }
         return result
     }
-}
-
-// MARK: - Connection ID cache (actor-safe)
-
-private actor ConnectionIDCache {
-    private var entries: [String: UInt64] = [:]
-    private var expiry: [String: Date] = [:]
-
-    func get(_ key: String) -> UInt64? {
-        guard let id = entries[key], let exp = expiry[key], Date() < exp else { return nil }
-        return id
-    }
-
-    func set(_ key: String, id: UInt64) {
-        entries[key] = id
-        expiry[key] = Date().addingTimeInterval(120)
-    }
-
-    static let shared = ConnectionIDCache()
 }
 
 // MARK: - Timeout helper

@@ -27,7 +27,7 @@ final class UDPTrackerTests: XCTestCase {
             10, 0, 0, 1, 0x1A, 0x0B,      // 10.0.0.1:6667
             192, 168, 1, 5, 0x00, 0x50,   // 192.168.1.5:80
         ])
-        let peers = HTTPTracker.parseCompactPeers(data)
+        let peers = parseCompactPeers(data)
         XCTAssertEqual(peers.count, 2)
         XCTAssertEqual(peers[0].ip, "10.0.0.1")
         XCTAssertEqual(peers[0].port, 6667)

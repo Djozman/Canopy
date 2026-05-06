@@ -59,13 +59,13 @@ final class TrackerAnnounceTests: XCTestCase {
 final class HTTPTrackerParseTests: XCTestCase {
 
     func testParseCompactPeersEmpty() {
-        XCTAssertEqual(HTTPTracker.parseCompactPeers(Data()).count, 0)
+        XCTAssertEqual(parseCompactPeers(Data()).count, 0)
     }
 
     func testParseCompactPeersMalformed() {
         // 7 bytes, not divisible by 6
         let data = Data([1, 2, 3, 4, 5, 6, 7])
-        XCTAssertEqual(HTTPTracker.parseCompactPeers(data).count, 0)
+        XCTAssertEqual(parseCompactPeers(data).count, 0)
     }
 
     func testParseTrackerSuccessResponse() throws {
@@ -126,7 +126,7 @@ final class HTTPTrackerParseTests: XCTestCase {
             192, 168, 1, 5, 0x00, 0x50,   // 192.168.1.5:80
             8, 8, 8, 8, 0x01, 0xBB,       // 8.8.8.8:443
         ])
-        let peers = HTTPTracker.parseCompactPeers(data)
+        let peers = parseCompactPeers(data)
         XCTAssertEqual(peers.count, 3)
         XCTAssertEqual(peers[1].ip, "192.168.1.5")
         XCTAssertEqual(peers[1].port, 80)
