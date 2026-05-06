@@ -67,7 +67,13 @@ public actor TrackerSession {
             var urls = tiers[tierIndex].shuffled()
             for urlIndex in 0..<urls.count {
                 do {
-                    let resp = try await HTTPTracker.announce(to: urls[urlIndex], with: params)
+                    let resp: TrackerResponse
+                    if urls[urlIndex].hasPrefix("udp://") {
+                        let udp = try UDPTracker(url: urls[urlIndex])
+                        resp = try await udp.announce(with: params)
+                    } else {
+                        resp = try await HTTPTracker.announce(to: urls[urlIndex], with: params)
+                    }
                     if resp.isFailure {
                         // Tracker rejected us — try next URL in this tier
                         continue
@@ -99,7 +105,7 @@ public actor TrackerSession {
         await withTaskGroup(of: Void.self) { group in
             for tier in tiers {
                 guard let url = tier.first else { continue }
-                group.addTask { try? await HTTPTracker.announce(to: url, with: params) }
+                group.addTask { [self] in try? await announceTo(url: url, with: params) }
             }
         }
     }
@@ -114,8 +120,17 @@ public actor TrackerSession {
         await withTaskGroup(of: Void.self) { group in
             for tier in tiers {
                 guard let url = tier.first else { continue }
-                group.addTask { try? await HTTPTracker.announce(to: url, with: params) }
+                group.addTask { [self] in try? await announceTo(url: url, with: params) }
             }
+        }
+    }
+
+    private func announceTo(url: String, with params: TrackerAnnounce) async throws {
+        if url.hasPrefix("udp://") {
+            let udp = try UDPTracker(url: url)
+            try await udp.announce(with: params)
+        } else {
+            try await HTTPTracker.announce(to: url, with: params)
         }
     }
 }
