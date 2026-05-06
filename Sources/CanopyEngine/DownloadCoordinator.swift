@@ -115,6 +115,7 @@ public actor DownloadCoordinator {
                 await requestBlocks(key: key, conn: conn)
 
             case .piece(let piece, let begin, let data):
+                print("[Coordinator] 📦 Piece(\(piece), begin=\(begin), len=\(data.count)) from \(key)")
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
