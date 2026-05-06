@@ -142,6 +142,8 @@ public actor DownloadCoordinator {
                 // Download complete — signal caller but keep connections alive for seeding
                 try? FileManager.default.removeItem(atPath: resumeFilePath())
                 await trackerSession.completed()
+                // We're done downloading — tell peers we're no longer interested
+                for p in peers.values { try? await p.send(.notInterested) }
                 if let c = completionContinuation {
                     completionContinuation = nil
                     c.resume()
@@ -161,6 +163,9 @@ public actor DownloadCoordinator {
         }
         print("[Coordinator] ✅ Connected to \(key)")
         try? await conn.send(.interested)
+        // Send our bitfield so the peer knows what pieces we have
+        let bf = await pieceManager.encodedBitfield()
+        if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
 
         // Send keepalive every 90s to prevent peer timeout
         let keepaliveTask = Task {
@@ -383,14 +388,16 @@ public actor DownloadCoordinator {
     private func runChokeAlgorithm() {
         let now = Date()
         // Calculate upload rates (bytes/sec) over last 20s window
-        var rates: [(key: String, rate: Double)] = []
+        // Seed with zero for all interested peers so new peers aren't invisible
+        var rateMap: [String: Double] = [:]
+        for key in interestedPeers { rateMap[key] = 0.0 }
         for (key, history) in uploadRate {
             let recent = history.filter { now.timeIntervalSince($0.timestamp) <= 20 }
             let totalBytes = recent.reduce(0) { $0 + $1.bytes }
             let elapsed = recent.isEmpty ? 20.0 : max(now.timeIntervalSince(recent[0].timestamp), 1)
-            let rate = Double(totalBytes) / elapsed
-            rates.append((key, rate))
+            rateMap[key] = Double(totalBytes) / elapsed
         }
+        var rates = rateMap.map { (key: $0.key, rate: $0.value) }
         rates.sort { $0.rate > $1.rate }
 
         // Top 4 by upload rate (tit-for-tat)
@@ -448,7 +455,10 @@ public actor DownloadCoordinator {
                     spawned += 1
                 }
             }
-            runChokeAlgorithm()
+            if Date().timeIntervalSince(lastChokeRound) >= 30 {
+                lastChokeRound = Date()
+                runChokeAlgorithm()
+            }
             try? await Task.sleep(for: .seconds(10))
         }
     }

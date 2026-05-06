@@ -29,6 +29,8 @@ public actor PieceManager {
     public func markHave(piece: Int) { bitfield.set(piece) }
     public func hasPiece(_ piece: Int) -> Bool { bitfield.isSet(piece) }
 
+    public func encodedBitfield() -> Data { Data(bitfield.bytes) }
+
     /// Get the next needed piece (rarest-first selection happens at a higher level).
     /// Get the next needed piece, optionally excluding pieces already assigned to other peers
     /// and restricted to pieces available from a specific peer. Empty availableIn = unknown, assume all.
@@ -157,6 +159,7 @@ public struct BlockRequest: Hashable {
 struct Bitfield {
     private var bits: [UInt8]
     private(set) var count: Int
+    var bytes: [UInt8] { bits }
 
     init(size: Int) {
         self.bits = Array(repeating: 0, count: (size + 7) / 8)
