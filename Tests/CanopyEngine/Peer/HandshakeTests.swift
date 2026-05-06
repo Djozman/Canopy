@@ -111,4 +111,17 @@ final class PeerMessageTests: XCTestCase {
         XCTAssertNil(PeerMessage.decode(from: &data))
         XCTAssertEqual(data.count, 2) // data untouched
     }
+
+    func testFuzzRandomBytes() {
+        // Phase 2 exit criteria: feed 10,000 random blobs, never crash
+        for _ in 0..<10_000 {
+            let length = Int.random(in: 0...512)
+            let bytes = (0..<length).map { _ in UInt8.random(in: 0...255) }
+            var data = Data(bytes)
+            // Drain all parsable messages — decode returns nil when it can't parse
+            while PeerMessage.decode(from: &data) != nil {}
+            // Remaining data might be a partial message — that's fine
+        }
+        // If we got here without crashing, the test passes
+    }
 }

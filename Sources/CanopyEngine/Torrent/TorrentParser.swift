@@ -65,11 +65,6 @@ public struct TorrentParser {
             throw TorrentParseError.invalidFormat("pieces length must be a multiple of 20 bytes")
         }
         let pieces: [Data] = stride(from: 0, to: piecesData.count, by: 20).map {
-            piecesData.subdata(in: $0..<min($0 + 20, piecesData.count))
-        }
-        guard !pieces.isEmpty, pieces.first!.count == 20 else {
-            throw TorrentParseError.invalidFormat("pieces must be multiples of 20 bytes")
-        }
 
         let isPrivate: Bool = {
             guard let priv = infoDict.first(where: { $0.0 == "private" }),
