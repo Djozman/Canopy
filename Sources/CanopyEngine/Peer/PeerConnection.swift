@@ -36,24 +36,30 @@ public actor PeerConnection {
         let port = NWEndpoint.Port(integerLiteral: peer.port)
         let conn = NWConnection(host: host, port: port, using: .tcp)
 
-        // Wait for connection or failure
+        // Wait for connection or failure — only resume once
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready: cont.resume()
                 case .failed(let err): cont.resume(throwing: err)
-                default: break
+                case .cancelled: cont.resume(throwing: PeerConnectionError.disconnected)
+                default: return
                 }
+                conn.stateUpdateHandler = nil // Clear after terminal state
             }
             conn.start(queue: .global())
         }
 
-        // Perform handshake
+        // Perform handshake — buffer across potential TCP fragmentation
         let handshake = Handshake(infoHash: infoHash, peerID: localPeerID, extensions: [0,0,0,0,0,0x10,0,0])
         try await conn.send(content: handshake.encode())
 
-        let response = try await conn.receive(minimumIncompleteLength: 68, maximumLength: 68)
-        guard let h = Handshake.decode(from: response) else {
+        var hsBuf = Data()
+        while hsBuf.count < 68 {
+            let chunk = try await conn.receive(minimumIncompleteLength: 1, maximumLength: 68 - hsBuf.count)
+            hsBuf.append(chunk)
+        }
+        guard let h = Handshake.decode(from: hsBuf) else {
             conn.cancel()
             throw PeerConnectionError.handshakeFailed("Invalid handshake")
         }
