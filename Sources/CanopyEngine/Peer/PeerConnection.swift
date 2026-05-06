@@ -22,6 +22,12 @@ public actor PeerConnection {
     public private(set) var isChoked = true
     /// Whether the peer is interested in us.
     public private(set) var isPeerInterested = false
+    /// The peer's reserved bytes from the handshake (for BEP 10 bit 20 check).
+    public private(set) var peerReservedBytes: [UInt8] = []
+    /// Parsed extension handshake from this peer (nil until received).
+    var peerExtensions: PeerExtensions?
+
+    func setExtensions(_ ext: PeerExtensions) { self.peerExtensions = ext }
 
     public init(peer: Peer, infoHash: Data, localPeerID: Data) {
         self.peer = peer
@@ -71,6 +77,7 @@ public actor PeerConnection {
             print("[Peer] ❌ Info hash mismatch from inbound \(peer): got \(h.infoHash.hexString.prefix(16))")
             throw PeerConnectionError.handshakeFailed("Info hash mismatch")
         }
+        self.peerReservedBytes = h.extensions
         // Now send our handshake
         let hs = Handshake(infoHash: infoHash, peerID: localPeerID, extensions: [0,0,0,0,0,0x10,0,0])
         try await conn.send(content: hs.encode())
@@ -100,6 +107,7 @@ public actor PeerConnection {
             throw PeerConnectionError.handshakeFailed("Info hash mismatch")
         }
 
+        self.peerReservedBytes = h.extensions
         connection = conn
         handshakeDone = true
 

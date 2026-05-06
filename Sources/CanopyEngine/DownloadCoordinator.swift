@@ -182,6 +182,14 @@ public actor DownloadCoordinator {
         } else {
             try? await conn.send(.interested)
         }
+        // BEP 10: send extension handshake if peer supports it
+        let reserved = await conn.peerReservedBytes
+        assert(reserved.isEmpty || reserved.count == 8, "Malformed reserved bytes: \(reserved.count)")
+        if reserved.count == 8, (reserved[5] & 0x10) != 0 {
+            try? await conn.send(.extended(id: 0, data: buildExtensionHandshake()))
+        } else if !reserved.isEmpty {
+            print("[Coordinator] ℹ️ No extension protocol from \(key)")
+        }
 
         // Send keepalive every 90s to prevent peer timeout
         let keepaliveTask = Task {
@@ -313,6 +321,16 @@ public actor DownloadCoordinator {
                     // Prune entries older than 20s
                     uploadRate[key] = uploadRate[key]?.filter { now.timeIntervalSince($0.timestamp) <= 20 }
                 }
+
+            case .extended(0, let data):
+                // Extension handshake response
+                if let ext = parseExtensionHandshake(from: data) {
+                    await conn.setExtensions(ext)
+                    print("[Coordinator] 🔌 Extensions from \(key): ut_pex=\(ext.utPEX != nil) ut_metadata=\(ext.utMetadata != nil) metadata_size=\(ext.metadataSize ?? 0)")
+                }
+
+            case .extended(let id, _):
+                print("[Coordinator] Unhandled extended msg id=\(id) from \(key)")
 
             default:
                 break
