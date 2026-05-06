@@ -18,7 +18,8 @@ public enum PeerMessage: Equatable {
     /// Parse a single message from a byte stream. Returns nil if more data is needed.
     public static func decode(from data: inout Data) -> PeerMessage? {
         guard data.count >= 4 else { return nil }
-        let length = Int(data[0..<4].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+        let bytes = Array(data.prefix(4))
+        let length = (Int(bytes[0]) << 24) | (Int(bytes[1]) << 16) | (Int(bytes[2]) << 8) | Int(bytes[3])
         if length == 0 {
             data.removeFirst(4)
             return .keepAlive
@@ -63,25 +64,30 @@ public enum PeerMessage: Equatable {
         case 2: return .interested
         case 3: return .notInterested
         case 4:
-            let piece = Int(payload.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
+            let b = Array(payload.prefix(4))
+            let piece = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
             return .have(piece: piece)
         case 5: return .bitfield(payload)
         case 6:
-            let p = Int(payload[0..<4].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            let b = Int(payload[4..<8].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            let l = Int(payload[8..<12].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            return .request(piece: p, begin: b, length: l)
+            let b = Array(payload.prefix(12))
+            let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
+            let len = (Int(b[8]) << 24) | (Int(b[9]) << 16) | (Int(b[10]) << 8) | Int(b[11])
+            return .request(piece: p, begin: beg, length: len)
         case 7:
-            let p = Int(payload[0..<4].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            let b = Int(payload[4..<8].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            return .piece(piece: p, begin: b, data: payload.subdata(in: 8..<payload.count))
+            let b = Array(payload.prefix(8))
+            let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
+            return .piece(piece: p, begin: beg, data: payload.count > 8 ? payload.subdata(in: 8..<payload.count) : Data())
         case 8:
-            let p = Int(payload[0..<4].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            let b = Int(payload[4..<8].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            let l = Int(payload[8..<12].withUnsafeBytes { $0.load(as: UInt32.self).bigEndian })
-            return .cancel(piece: p, begin: b, length: l)
+            let b = Array(payload.prefix(12))
+            let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
+            let len = (Int(b[8]) << 24) | (Int(b[9]) << 16) | (Int(b[10]) << 8) | Int(b[11])
+            return .cancel(piece: p, begin: beg, length: len)
         case 9:
-            let port = payload.withUnsafeBytes { $0.load(as: UInt16.self).bigEndian }
+            let b = Array(payload.prefix(2))
+            let port = (UInt16(b[0]) << 8) | UInt16(b[1])
             return .port(port: port)
         case 20:
             guard payload.count > 0 else { return .extended(id: 0, data: payload) }
