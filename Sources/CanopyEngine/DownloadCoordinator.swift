@@ -54,23 +54,36 @@ public actor DownloadCoordinator {
         print("[Coordinator] Tracker returned \(response.peers.count) peers, interval=\(response.interval)")
         guard !response.peers.isEmpty else { throw DownloadError.noPeers }
 
-        for peer in response.peers.prefix(8) {
+        for peer in response.peers { // try all returned peers
             let key = "\(peer.ip):\(peer.port)"
             let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
             peers[key] = conn
             print("[Coordinator] Connecting to \(key)")
         }
 
-        // Suspend until download completes
+        // Suspend until download completes, re-announcing if all peers drop
         try await withCheckedThrowingContinuation { cont in
             completionContinuation = cont
             Task {
-                await withTaskGroup(of: Void.self) { group in
-                    for (key, conn) in peers {
-                        group.addTask { await self.handlePeer(key: key, conn: conn) }
+                while await !pieceManager.isComplete {
+                    if await peers.isEmpty {
+                        print("[Coordinator] 🔄 All peers dropped — re-announcing...")
+                        if let response = try? await trackerSession.announce(uploaded: 0, downloaded: 0) {
+                            for peer in response.peers {
+                                let key = "\(peer.ip):\(peer.port)"
+                                let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                                peers[key] = conn
+                            }
+                        }
                     }
+                    // Spawn tasks for any peers not yet connected
+                    for (key, conn) in peers {
+                        if peerBitfields[key] == nil && peerPieces[key] == nil {
+                            Task { await self.handlePeer(key: key, conn: conn) }
+                        }
+                    }
+                    try? await Task.sleep(for: .seconds(10))
                 }
-                // Don't resume here — only resume on completion or error
             }
         }
     }
