@@ -51,12 +51,14 @@ public actor DownloadCoordinator {
         }
 
         let response = try await trackerSession.announce()
+        print("[Coordinator] Tracker returned \(response.peers.count) peers, interval=\(response.interval)")
         guard !response.peers.isEmpty else { throw DownloadError.noPeers }
 
         for peer in response.peers.prefix(8) {
             let key = "\(peer.ip):\(peer.port)"
             let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
             peers[key] = conn
+            print("[Coordinator] Connecting to \(key)")
         }
 
         // Suspend until download completes
@@ -74,7 +76,11 @@ public actor DownloadCoordinator {
     }
 
     private func handlePeer(key: String, conn: PeerConnection) async {
-        guard let stream = try? await conn.connect() else { return }
+        guard let stream = try? await conn.connect() else {
+            print("[Coordinator] ⚠️ Failed to connect to \(key)")
+            return
+        }
+        print("[Coordinator] ✅ Connected to \(key)")
         try? await conn.send(.interested)
 
         // Send keepalive every 90s to prevent peer timeout
@@ -105,6 +111,7 @@ public actor DownloadCoordinator {
                 }
 
             case .unchoke:
+                print("[Coordinator] ✨ Unchoked by \(key)")
                 await requestBlocks(key: key, conn: conn)
 
             case .piece(let piece, let begin, let data):
@@ -142,6 +149,7 @@ public actor DownloadCoordinator {
             }
         }
         // Peer disconnected — clean up and check if we're out of peers
+        print("[Coordinator] ⛔ Disconnected from \(key)")
         peers.removeValue(forKey: key)
         peerBitfields.removeValue(forKey: key)
         if let piece = peerPieces[key] {
