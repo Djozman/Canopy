@@ -206,7 +206,8 @@ public actor DownloadCoordinator {
         }
         defer { keepaliveTask.cancel() }
 
-        var utPEXID: UInt8?
+        var utPEXID: UInt8?          // remote's ID for ut_pex (outgoing sends)
+        let localPEXID: UInt8 = 1   // our ID for ut_pex (incoming receives)
 
         for await msg in stream {
             switch msg {
@@ -344,13 +345,16 @@ public actor DownloadCoordinator {
                     print("[Coordinator] 🔌 Extensions from \(key): ut_pex=\(ext.utPEX != nil) ut_metadata=\(ext.utMetadata != nil) metadata_size=\(ext.metadataSize ?? 0)")
                 }
 
-            case .extended(let id, let data) where id == utPEXID:
+            case .extended(let id, let data) where id == localPEXID:
                 if let pex = parsePEXMessage(from: data) {
                     for peer in pex.added {
                         let pKey = "\(peer.ip):\(peer.port)"
                         guard !spawnedPeers.contains(pKey), !bannedPeers.contains(pKey) else { continue }
+                        guard peerBitfields.count < 50 else { break }
                         let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
                         peers[pKey] = conn
+                        spawnedPeers.insert(pKey)
+                        Task { await self.handlePeer(key: pKey, conn: conn) }
                         print("[Coordinator] 🔄 PEX discovered \(pKey)")
                     }
                 }
