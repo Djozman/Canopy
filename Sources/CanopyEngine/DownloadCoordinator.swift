@@ -185,9 +185,11 @@ public actor DownloadCoordinator {
         // BEP 10: send extension handshake if peer supports it
         let reserved = await conn.peerReservedBytes
         assert(reserved.isEmpty || reserved.count == 8, "Malformed reserved bytes: \(reserved.count)")
-        if reserved.count == 8, (reserved[5] & 0x10) != 0 {
+        if reserved.isEmpty {
+            print("[Coordinator] ⚠️ Reserved bytes not yet set for \(key) — skipping extension handshake")
+        } else if (reserved[5] & 0x10) != 0 {
             try? await conn.send(.extended(id: 0, data: buildExtensionHandshake()))
-        } else if !reserved.isEmpty {
+        } else {
             print("[Coordinator] ℹ️ No extension protocol from \(key)")
         }
 
