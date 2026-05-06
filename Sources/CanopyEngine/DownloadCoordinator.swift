@@ -19,11 +19,13 @@ public actor DownloadCoordinator {
     private var pieceFrequency: [Int: Int] = [:]   // rarest-first: peer count per piece
     private var peerHashFailures: [String: Int] = [:]  // ban tracking: strike count per peer
     private var bannedPeers: Set<String> = []          // banned peer keys
+    private var spawnedPeers: Set<String> = []          // peers with a handlePeer task spawned
     private var pieceBlockSources: [Int: [Int: String]] = [:]  // piece → blockBegin → peerKey
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
     private var isShutdown = false
     private var totalUploaded: Int64 = 0
+    private var totalDownloaded: Int64 = 0
     private var listener: NWListener?
 
     // Seeding state
@@ -102,7 +104,7 @@ public actor DownloadCoordinator {
                 while await !pieceManager.isComplete {
                     if await peers.isEmpty {
                         print("[Coordinator] 🔄 All peers dropped — re-announcing...")
-                        if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0) {
+                        if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded) {
                             for peer in response.peers {
                                 let key = "\(peer.ip):\(peer.port)"
                                 if bannedPeers.contains(key) { continue }
@@ -118,7 +120,8 @@ public actor DownloadCoordinator {
                     for (key, conn) in peers {
                         if alreadyActive + spawned >= maxPeers { break }
                         if bannedPeers.contains(key) { continue }
-                        if peerBitfields[key] == nil && peerPieces[key] == nil {
+                        if !spawnedPeers.contains(key) {
+                            spawnedPeers.insert(key)
                             Task { await self.handlePeer(key: key, conn: conn) }
                             spawned += 1
                         }
@@ -217,6 +220,7 @@ public actor DownloadCoordinator {
             case .piece(let piece, let begin, let data):
                 print("[Coordinator] 📦 Piece(\(piece), begin=\(begin), len=\(data.count)) from \(key)")
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
+                totalDownloaded += Int64(data.count)
                 pieceBlockSources[piece, default: [:]][begin] = key
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
@@ -318,7 +322,9 @@ public actor DownloadCoordinator {
         print("[Coordinator] ⛔ Disconnected from \(key)")
         peers.removeValue(forKey: key)
         if let bf = peerBitfields.removeValue(forKey: key) {
-            for piece in bf { pieceFrequency[piece, default: 1] -= 1 }
+            for piece in bf {
+                pieceFrequency[piece] = max(0, (pieceFrequency[piece] ?? 1) - 1)
+            }
         }
         if let piece = peerPieces[key] {
             await pieceManager.cancelPending(for: piece)
@@ -328,6 +334,7 @@ public actor DownloadCoordinator {
         uploadRate.removeValue(forKey: key)
         interestedPeers.remove(key)
         unchokedPeers.remove(key)
+        spawnedPeers.remove(key)
     }
 
     private func requestBlocks(key: String, conn: PeerConnection) async {
@@ -495,7 +502,7 @@ public actor DownloadCoordinator {
     public func seed() async {
         guard fileHandles != nil else { return }
         // Announce once so tracker knows we're seeding
-        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0, left: 0)
+        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
         print("[Coordinator] 🌱 Entering seeding mode (inbound only)")
         while !isShutdown {
             if Task.isCancelled { break }
