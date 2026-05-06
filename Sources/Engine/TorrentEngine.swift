@@ -300,12 +300,6 @@ public final class TorrentEngine: ObservableObject {
             pendingFileDeletions[id] = path
         }
     }
-                } else {
-                    NSLog("[Canopy] no file/dir at \(path) to delete")
-                }
-            }
-        }
-    }
     public func recheck(_ torrent: TorrentStatus) {
         guard let h = torrent.handle else { NSLog("[Canopy] recheck: no handle for \(torrent.name)"); return }
         NSLog("[Canopy] recheck(\(torrent.name))")
