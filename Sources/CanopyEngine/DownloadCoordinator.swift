@@ -114,6 +114,9 @@ public actor DownloadCoordinator {
                         await pieceManager.cancelPending(for: piece)
                         assignedPieces.remove(piece)
                         pieceAssignedAt.removeValue(forKey: piece)
+                        if let peerKey = peerPieces.first(where: { $0.value == piece })?.key {
+                            peerPieces.removeValue(forKey: peerKey)
+                        }
                         print("[Coordinator] ⏱ Piece \(piece) timed out, re-queuing")
                     }
                 }
@@ -127,6 +130,7 @@ public actor DownloadCoordinator {
             stream = try await conn.connect()
         } catch {
             print("[Coordinator] ⚠️ Failed to connect to \(key): \(error)")
+            peers.removeValue(forKey: key)
             return
         }
         print("[Coordinator] ✅ Connected to \(key)")
@@ -173,7 +177,8 @@ public actor DownloadCoordinator {
                 }
                 if let verified = await pieceManager.tryAssemble(piece: piece) {
                     assignedPieces.remove(piece)
-                    peerPieces.removeValue(forKey: key)
+                    // Clear piece from ALL peers (endgame may have multiple peers on same piece)
+                    for (k, p) in peerPieces where p == piece { peerPieces.removeValue(forKey: k) }
                     pieceAssignedAt.removeValue(forKey: piece)
                     await writePieceToDisk(piece: piece, data: verified)
                     completedPieces.insert(piece)
