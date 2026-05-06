@@ -373,8 +373,12 @@ public actor DownloadCoordinator {
             guard seg.fileIndex < handles.count else { return nil }
             do {
                 try handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
-                if let chunk = try handles[seg.fileIndex].read(upToCount: seg.length) {
-                    result.append(chunk)
+                var remaining = seg.length
+                while remaining > 0 {
+                    guard let part = try handles[seg.fileIndex].read(upToCount: remaining),
+                          !part.isEmpty else { return nil }
+                    result.append(part)
+                    remaining -= part.count
                 }
             } catch {
                 return nil
