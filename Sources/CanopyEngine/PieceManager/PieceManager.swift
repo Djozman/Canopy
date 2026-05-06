@@ -30,8 +30,9 @@ public actor PieceManager {
     public func hasPiece(_ piece: Int) -> Bool { bitfield.isSet(piece) }
 
     /// Get the next needed piece (rarest-first selection happens at a higher level).
-    public func nextNeededPiece() -> Int? {
-        for i in 0..<pieceCount where !bitfield.isSet(i) {
+    /// Get the next needed piece, optionally excluding pieces already assigned to other peers.
+    public func nextNeededPiece(excluding: Set<Int> = []) -> Int? {
+        for i in 0..<pieceCount where !bitfield.isSet(i) && !excluding.contains(i) {
             return i
         }
         return nil
@@ -68,8 +69,10 @@ public actor PieceManager {
         return requests
     }
 
-    /// Store a downloaded block.
-    public func storeBlock(piece: Int, begin: Int, data: Data) {
+    /// Cancel all pending block requests for a given piece (e.g. peer disconnected).
+    public func cancelPending(for piece: Int) {
+        pendingBlocks = pendingBlocks.filter { $0.piece != piece }
+    }
         downloadedBlocks[piece, default: [:]][begin] = data
         pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
     }
@@ -101,8 +104,9 @@ public actor PieceManager {
             return nil
         }
 
-        // Success — mark as owned
+        // Success — mark as owned and free block memory
         bitfield.set(piece)
+        downloadedBlocks.removeValue(forKey: piece)
         return assembled
     }
 }
