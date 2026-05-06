@@ -100,10 +100,14 @@ public actor DownloadCoordinator {
                             }
                         }
                     }
-                    // Spawn tasks for any peers not yet connected
+                    // Spawn tasks for any peers not yet connected, cap at 50
+                    let maxPeers = 50
+                    var spawned = 0
                     for (key, conn) in peers {
+                        if spawned >= maxPeers { break }
                         if peerBitfields[key] == nil && peerPieces[key] == nil {
                             Task { await self.handlePeer(key: key, conn: conn) }
+                            spawned += 1
                         }
                     }
                     try? await Task.sleep(for: .seconds(10))
@@ -198,6 +202,10 @@ public actor DownloadCoordinator {
                     await requestBlocks(key: key, conn: conn)
                 }
 
+            case .have(let piece):
+                peerBitfields[key, default: []].insert(piece)
+                pieceFrequency[piece, default: 0] += 1
+
             case .choke:
                 if let piece = peerPieces[key] {
                     await pieceManager.cancelPending(for: piece)
@@ -236,9 +244,8 @@ public actor DownloadCoordinator {
             return
         }
 
-        // Endgame: fewer than 5% of pieces remaining — request from ALL peers
-        let remaining = Double(torrent.pieces.count - completedPieces.count)
-        if remaining < Double(torrent.pieces.count) * 0.05 {
+        // Endgame: >95% done — request remaining pieces from ALL peers
+        if await pieceManager.progress > 0.95 {
             guard let piece = await pieceManager.nextNeededPiece(excluding: []) else { return }
             peerPieces[key] = piece
             pieceAssignedAt[piece] = Date()
