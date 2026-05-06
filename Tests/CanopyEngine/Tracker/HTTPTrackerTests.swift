@@ -119,4 +119,18 @@ final class HTTPTrackerParseTests: XCTestCase {
         XCTAssertEqual(parsed[1].ip, "10.0.0.2")
         XCTAssertEqual(parsed[1].port, 9090)
     }
+
+    func testParseCompactPeersMultiple() {
+        let data = Data([
+            10, 0, 0, 1, 0x1A, 0x0B,      // 10.0.0.1:6667
+            192, 168, 1, 5, 0x00, 0x50,   // 192.168.1.5:80
+            8, 8, 8, 8, 0x01, 0xBB,       // 8.8.8.8:443
+        ])
+        let peers = HTTPTracker.parseCompactPeers(data)
+        XCTAssertEqual(peers.count, 3)
+        XCTAssertEqual(peers[1].ip, "192.168.1.5")
+        XCTAssertEqual(peers[1].port, 80)
+        XCTAssertEqual(peers[2].ip, "8.8.8.8")
+        XCTAssertEqual(peers[2].port, 443)
+    }
 }
