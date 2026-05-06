@@ -83,7 +83,7 @@ struct AddTorrentSheet: View {
 
     // MARK: - Magnet: open window immediately, fetch metadata in background
 
-    private func handleMagnet() {
+    @MainActor private func handleMagnet() {
         let uri  = magnetURI
         let save = saveDir
 
@@ -134,7 +134,7 @@ struct AddTorrentSheet: View {
 
     // MARK: - .torrent file: parse locally, open window with full file list
 
-    private func handleTorrentFile() {
+    @MainActor private func handleTorrentFile() {
         guard var pending = engine.parse(torrentPath: torrentPath) else {
             parseError = "Failed to parse torrent file."
             return
