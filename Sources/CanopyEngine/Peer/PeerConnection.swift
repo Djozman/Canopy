@@ -77,6 +77,7 @@ public actor PeerConnection {
             messageContinuation = cont
         }
 
+        let cont = messageContinuation  // capture as let — no data race
         receiveTask = Task {
             var buf = Data()
             while !Task.isCancelled {
@@ -89,10 +90,10 @@ public actor PeerConnection {
                     if case .unchoke = msg { await setChoked(false) }
                     if case .interested = msg { await setInterested(true) }
                     if case .notInterested = msg { await setInterested(false) }
-                    messageContinuation?.yield(msg)
+                    cont?.yield(msg)
                 }
             }
-            messageContinuation?.finish()
+            cont?.finish()
         }
 
         return stream
