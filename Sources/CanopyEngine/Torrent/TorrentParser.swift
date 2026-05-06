@@ -22,11 +22,11 @@ public struct TorrentParser {
             throw TorrentParseError.invalidBencode
         }
 
-        guard let announce = root.first(where: { $0.0 == "announce" }),
-              case .string(let announceData) = announce.1,
-              let announceStr = String(data: announceData, encoding: .utf8) else {
-            throw TorrentParseError.missingField("announce")
-        }
+        let announceStr: String? = {
+            guard let a = root.first(where: { $0.0 == "announce" }),
+                  case .string(let d) = a.1 else { return nil }
+            return String(data: d, encoding: .utf8)
+        }()
 
         let announceList: [[String]]? = {
             guard let al = root.first(where: { $0.0 == "announce-list" }),
@@ -61,6 +61,9 @@ public struct TorrentParser {
             throw TorrentParseError.missingField("pieces")
         }
 
+        guard piecesData.count % 20 == 0, !piecesData.isEmpty else {
+            throw TorrentParseError.invalidFormat("pieces length must be a multiple of 20 bytes")
+        }
         let pieces: [Data] = stride(from: 0, to: piecesData.count, by: 20).map {
             piecesData.subdata(in: $0..<min($0 + 20, piecesData.count))
         }

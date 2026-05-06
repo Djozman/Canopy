@@ -1,7 +1,7 @@
 import Foundation
 
 public struct TorrentFile: Equatable {
-    public let announce: String
+    public let announce: String?
     public let announceList: [[String]]?
     public let name: String
     public let pieceLength: Int64
