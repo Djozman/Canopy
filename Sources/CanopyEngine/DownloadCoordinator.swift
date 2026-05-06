@@ -9,13 +9,12 @@ public actor DownloadCoordinator {
     private let trackerSession: TrackerSession
     private let savePath: String
 
-    /// Connected peers, keyed by (ip:port)
+    /// Track which pieces each peer has (from their bitfield).
+    /// Used to select which peer to request from, NOT for our own completion tracking.
+    private var peerBitfields: [String: Set<Int>] = [:]
     private var peers: [String: PeerConnection] = [:]
-    /// Pieces assigned to each peer
     private var peerPieces: [String: Int] = [:]
-    /// Active piece sets per peer
     private var assignedPieces: Set<Int> = []
-    /// File handles for disk writes
     private var fileHandles: [FileHandle]?
 
     public init(torrent: TorrentFile, savePath: String) {
@@ -44,23 +43,18 @@ public actor DownloadCoordinator {
         )
     }
 
-    /// Download the entire torrent. Returns when complete.
     public func download() async throws {
-        // Open files
         fileHandles = try diskMapper.openFiles(at: savePath)
 
-        // Announce to tracker
         let response = try await trackerSession.announce()
         guard !response.peers.isEmpty else { throw DownloadError.noPeers }
 
-        // Connect to peers and start message loops
         for peer in response.peers.prefix(8) {
             let key = "\(peer.ip):\(peer.port)"
             let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
             peers[key] = conn
         }
 
-        // Process all peer streams concurrently
         await withTaskGroup(of: Void.self) { group in
             for (key, conn) in peers {
                 group.addTask { await self.handlePeer(key: key, conn: conn) }
@@ -70,22 +64,22 @@ public actor DownloadCoordinator {
 
     private func handlePeer(key: String, conn: PeerConnection) async {
         guard let stream = try? await conn.connect() else { return }
-
-        // Send interested
         try? await conn.send(.interested)
 
         for await msg in stream {
             switch msg {
+
             case .bitfield(let bf):
-                // Record which pieces this peer has
+                // Store what this PEER has, not what we have
+                var peerSet = Set<Int>()
                 for (byteIdx, byte) in bf.enumerated() {
                     for bit in 0..<8 {
                         if (byte >> (7 - bit)) & 1 == 1 {
-                            await pieceManager.markHave(piece: byteIdx * 8 + bit)
+                            peerSet.insert(byteIdx * 8 + bit)
                         }
                     }
                 }
-                // Start requesting if unchoked
+                peerBitfields[key] = peerSet
                 if await !conn.isChoked {
                     await requestBlocks(key: key, conn: conn)
                 }
@@ -95,21 +89,28 @@ public actor DownloadCoordinator {
 
             case .piece(let piece, let begin, let data):
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
+                // Re-fill pipeline immediately after each block arrives
+                if let currentPiece = peerPieces[key], currentPiece == piece {
+                    await requestBlocks(key: key, conn: conn)
+                }
                 if let verified = await pieceManager.tryAssemble(piece: piece) {
+                    assignedPieces.remove(piece)
+                    peerPieces.removeValue(forKey: key)
                     await writePieceToDisk(piece: piece, data: verified)
                     if await pieceManager.isComplete {
-                        // Send completed, stop tracker, cleanup
                         try? await trackerSession.completed()
                         for p in peers.values { await p.disconnect() }
                         return
                     }
-                    // Request next piece
                     await requestBlocks(key: key, conn: conn)
                 }
 
             case .choke:
-                await pieceManager.cancelPending(for: peerPieces[key] ?? -1)
-                peerPieces.removeValue(forKey: key)
+                if let piece = peerPieces[key] {
+                    await pieceManager.cancelPending(for: piece)
+                    assignedPieces.remove(piece)
+                    peerPieces.removeValue(forKey: key)
+                }
 
             default:
                 break
@@ -127,8 +128,12 @@ public actor DownloadCoordinator {
             return
         }
 
-        // Assign a new piece
+        // Find a new piece this peer has that isn't assigned to anyone
+        let peersPieces = peerBitfields[key] ?? []
         guard let piece = await pieceManager.nextNeededPiece(excluding: assignedPieces) else { return }
+        // Only assign if this peer actually has it (or if we don't know, try anyway)
+        guard peersPieces.isEmpty || peersPieces.contains(piece) else { return }
+
         assignedPieces.insert(piece)
         peerPieces[key] = piece
 
@@ -140,19 +145,13 @@ public actor DownloadCoordinator {
 
     private func writePieceToDisk(piece: Int, data: Data) async {
         guard let handles = fileHandles else { return }
-        var dataOffset = 0
-        while dataOffset < data.count {
-            let blockLen = min(blockSize, data.count - dataOffset)
-            let segments = diskMapper.map(piece: piece, blockBegin: dataOffset, blockLength: blockLen)
-            var segOffset = 0
-            for seg in segments {
-                let start = dataOffset + segOffset
-                let segData = data.subdata(in: start..<(start + seg.length))
-                try? handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
-                try? handles[seg.fileIndex].write(contentsOf: segData)
-                segOffset += seg.length
-            }
-            dataOffset += blockLen
+        let segments = diskMapper.map(piece: piece, blockBegin: 0, blockLength: data.count)
+        var cursor = 0
+        for seg in segments {
+            let chunk = data.subdata(in: cursor..<(cursor + seg.length))
+            try? handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
+            try? handles[seg.fileIndex].write(contentsOf: chunk)
+            cursor += seg.length
         }
     }
 }
