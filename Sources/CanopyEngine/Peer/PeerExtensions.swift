@@ -49,3 +49,34 @@ public func parseExtensionHandshake(from data: Data) -> PeerExtensions? {
 
     return ext
 }
+
+// MARK: - PEX (BEP 11)
+
+/// Build a PEX message (added/dropped peer lists). Returns nil if utPEXID is nil.
+public func buildPEXMessage(added: [Peer], dropped: [Peer], utPEXID: UInt8?) -> PeerMessage? {
+    guard let utPEXID else { return nil }
+    let addedBlob = Data(added.flatMap { encodeCompactPeer($0) })
+    let droppedBlob = Data(dropped.flatMap { encodeCompactPeer($0) })
+    let dict: BencodeValue = .dict([
+        ("added", .string(addedBlob)),
+        ("dropped", .string(droppedBlob)),
+    ])
+    return .extended(id: utPEXID, data: BencodeEncoder.encode(dict))
+}
+
+/// Parse a PEX message. added.f and dropped.f are separate bencode keys — ignored.
+public func parsePEXMessage(from data: Data) -> (added: [Peer], dropped: [Peer])? {
+    guard let (value, _) = try? BencodeDecoder.decode(data),
+          case .dict(let dict) = value else { return nil }
+    let added: [Peer] = {
+        guard let p = dict.first(where: { $0.0 == "added" }),
+              case .string(let blob) = p.1 else { return [] }
+        return parseCompactPeers(blob)
+    }()
+    let dropped: [Peer] = {
+        guard let p = dict.first(where: { $0.0 == "dropped" }),
+              case .string(let blob) = p.1 else { return [] }
+        return parseCompactPeers(blob)
+    }()
+    return (added, dropped)
+}

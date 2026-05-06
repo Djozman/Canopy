@@ -14,3 +14,13 @@ public func parseCompactPeers(_ data: Data) -> [Peer] {
     }
     return peers
 }
+
+/// Encode a single peer in compact format: 4 IP + 2 port, network byte order.
+public func encodeCompactPeer(_ peer: Peer) -> Data {
+    let parts = peer.ip.split(separator: ".").compactMap { UInt8($0) }
+    guard parts.count == 4 else { return Data() }
+    var data = Data([parts[0], parts[1], parts[2], parts[3]])
+    var port = peer.port.bigEndian
+    data.append(Data(bytes: &port, count: 2))
+    return data
+}

@@ -27,6 +27,9 @@ public actor DownloadCoordinator {
     private var totalUploaded: Int64 = 0
     private var totalDownloaded: Int64 = 0
     private var listener: NWListener?
+    // PEX (BEP 11) state
+    private var lastPEXSent: [String: Date] = [:]
+    private var pexLastKnown: [String: Set<String>] = [:]
 
     // Seeding state
     private var uploadRate: [String: [(timestamp: Date, bytes: Int)]] = [:]
@@ -129,7 +132,7 @@ public actor DownloadCoordinator {
                     // Choke algorithm runs every 30s (during download, keeps peers open for upload too)
                     if Date().timeIntervalSince(lastChokeRound) >= 30 {
                         lastChokeRound = Date()
-                        runChokeAlgorithm()
+                        await runChokeAlgorithm()
                     }
                     try? await Task.sleep(for: .seconds(10))
                     // Check for stall — re-queue pieces taking >30s
@@ -202,6 +205,8 @@ public actor DownloadCoordinator {
             }
         }
         defer { keepaliveTask.cancel() }
+
+        var utPEXID: UInt8?
 
         for await msg in stream {
             switch msg {
@@ -335,7 +340,19 @@ public actor DownloadCoordinator {
                 // Extension handshake response
                 if let ext = parseExtensionHandshake(from: data) {
                     await conn.setExtensions(ext)
+                    utPEXID = ext.utPEX
                     print("[Coordinator] 🔌 Extensions from \(key): ut_pex=\(ext.utPEX != nil) ut_metadata=\(ext.utMetadata != nil) metadata_size=\(ext.metadataSize ?? 0)")
+                }
+
+            case .extended(let id, let data) where id == utPEXID:
+                if let pex = parsePEXMessage(from: data) {
+                    for peer in pex.added {
+                        let pKey = "\(peer.ip):\(peer.port)"
+                        guard !spawnedPeers.contains(pKey), !bannedPeers.contains(pKey) else { continue }
+                        let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                        peers[pKey] = conn
+                        print("[Coordinator] 🔄 PEX discovered \(pKey)")
+                    }
                 }
 
             case .extended(let id, _):
@@ -362,6 +379,8 @@ public actor DownloadCoordinator {
         interestedPeers.remove(key)
         unchokedPeers.remove(key)
         spawnedPeers.remove(key)
+        lastPEXSent.removeValue(forKey: key)
+        pexLastKnown.removeValue(forKey: key)
     }
 
     private func requestBlocks(key: String, conn: PeerConnection) async {
@@ -448,7 +467,7 @@ public actor DownloadCoordinator {
 
     /// Run the choke algorithm: unchoke top 4 peers by upload rate,
     /// plus one random optimistic unchoke for choked interested peers.
-    private func runChokeAlgorithm() {
+    private func runChokeAlgorithm() async {
         let now = Date()
         // Calculate upload rates (bytes/sec) over last 20s window
         // Seed with zero for all interested peers so new peers aren't invisible
@@ -477,15 +496,37 @@ public actor DownloadCoordinator {
         for key in peers.keys {
             let shouldUnchoke = newUnchoked.contains(key)
             if shouldUnchoke, !unchokedPeers.contains(key) {
-                Task { try? await peers[key]?.send(.unchoke) }
+                try? await peers[key]?.send(.unchoke)
                 print("[Coordinator] 🌱 Unchoked \(key)")
             } else if !shouldUnchoke, unchokedPeers.contains(key) {
-                Task { try? await peers[key]?.send(.choke) }
+                try? await peers[key]?.send(.choke)
                 print("[Coordinator] 🔒 Choked \(key)")
             }
         }
         unchokedPeers = newUnchoked
         print("[Coordinator] Choke round: \(unchokedPeers.count) unchoked (\(top4.count) top, \(optimistic.count) optimistic)")
+
+        // PEX (BEP 11): broadcast known peers to connected peers (delta-only, 60s interval)
+        for key in peers.keys {
+            guard Date().timeIntervalSince(lastPEXSent[key] ?? .distantPast) >= 60 else { continue }
+            let utPEXID = await peers[key]?.peerExtensions?.utPEX
+            guard utPEXID != nil else { continue }
+            let current = Set(peers.keys).subtracting([key])
+            let last = pexLastKnown[key] ?? []
+            let addedKeys = current.subtracting(last)
+            let droppedKeys = last.subtracting(current)
+            guard !addedKeys.isEmpty || !droppedKeys.isEmpty else { continue }
+            let added = addedKeys.compactMap { peers[$0]?.peer }
+            let dropped = droppedKeys.compactMap { k -> Peer? in
+                let parts = k.split(separator: ":"); guard parts.count == 2 else { return nil }
+                return Peer(ip: String(parts[0]), port: UInt16(parts[1]) ?? 0)
+            }
+            if let msg = buildPEXMessage(added: added, dropped: dropped, utPEXID: utPEXID) {
+                try? await peers[key]?.send(msg)
+            }
+            pexLastKnown[key] = current
+            lastPEXSent[key] = Date()
+        }
     }
 
     /// Start listening for inbound peer connections on the announced port.
@@ -535,7 +576,7 @@ public actor DownloadCoordinator {
             if Task.isCancelled { break }
             if Date().timeIntervalSince(lastChokeRound) >= 30 {
                 lastChokeRound = Date()
-                runChokeAlgorithm()
+                await runChokeAlgorithm()
             }
             try? await Task.sleep(for: .seconds(10))
         }
