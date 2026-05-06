@@ -207,7 +207,6 @@ public actor DownloadCoordinator {
         defer { keepaliveTask.cancel() }
 
         var utPEXID: UInt8?          // remote's ID for ut_pex (outgoing sends)
-        let localPEXID: UInt8 = 1   // our ID for ut_pex (incoming receives)
 
         for await msg in stream {
             switch msg {

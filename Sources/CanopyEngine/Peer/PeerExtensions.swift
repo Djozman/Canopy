@@ -8,12 +8,16 @@ public struct PeerExtensions {
     public var metadataSize: Int?  // from metadata_size in extension handshake
 }
 
+/// Our local extension IDs — match buildExtensionHandshake().
+public let localPEXID: UInt8 = 1
+public let localMetadataID: UInt8 = 2
+
 /// Build the extension handshake payload (raw bencoded dict, no length prefix).
-/// Local extension IDs: ut_pex=1, ut_metadata=2.
+/// Local extension IDs: ut_pex=localPEXID, ut_metadata=localMetadataID.
 public func buildExtensionHandshake() -> Data {
     let m: BencodeValue = .dict([
-        ("ut_pex", .integer(1)),
-        ("ut_metadata", .integer(2)),
+        ("ut_pex", .integer(Int64(localPEXID))),
+        ("ut_metadata", .integer(Int64(localMetadataID))),
     ])
     let dict: BencodeValue = .dict([
         ("m", m),
