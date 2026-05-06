@@ -18,8 +18,6 @@ public actor PeerConnection {
     private var handshakeDone = false
     private var receiveTask: Task<Void, Never>?
 
-    /// The peer's bitfield (nil until received).
-    public private(set) var bitfield: Data?
     /// Whether the peer has choked us.
     public private(set) var isChoked = true
     /// Whether the peer is interested in us.
@@ -87,12 +85,12 @@ public actor PeerConnection {
                       !chunk.isEmpty else { break }
                 buf.append(chunk)
                 while let msg = PeerMessage.decode(from: &buf) {
-                    if case .bitfield(let bf) = msg { await setBitfield(bf) }
                     if case .choke = msg { await setChoked(true) }
                     if case .unchoke = msg { await setChoked(false) }
                     if case .interested = msg { await setInterested(true) }
                     if case .notInterested = msg { await setInterested(false) }
                     cont?.yield(msg)
+                    if Task.isCancelled { break }
                 }
             }
             cont?.finish()
@@ -101,7 +99,6 @@ public actor PeerConnection {
         return stream
     }
 
-    private func setBitfield(_ bf: Data) { bitfield = bf }
     private func setChoked(_ v: Bool) { isChoked = v }
     private func setInterested(_ v: Bool) { isPeerInterested = v }
 

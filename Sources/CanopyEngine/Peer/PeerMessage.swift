@@ -64,29 +64,34 @@ public enum PeerMessage: Equatable {
         case 2: return .interested
         case 3: return .notInterested
         case 4:
-            let b = Array(payload.prefix(4))
+            guard payload.count >= 4 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
             let piece = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
             return .have(piece: piece)
         case 5: return .bitfield(payload)
         case 6:
-            let b = Array(payload.prefix(12))
+            guard payload.count >= 12 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
             let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
             let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
             let len = (Int(b[8]) << 24) | (Int(b[9]) << 16) | (Int(b[10]) << 8) | Int(b[11])
             return .request(piece: p, begin: beg, length: len)
         case 7:
-            let b = Array(payload.prefix(8))
+            guard payload.count >= 8 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
             let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
             let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
             return .piece(piece: p, begin: beg, data: payload.count > 8 ? payload.subdata(in: 8..<payload.count) : Data())
         case 8:
-            let b = Array(payload.prefix(12))
+            guard payload.count >= 12 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
             let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
             let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
             let len = (Int(b[8]) << 24) | (Int(b[9]) << 16) | (Int(b[10]) << 8) | Int(b[11])
             return .cancel(piece: p, begin: beg, length: len)
         case 9:
-            let b = Array(payload.prefix(2))
+            guard payload.count >= 2 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
             let port = (UInt16(b[0]) << 8) | UInt16(b[1])
             return .port(port: port)
         case 20:

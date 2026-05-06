@@ -22,6 +22,7 @@ public actor DownloadCoordinator {
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
     private var isShutdown = false
+    private var totalUploaded: Int64 = 0
 
     // Seeding state
     private var uploadRate: [String: [(timestamp: Date, bytes: Int)]] = [:]
@@ -99,7 +100,7 @@ public actor DownloadCoordinator {
                 while await !pieceManager.isComplete {
                     if await peers.isEmpty {
                         print("[Coordinator] 🔄 All peers dropped — re-announcing...")
-                        if let response = try? await trackerSession.announce(uploaded: 0, downloaded: 0) {
+                        if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0) {
                             for peer in response.peers {
                                 let key = "\(peer.ip):\(peer.port)"
                                 if bannedPeers.contains(key) { continue }
@@ -284,6 +285,7 @@ public actor DownloadCoordinator {
                     try? await conn.send(.piece(piece: piece, begin: begin, data: data))
                     let now = Date()
                     uploadRate[key, default: []].append((now, data.count))
+                    totalUploaded += Int64(data.count)
                     // Prune entries older than 20s
                     uploadRate[key] = uploadRate[key]?.filter { now.timeIntervalSince($0.timestamp) <= 20 }
                 }
@@ -445,7 +447,7 @@ public actor DownloadCoordinator {
             if Task.isCancelled { break }
             if peers.isEmpty {
                 print("[Coordinator] 🔄 All peers dropped while seeding — re-announcing...")
-                if let response = try? await trackerSession.announce(uploaded: 0, downloaded: 0) {
+                if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0) {
                     for peer in response.peers {
                         let key = "\(peer.ip):\(peer.port)"
                         if bannedPeers.contains(key) { continue }
