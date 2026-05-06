@@ -100,11 +100,12 @@ public actor DownloadCoordinator {
                             }
                         }
                     }
-                    // Spawn tasks for any peers not yet connected, cap at 50
+                    // Spawn tasks for any peers not yet connected, cap at 50 total active
                     let maxPeers = 50
+                    let alreadyActive = peerBitfields.count
                     var spawned = 0
                     for (key, conn) in peers {
-                        if spawned >= maxPeers { break }
+                        if alreadyActive + spawned >= maxPeers { break }
                         if peerBitfields[key] == nil && peerPieces[key] == nil {
                             Task { await self.handlePeer(key: key, conn: conn) }
                             spawned += 1
