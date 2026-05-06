@@ -89,27 +89,33 @@ public actor TrackerSession {
         throw TrackerError.noResponse
     }
 
-    /// Send .stopped event to trackers and stop.
+    /// Send .stopped event to the active tracker in each tier and stop.
     public func stop() async {
         let params = TrackerAnnounce(
             infoHash: infoHash, peerID: peerID, port: port,
             uploaded: totalUploaded, downloaded: totalDownloaded,
             left: totalLeft, event: .stopped
         )
-        for tier in tiers {
-            for url in tier { try? await HTTPTracker.announce(to: url, with: params) }
+        await withTaskGroup(of: Void.self) { group in
+            for tier in tiers {
+                guard let url = tier.first else { continue }
+                group.addTask { try? await HTTPTracker.announce(to: url, with: params) }
+            }
         }
     }
 
-    /// Send .completed event.
+    /// Send .completed event to the active tracker in each tier.
     public func completed() async {
         let params = TrackerAnnounce(
             infoHash: infoHash, peerID: peerID, port: port,
             uploaded: totalUploaded, downloaded: totalDownloaded,
             left: 0, event: .completed
         )
-        for tier in tiers {
-            for url in tier { try? await HTTPTracker.announce(to: url, with: params) }
+        await withTaskGroup(of: Void.self) { group in
+            for tier in tiers {
+                guard let url = tier.first else { continue }
+                group.addTask { try? await HTTPTracker.announce(to: url, with: params) }
+            }
         }
     }
 }
