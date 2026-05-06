@@ -1,6 +1,6 @@
 # Canopy v2.0.5
 
-A native macOS BitTorrent client built with SwiftUI and libtorrent-rasterbar.
+Native SwiftUI BitTorrent client for macOS — zero dependencies
 
 <p align="center">
   <img src="Sources/Assets.xcassets/AppIcon.appiconset/AppIcon.icns" width="128" alt="Canopy icon">
