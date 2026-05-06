@@ -16,6 +16,9 @@ public actor DownloadCoordinator {
     private var pieceAssignedAt: [Int: Date] = [:]
     private var completedPieces: Set<Int> = []     // resume: which pieces are done
     private var pieceFrequency: [Int: Int] = [:]   // rarest-first: peer count per piece
+    private var peerHashFailures: [String: Int] = [:]  // ban tracking: strike count per peer
+    private var bannedPeers: Set<String> = []          // banned peer keys
+    private var pieceBlockSources: [Int: [Int: String]] = [:]  // piece → blockBegin → peerKey
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
 
@@ -95,6 +98,7 @@ public actor DownloadCoordinator {
                         if let response = try? await trackerSession.announce(uploaded: 0, downloaded: 0) {
                             for peer in response.peers {
                                 let key = "\(peer.ip):\(peer.port)"
+                                if bannedPeers.contains(key) { continue }
                                 let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
                                 peers[key] = conn
                             }
@@ -106,6 +110,7 @@ public actor DownloadCoordinator {
                     var spawned = 0
                     for (key, conn) in peers {
                         if alreadyActive + spawned >= maxPeers { break }
+                        if bannedPeers.contains(key) { continue }
                         if peerBitfields[key] == nil && peerPieces[key] == nil {
                             Task { await self.handlePeer(key: key, conn: conn) }
                             spawned += 1
@@ -177,10 +182,13 @@ public actor DownloadCoordinator {
             case .piece(let piece, let begin, let data):
                 print("[Coordinator] 📦 Piece(\(piece), begin=\(begin), len=\(data.count)) from \(key)")
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
+                pieceBlockSources[piece, default: [:]][begin] = key
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
                 }
+                let wasComplete = await pieceManager.isPieceFullyDownloaded(piece: piece)
                 if let verified = await pieceManager.tryAssemble(piece: piece) {
+                    pieceBlockSources.removeValue(forKey: piece)
                     assignedPieces.remove(piece)
                     // Clear piece from ALL peers (endgame may have multiple peers on same piece)
                     for (k, p) in peerPieces where p == piece { peerPieces.removeValue(forKey: k) }
@@ -201,6 +209,31 @@ public actor DownloadCoordinator {
                         return
                     }
                     await requestBlocks(key: key, conn: conn)
+                } else if wasComplete {
+                    // Hash mismatch — blame all peers that contributed to this piece
+                    if let sources = pieceBlockSources.removeValue(forKey: piece) {
+                        let contributors = Set(sources.values)
+                        for peerKey in contributors {
+                            peerHashFailures[peerKey, default: 0] += 1
+                            let strikes = peerHashFailures[peerKey]!
+                            print("[Coordinator] ⚠️ Hash failure from \(peerKey) — strike \(strikes)/3")
+                            if strikes >= 3 {
+                                print("[Coordinator] 🚫 Banning \(peerKey) for repeated hash failures")
+                                bannedPeers.insert(peerKey)
+                                if let p = peers.removeValue(forKey: peerKey) {
+                                    await p.disconnect()
+                                }
+                                if let bf = peerBitfields.removeValue(forKey: peerKey) {
+                                    for p in bf { pieceFrequency[p, default: 1] -= 1 }
+                                }
+                                if let assignedPiece = peerPieces.removeValue(forKey: peerKey) {
+                                    await pieceManager.cancelPending(for: assignedPiece)
+                                    assignedPieces.remove(assignedPiece)
+                                    pieceAssignedAt.removeValue(forKey: assignedPiece)
+                                }
+                            }
+                        }
+                    }
                 }
 
             case .have(let piece):

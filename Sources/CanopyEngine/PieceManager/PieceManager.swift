@@ -81,6 +81,19 @@ public actor PieceManager {
         pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
     }
 
+    /// Whether all blocks for a piece have been downloaded (regardless of hash verification).
+    public func isPieceFullyDownloaded(piece: Int) -> Bool {
+        let actualSize: Int = (piece == pieceCount - 1)
+            ? Int(totalSize - (Int64(piece) * pieceLength))
+            : Int(pieceLength)
+        let blockCount = (actualSize + blockSize - 1) / blockSize
+        let pieceBlocks = downloadedBlocks[piece] ?? [:]
+        for blk in 0..<blockCount {
+            if pieceBlocks[blk * blockSize] == nil { return false }
+        }
+        return true
+    }
+
     /// Try to assemble and verify a complete piece. Returns verified data, or nil if incomplete/wrong.
     public func tryAssemble(piece: Int) -> Data? {
         let actualSize: Int = (piece == pieceCount - 1)
