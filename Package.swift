@@ -34,7 +34,7 @@ let package = Package(
             name: "Canopy",
             dependencies: ["ClibtorrentBridge"],
             path: "Sources",
-            exclude: ["Engine/Bridge", "README.md", "Info.plist", "CanopyEngine", "LiveDownload"],
+            exclude: ["Engine/Bridge", "README.md", "Info.plist", "CanopyEngine", "LiveDownload", "SeedOnly", "LeechOnly"],
             resources: [.process("Assets.xcassets")],
             swiftSettings: [
                 .interoperabilityMode(.C),
@@ -60,6 +60,16 @@ let package = Package(
             name: "LiveDownload",
             dependencies: ["CanopyEngine"],
             path: "Sources/LiveDownload"
+        ),
+        .executableTarget(
+            name: "SeedOnly",
+            dependencies: ["CanopyEngine"],
+            path: "Sources/SeedOnly"
+        ),
+        .executableTarget(
+            name: "LeechOnly",
+            dependencies: ["CanopyEngine"],
+            path: "Sources/LeechOnly"
         ),
     ]
 )

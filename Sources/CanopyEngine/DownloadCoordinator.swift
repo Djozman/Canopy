@@ -156,16 +156,21 @@ public actor DownloadCoordinator {
         }
     }
 
-    private func handlePeer(key: String, conn: PeerConnection) async {
+    private func handlePeer(key: String, conn: PeerConnection, inboundStream: AsyncStream<PeerMessage>? = nil) async {
         let stream: AsyncStream<PeerMessage>
-        do {
-            stream = try await conn.connect()
-        } catch {
-            print("[Coordinator] ⚠️ Failed to connect to \(key): \(error)")
-            peers.removeValue(forKey: key)
-            return
+        if let s = inboundStream {
+            stream = s
+            print("[Coordinator] 🔗 Handling inbound \(key)")
+        } else {
+            do {
+                stream = try await conn.connect()
+            } catch {
+                print("[Coordinator] ⚠️ Failed to connect to \(key): \(error)")
+                peers.removeValue(forKey: key)
+                return
+            }
+            print("[Coordinator] ✅ Connected to \(key)")
         }
-        print("[Coordinator] ✅ Connected to \(key)")
         // Send our bitfield first (BEP 3: must be first message after handshake if we have pieces)
         let bf = await pieceManager.encodedBitfield()
         if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
@@ -467,11 +472,11 @@ public actor DownloadCoordinator {
         let key = "\(peerIP):\(peerPort)"
         let conn = PeerConnection(peer: Peer(ip: peerIP, port: peerPort), infoHash: torrent.infoHash, localPeerID: PeerID.current)
         do {
-            _ = try await conn.accept(connection: connection)
+            let stream = try await conn.accept(connection: connection)
             if peerBitfields.count >= 50 { await conn.disconnect(); return }
             print("[Coordinator] 🔗 Inbound connection from \(key)")
             peers[key] = conn
-            Task { await self.handlePeer(key: key, conn: conn) }
+            Task { await self.handlePeer(key: key, conn: conn, inboundStream: stream) }
         } catch {
             print("[Coordinator] ⚠️ Inbound handshake failed from \(key): \(error)")
             connection.cancel()
