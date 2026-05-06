@@ -133,7 +133,7 @@ public final class TorrentEngine: ObservableObject {
     /// Start polling. Alerts are event-driven; status poll runs every 2s as a fallback.
     public func startPolling(interval: TimeInterval = 2.0) {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.poll()
+            Task { @MainActor in self?.poll() }
         }
     }
 

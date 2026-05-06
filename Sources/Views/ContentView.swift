@@ -153,8 +153,10 @@ struct ContentView: View {
             forName: NSWindow.willCloseNotification,
             object: window, queue: .main
         ) { _ in
-            if PreAddCoordinator.shared.holder?.window === window {
-                PreAddCoordinator.shared.holder = nil
+            Task { @MainActor in
+                if PreAddCoordinator.shared.holder?.window === window {
+                    PreAddCoordinator.shared.holder = nil
+                }
             }
         }
         holder.closeObserver = observer
