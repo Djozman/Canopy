@@ -89,16 +89,33 @@ public actor PieceManager {
         let blockCount = (actualSize + blockSize - 1) / blockSize
 
         let pieceBlocks = downloadedBlocks[piece] ?? [:]
+        // Check if we have all blocks
+        var missing: [Int] = []
+        for blk in 0..<blockCount {
+            if pieceBlocks[blk * blockSize] == nil {
+                missing.append(blk * blockSize)
+            }
+        }
+        if !missing.isEmpty {
+            // Incomplete — not all blocks arrived yet
+            return nil
+        }
+
         var assembled = Data(capacity: actualSize)
         for blk in 0..<blockCount {
             let begin = blk * blockSize
-            guard let data = pieceBlocks[begin] else { return nil }
+            guard var data = pieceBlocks[begin] else { return nil }
+            let remaining = actualSize - assembled.count
+            if data.count > remaining {
+                data = data.prefix(remaining) // truncate padded last block
+            }
             assembled.append(data)
         }
 
         // SHA1 verify
         let hash = SHA1.hash(assembled)
         guard hash == expectedHashes[piece] else {
+            print("[Piece] ❌ Hash mismatch! piece=\(piece) expected=\(expectedHashes[piece].hexString.prefix(16)) got=\(hash.hexString.prefix(16)) size=\(assembled.count)")
             // Hash mismatch — discard all blocks for this piece, will re-request
             for blk in 0..<blockCount {
                 let begin = blk * blockSize
@@ -108,6 +125,7 @@ public actor PieceManager {
             return nil
         }
 
+        print("[Piece] ✅ Verified piece \(piece)")
         // Success — mark as owned and free block memory
         bitfield.set(piece)
         downloadedBlocks.removeValue(forKey: piece)
