@@ -13,6 +13,7 @@ public actor DownloadCoordinator {
     private var peers: [String: PeerConnection] = [:]
     private var peerPieces: [String: Int] = [:]
     private var assignedPieces: Set<Int> = []
+    private var pieceAssignedAt: [Int: Date] = [:]
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
 
@@ -83,6 +84,15 @@ public actor DownloadCoordinator {
                         }
                     }
                     try? await Task.sleep(for: .seconds(10))
+                    // Check for stall — re-queue pieces taking >30s
+                    let now = Date()
+                    let stale = pieceAssignedAt.filter { now.timeIntervalSince($0.value) > 30 }.map(\.key)
+                    for piece in stale {
+                        await pieceManager.cancelPending(for: piece)
+                        assignedPieces.remove(piece)
+                        pieceAssignedAt.removeValue(forKey: piece)
+                        print("[Coordinator] ⏱ Piece \(piece) timed out, re-queuing")
+                    }
                 }
             }
         }
@@ -139,6 +149,7 @@ public actor DownloadCoordinator {
                 if let verified = await pieceManager.tryAssemble(piece: piece) {
                     assignedPieces.remove(piece)
                     peerPieces.removeValue(forKey: key)
+                    pieceAssignedAt.removeValue(forKey: piece)
                     await writePieceToDisk(piece: piece, data: verified)
                     // Announce new piece to all OTHER connected peers
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
@@ -159,6 +170,7 @@ public actor DownloadCoordinator {
                     await pieceManager.cancelPending(for: piece)
                     assignedPieces.remove(piece)
                     peerPieces.removeValue(forKey: key)
+                    pieceAssignedAt.removeValue(forKey: piece)
                 }
 
             default:
@@ -196,6 +208,7 @@ public actor DownloadCoordinator {
 
         assignedPieces.insert(piece)
         peerPieces[key] = piece
+        pieceAssignedAt[piece] = Date()
 
         let requests = await pieceManager.nextBlockRequests(for: piece)
         for req in requests {

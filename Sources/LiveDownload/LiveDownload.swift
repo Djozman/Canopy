@@ -34,8 +34,8 @@ struct LiveDownload {
         let coord = DownloadCoordinator(torrent: torrent, savePath: savePath)
 
         do {
-            print("[LiveTest] Starting download (60s timeout)...")
-            try await withTimeout(seconds: 60) { try await coord.download() }
+            print("[LiveTest] Starting download (300s timeout)...")
+            try await withTimeout(seconds: 300) { try await coord.download() }
             print("[LiveTest] ✅ Download complete!")
         } catch DownloadError.allPeersDisconnected {
             print("[LiveTest] ⚠️ All peers disconnected, retrying once...")
