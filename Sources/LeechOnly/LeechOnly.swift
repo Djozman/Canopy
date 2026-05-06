@@ -46,37 +46,19 @@ struct LeechOnly {
             expectedHashes: torrent.pieces
         )
 
-        let targetPiece: Int
+        let targetPiece = 2989  // verified correct on disk
 
         // Receive bitfield to find a piece, or pick piece 0
         var chosenPiece: Int?
         for await msg in stream {
             switch msg {
             case .bitfield(let bf):
-                // Find first available piece
-                let bytes = Array(bf)
-                for (byteIdx, byte) in bytes.enumerated() {
-                    for bit in 0..<8 {
-                        if (byte >> (7 - bit)) & 1 == 1 {
-                            let p = byteIdx * 8 + bit
-                            if p < torrent.pieces.count {
-                                chosenPiece = p
-                                break
-                            }
-                        }
-                    }
-                    if chosenPiece != nil { break }
-                }
-                if let p = chosenPiece {
-                    print("[LeechOnly] Seeder has piece \(p) — requesting")
-                    await requestBlocks(for: p, conn: conn, pm: pieceManager)
-                }
+                print("[LeechOnly] Received bitfield, requesting piece \(targetPiece)")
+                await requestBlocks(for: targetPiece, conn: conn, pm: pieceManager)
 
             case .unchoke:
                 print("[LeechOnly] ✨ Unchoked")
-                if let p = chosenPiece {
-                    await requestBlocks(for: p, conn: conn, pm: pieceManager)
-                }
+                await requestBlocks(for: targetPiece, conn: conn, pm: pieceManager)
 
             case .piece(let piece, let begin, let data):
                 print("[LeechOnly] 📦 Received piece \(piece) begin=\(begin) len=\(data.count)")

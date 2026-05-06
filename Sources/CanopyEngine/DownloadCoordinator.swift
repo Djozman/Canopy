@@ -485,32 +485,10 @@ public actor DownloadCoordinator {
     /// Call shutdown() to stop.
     public func seed() async {
         guard fileHandles != nil else { return }
-        print("[Coordinator] 🌱 Entering seeding mode")
+        peers.removeAll()
+        print("[Coordinator] 🌱 Entering seeding mode (inbound only)")
         while !isShutdown {
             if Task.isCancelled { break }
-            if peers.isEmpty {
-                print("[Coordinator] 🔄 All peers dropped while seeding — re-announcing...")
-                if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: 0) {
-                    for peer in response.peers {
-                        let key = "\(peer.ip):\(peer.port)"
-                        if bannedPeers.contains(key) { continue }
-                        let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
-                        peers[key] = conn
-                    }
-                }
-            }
-            // Spawn tasks for new peers
-            let maxPeers = 50
-            let alreadyActive = peerBitfields.count
-            var spawned = 0
-            for (key, conn) in peers {
-                if alreadyActive + spawned >= maxPeers { break }
-                if bannedPeers.contains(key) { continue }
-                if peerBitfields[key] == nil && peerPieces[key] == nil {
-                    Task { await self.handlePeer(key: key, conn: conn) }
-                    spawned += 1
-                }
-            }
             if Date().timeIntervalSince(lastChokeRound) >= 30 {
                 lastChokeRound = Date()
                 runChokeAlgorithm()

@@ -1,6 +1,5 @@
-/// Minimal seed-only runner for testing upload.
-/// Run: swift run -c debug SeedOnly 2>/dev/null
-/// Requires: a completed download at /tmp/canopy_live_test/
+/// Seed runner — downloads if needed, then seeds. Run LeechOnly in another terminal.
+/// Run: swift run SeedOnly 2>/dev/null
 
 import Foundation
 import CanopyEngine
@@ -16,33 +15,29 @@ struct SeedOnly {
         }
 
         let savePath = "/tmp/canopy_live_test"
-        // Write a complete resume file so the engine knows all pieces are done
-        let allPieces = Array(0..<torrent.pieces.count)
-        if let resumeData = try? JSONEncoder().encode(allPieces) {
-            try? resumeData.write(to: URL(fileURLWithPath: "\(savePath)/.canopy_resume"), options: .atomic)
-            print("[SeedOnly] Wrote full resume file (\(allPieces.count) pieces)")
-        }
-
         let coord = DownloadCoordinator(torrent: torrent, savePath: savePath)
 
-        do {
-            try await coord.startListener()
-            print("[SeedOnly] 👂 Listener started")
-        } catch {
-            print("[SeedOnly] ⚠️ Listener failed: \(error)")
-        }
+        do { try await coord.startListener(); print("[SeedOnly] 👂 Listening on 6881") }
+        catch { print("[SeedOnly] ⚠️ Listener failed: \(error)") }
 
-        // Download will complete instantly since resume has all pieces
+        // Resume if file is complete
+        let isoPath = "\(savePath)/\(torrent.files[0].path)"
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: isoPath)[.size] as? Int64) ?? 0
+        if fileSize == torrent.totalSize {
+            let allPieces = Array(0..<torrent.pieces.count)
+            try? JSONEncoder().encode(allPieces).write(to: URL(fileURLWithPath: "\(savePath)/.canopy_resume"), options: .atomic)
+            print("[SeedOnly] ✅ Complete file found (\(fileSize) bytes)")
+        }
+        // Always call download() — it loads resume and opens file handles needed for seed()
         do {
             try await coord.download()
-            print("[SeedOnly] ✅ Ready to seed")
+            print("[SeedOnly] ✅ Ready")
         } catch {
-            print("[SeedOnly] Download error: \(error) — seeding anyway")
+            print("[SeedOnly] ⚠️ \(error)")
         }
 
-        print("[SeedOnly] 🌱 Seeding — add peer via transmission-remote then Ctrl+C")
-        print("     transmission-remote -t 1 --peer-add '127.0.0.1:6881'")
-        print("     transmission-remote -t 1 --start")
+        print("[SeedOnly] 🌱 Seeding — run in another terminal:")
+        print("     cd /Users/amm/Canopy && swift run LeechOnly 2>/dev/null")
         await coord.seed()
     }
 }
