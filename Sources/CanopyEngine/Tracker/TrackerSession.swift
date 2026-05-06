@@ -6,7 +6,7 @@ public actor TrackerSession {
     private let infoHash: Data
     private let peerID: Data
     private let port: UInt16
-    private let tiers: [[String]]  // BEP 12 announce-list or [announce]
+    private var tiers: [[String]]  // BEP 12 announce-list or [announce]
 
     private var lastAnnounceTime: Date = .distantPast
     private var currentInterval: Int = 0
