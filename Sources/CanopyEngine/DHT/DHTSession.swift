@@ -13,6 +13,7 @@ public actor DHTSession {
     private var tokenCache: [String: Data] = [:]
     private var txCounter: UInt16 = 0
     private var rotationTask: Task<Void, Never>?
+    private var refreshLoopTask: Task<Void, Never>?
     private var isShutdown = false
 
     public init(nodeID: NodeID, routingTable: RoutingTable) {
@@ -97,7 +98,7 @@ public actor DHTSession {
     }
 
     private func startRefreshLoop() {
-        Task { [weak self] in
+        refreshLoopTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(900))
                 guard let self = self else { break }
@@ -147,7 +148,8 @@ public actor DHTSession {
                     return d
                 }() else { return }
                 let token = generateToken(for: ip)
-                let closest = await routingTable.findClosest(to: NodeID(bytes: infoHashData)!, k: 8)
+                guard let targetID = NodeID(bytes: infoHashData) else { return }
+                let closest = await routingTable.findClosest(to: targetID, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 let cached = peerCache[infoHashData]?.filter { Date().timeIntervalSince($0.storedAt) < 1800 } ?? []
                 var args: [(String, BencodeValue)] = [("token", .string(token)), ("nodes", .string(nodesData))]
@@ -297,7 +299,8 @@ public actor DHTSession {
 
     /// Get peers for an info hash.
     public func getPeers(infoHash: Data) async -> [Peer] {
-        let result = await findNode(target: NodeID(bytes: infoHash)!)
+        guard let targetID = NodeID(bytes: infoHash) else { return [] }
+        let result = await findNode(target: targetID)
         // Try get_peers on the closest nodes
         var peers: [Peer] = []
         for node in result.prefix(8) {
@@ -317,7 +320,7 @@ public actor DHTSession {
 
     /// Announce that we have a torrent.
     public func announcePeer(infoHash: Data, port: UInt16) async {
-        let target = NodeID(bytes: infoHash)!
+        guard let target = NodeID(bytes: infoHash) else { return }
         let closest = await routingTable.findClosest(to: target, k: 8)
         for node in closest {
             guard let token = tokenCache[node.ip] else { continue }
@@ -337,6 +340,8 @@ public actor DHTSession {
         isShutdown = true
         rotationTask?.cancel()
         rotationTask = nil
+        refreshLoopTask?.cancel()
+        refreshLoopTask = nil
         listener?.cancel()
         listener = nil
         print("[DHT] 🛑 Shutdown complete")

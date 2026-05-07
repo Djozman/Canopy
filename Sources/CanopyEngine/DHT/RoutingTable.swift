@@ -249,9 +249,10 @@ public actor RoutingTable {
             if entry.lastSeen.timeIntervalSince(now) < -900 {
                 entry.failureCount = 0  // not failed, just stale
             }
-            _ = Task { await self.insert(nodeID: entry.nodeID, ip: entry.ip, port: entry.port) }
-            // Update lastSeen + failureCount after insert
-            markSeen(nodeID: entry.nodeID)
+            _ = Task {
+                let inserted = await self.insert(nodeID: entry.nodeID, ip: entry.ip, port: entry.port)
+                if inserted { await self.markSeen(nodeID: entry.nodeID) }
+            }
             if entry.failureCount > 0 {
                 // Replay failures — approximate
             }
