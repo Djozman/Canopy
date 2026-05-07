@@ -149,7 +149,7 @@ public func parseDHTMessage(_ data: Data) -> DHTMessageType? {
                   case .string(let d) = tp.1 else { return nil }
             return d
         }()
-        return .response(t: t, r: Dictionary(uniqueKeysWithValues: rDict), token: token)
+        return .response(t: t, r: Dictionary(rDict, uniquingKeysWith: { first, _ in first }), token: token)
 
     case "e":
         guard let ePair = dict.first(where: { $0.0 == "e" }),
@@ -166,7 +166,7 @@ public func parseDHTMessage(_ data: Data) -> DHTMessageType? {
         let args: [String: BencodeValue] = {
             guard let aPair = dict.first(where: { $0.0 == "a" }),
                   case .dict(let aDict) = aPair.1 else { return [:] }
-            return Dictionary(uniqueKeysWithValues: aDict)
+            return Dictionary(aDict, uniquingKeysWith: { first, _ in first })
         }()
         return .query(t: t, type: qType, args: args)
 

@@ -246,6 +246,39 @@ public actor RoutingTable {
         print("[Routing] Loaded \(nodeCount) nodes from disk")
     }
 
+    // MARK: - Timers
+
+    public func startRefreshTimers() {
+        for (i, bucket) in buckets.enumerated() {
+            refreshTimers[i]?.cancel()
+            refreshTimers[i] = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(900))  // 15 minutes
+                    guard let self = self else { break }
+                    await self.refreshBucket(at: i)
+                }
+            }
+        }
+    }
+
+    private func refreshBucket(at index: Int) {
+        guard index < buckets.count else { return }
+        let bucket = buckets[index]
+        // Pick a random ID in the bucket's range
+        let a = Array(bucket.min.bytes)
+        let b = Array(bucket.max.bytes)
+        var randomBytes = [UInt8](repeating: 0, count: 20)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 20, &randomBytes)
+        // Clamp to range
+        var clamped = [UInt8](repeating: 0, count: 20)
+        for i in 0..<20 {
+            clamped[i] = max(a[i], min(b[i], randomBytes[i]))
+        }
+        let targetID = NodeID(bytes: Data(clamped))!
+        // The refresh itself (findNode) is triggered by the caller
+        print("[Routing] 🔄 Refreshing bucket \(index) with target \(targetID.debugDescription)")
+    }
+
     // MARK: - Shutdown
 
     public func shutdown() {

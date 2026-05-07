@@ -1,13 +1,5 @@
 import Foundation
 import Network
-// Token generation uses SHA1.hash from our Crypto module
-
-// MARK: - Query State
-
-struct QueryState {
-    let continuation: CheckedContinuation<DHTResponse, Error>
-    var timeoutTask: Task<Void, Never>
-}
 
 // MARK: - DHT Session
 
@@ -15,11 +7,10 @@ public actor DHTSession {
     public let nodeID: NodeID
     private let routingTable: RoutingTable
     private var listener: NWListener?
-    private var pendingQueries: [Data: QueryState] = [:]   // txID → state
     private var currentSecret: Data
     private var previousSecret: Data?
-    private var peerCache: [Data: [(peer: Peer, storedAt: Date)]] = [:]  // info_hash → peers
-    private var tokenCache: [String: Data] = [:]   // senderIP → token (from get_peers responses)
+    private var peerCache: [Data: [(peer: Peer, storedAt: Date)]] = [:]
+    private var tokenCache: [String: Data] = [:]
     private var txCounter: UInt16 = 0
     private var rotationTask: Task<Void, Never>?
     private var isShutdown = false
@@ -86,13 +77,14 @@ public actor DHTSession {
                 do {
                     let data = try await connection.receive(minimumIncompleteLength: 1, maximumLength: 4096)
                     var ip: String = "unknown"
+                    var port: UInt16 = 0
                     switch connection.endpoint {
-                    case .hostPort(let host, let port):
+                    case .hostPort(let host, let p):
                         ip = "\(host)"
-                        _ = port
+                        port = p.rawValue
                     default: break
                     }
-                    await self.handleIncoming(data: data, from: ip, connection: connection)
+                    await self.handleIncoming(data: data, from: ip, port: port, connection: connection)
                 } catch {
                     // connection closed or error — expected
                 }
@@ -105,7 +97,7 @@ public actor DHTSession {
 
     // MARK: - Incoming Handler
 
-    private func handleIncoming(data: Data, from ip: String, connection: NWConnection) async {
+    private func handleIncoming(data: Data, from ip: String, port: UInt16, connection: NWConnection) async {
         guard let msg = parseDHTMessage(data) else { return }
 
         switch msg {
@@ -118,7 +110,7 @@ public actor DHTSession {
 
             // Update routing table: this node contacted us
             await routingTable.markSeen(nodeID: senderID)
-            await routingTable.insert(nodeID: senderID, ip: ip, port: 0)
+            await routingTable.insert(nodeID: senderID, ip: ip, port: port)
             // Send appropriate response
             let response: Data
             switch type {
@@ -140,7 +132,7 @@ public actor DHTSession {
                     return d
                 }() else { return }
                 let token = generateToken(for: ip)
-                let closest = await routingTable.findClosest(to: senderID, k: 8)
+                let closest = await routingTable.findClosest(to: NodeID(bytes: infoHashData)!, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 let cached = peerCache[infoHashData]?.filter { Date().timeIntervalSince($0.storedAt) < 1800 } ?? []
                 let valuesData = Data(cached.flatMap { encodeCompactPeer($0.peer) })
@@ -185,22 +177,11 @@ public actor DHTSession {
             }
             try? await connection.send(content: response)
 
-        case .response(let t, let r, let token):
-            // Resolve pending query
-            if let state = pendingQueries[t] {
-                state.timeoutTask.cancel()
-                pendingQueries[t] = nil
-                let resp = extractResponse(from: r)
-                state.continuation.resume(returning: resp)
-            }
+        case .response(_, _, _):
+            break  // responses arrive via sendQuery's own connection, not through listener
 
-        case .error(let t, let code, let message):
-            print("[DHT] ⚠️ Error from \(ip) t=\(t.hexString): [\(code)] \(message)")
-            if let state = pendingQueries[t] {
-                state.timeoutTask.cancel()
-                pendingQueries[t] = nil
-                state.continuation.resume(throwing: DHTError.invalidMessage)
-            }
+        case .error(_, let code, let message):
+            print("[DHT] ⚠️ Error from \(ip): [\(code)] \(message)")
         }
     }
 
@@ -212,51 +193,27 @@ public actor DHTSession {
         return makeTransactionID(id)
     }
 
-    private func extractTxID(from data: Data) -> Data? {
-        guard let (value, _) = try? BencodeDecoder.decode(data),
-              case .dict(let dict) = value,
-              let tPair = dict.first(where: { $0.0 == "t" }),
-              case .string(let t) = tPair.1 else { return nil }
-        return t
-    }
-
-    private func storePending(t: Data, cont: CheckedContinuation<DHTResponse, Error>, timeoutTask: Task<Void, Never>) {
-        if let old = pendingQueries[t] { old.timeoutTask.cancel() }
-        pendingQueries[t] = QueryState(continuation: cont, timeoutTask: timeoutTask)
-    }
-
-    private func resolvePending(txID: Data, result: Result<DHTResponse, Error>) {
-        if let state = pendingQueries[txID] {
-            state.timeoutTask.cancel()
-            pendingQueries[txID] = nil
-            switch result {
-            case .success(let resp): state.continuation.resume(returning: resp)
-            case .failure(let err): state.continuation.resume(throwing: err)
-            }
-        }
-    }
-
-    /// Send a query to a remote node and wait for response.
+    /// Send a query to a remote node and wait for response on the same UDP socket.
+    /// Same pattern as UDPTracker: send, then receive on the same connection.
     public func sendQuery(to ip: String, port: UInt16, data: Data) async throws -> DHTResponse {
-        guard let t = extractTxID(from: data) else { throw DHTError.invalidMessage }
         let conn = NWConnection(host: NWEndpoint.Host(ip), port: NWEndpoint.Port(integerLiteral: port), using: .udp)
         conn.start(queue: .global())
         defer { conn.cancel() }
 
-        return try await withCheckedThrowingContinuation { cont in
-            let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(5))
-                await self?.resolvePending(txID: t, result: .failure(DHTError.timeout))
-            }
-            Task { [weak self] in
-                guard let self else { return }
-                await self.storePending(t: t, cont: cont, timeoutTask: timeoutTask)
-                do {
-                    try await conn.send(content: data)
-                } catch {
-                    await self.resolvePending(txID: t, result: .failure(error))
-                }
-            }
+        try await conn.send(content: data)
+        let raw = try await withTimeout(seconds: 5) {
+            try await conn.receive(minimumIncompleteLength: 1, maximumLength: 4096)
+        }
+        guard let msg = parseDHTMessage(raw) else { throw DHTError.invalidMessage }
+        switch msg {
+        case .response(_, let r, let token):
+            let resp = extractResponse(from: r)
+            return DHTResponse(nodes: resp.nodes, values: resp.values, token: token)
+        case .error(_, let code, let message):
+            print("[DHT] ⚠️ Error from \(ip): [\(code)] \(message)")
+            throw DHTError.invalidMessage
+        default:
+            throw DHTError.invalidMessage
         }
     }
 
@@ -368,11 +325,6 @@ public actor DHTSession {
         await routingTable.shutdown()
         listener?.cancel()
         listener = nil
-        for var state in pendingQueries.values {
-            state.timeoutTask.cancel()
-            state.continuation.resume(throwing: CancellationError())
-        }
-        pendingQueries.removeAll()
         print("[DHT] 🛑 Shutdown complete")
     }
 }
