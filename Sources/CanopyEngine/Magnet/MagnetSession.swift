@@ -98,7 +98,7 @@ public actor MagnetSession {
                     }
                 }
 
-            case .extended(let id, let data) where id == localMetadataID:
+            case .extended(let id, let data) where id == remoteMetaID:
                 guard let msg = parseMetadataMessage(from: data) else { continue }
                 switch msg {
                 case .data(let piece, let totalSize, let payload):
