@@ -183,9 +183,18 @@ public func extractResponse(from r: [String: BencodeValue]) -> DHTResponse {
         return decodeCompactNodes(data)
     }()
     let values: [Peer] = {
-        guard let p = r.first(where: { $0.0 == "values" }),
-              case .string(let data) = p.1 else { return [] }
-        return parseCompactPeers(data)
+        guard let p = r.first(where: { $0.0 == "values" }) else { return [] }
+        switch p.1 {
+        case .list(let list):
+            return list.compactMap { item -> Peer? in
+                guard case .string(let d) = item, d.count == 6 else { return nil }
+                return parseCompactPeers(d).first
+            }
+        case .string(let data):
+            return parseCompactPeers(data)
+        default:
+            return []
+        }
     }()
     let token: Data? = {
         guard let p = r.first(where: { $0.0 == "token" }),

@@ -14,7 +14,7 @@ public struct NodeEntry: Codable {
 
 // MARK: - K-Bucket
 
-struct KBucket {
+public struct KBucket {
     let min: NodeID
     let max: NodeID
     var nodes: [NodeEntry]  // max 8, LRU-ordered (tail = most recently seen)
@@ -26,7 +26,18 @@ struct KBucket {
         min <= id && id <= max
     }
 
-    /// Split at arithmetic midpoint: min + (max - min) / 2 using 160-bit unsigned add + right-shift.
+    /// Generate a random NodeID within this bucket's range (for refresh lookups).
+    func randomID() -> NodeID {
+        let a = Array(min.bytes), b = Array(max.bytes)
+        var bytes = [UInt8](repeating: 0, count: 20)
+        _ = SecRandomCopyBytes(kSecRandomDefault, 20, &bytes)
+        for i in 0..<20 {
+            bytes[i] = Swift.max(a[i], Swift.min(b[i], bytes[i]))
+        }
+        return NodeID(bytes: Data(bytes))!
+    }
+
+    /// Split at arithmetic midpoint: min + (max - min) / 2
     /// Returns (lower, upper) where lower covers [min, midpoint] and upper covers (midpoint, max].
     func split() -> (KBucket, KBucket)? {
         guard isFull else { return nil }
@@ -96,7 +107,6 @@ struct KBucket {
 public actor RoutingTable {
     private let ourID: NodeID
     private var buckets: [KBucket]
-    private var refreshTimers: [Int: Task<Void, Never>] = [:]  // bucket index → timer
 
     public init(ourID: NodeID) {
         self.ourID = ourID
@@ -210,6 +220,9 @@ public actor RoutingTable {
         buckets.reduce(0) { $0 + $1.nodes.count }
     }
 
+    /// All buckets (read-only, for external refresh loop).
+    public func allBuckets() -> [KBucket] { buckets }
+
     // MARK: - Persistence
 
     private static let storageURL: URL = {
@@ -244,45 +257,5 @@ public actor RoutingTable {
             }
         }
         print("[Routing] Loaded \(nodeCount) nodes from disk")
-    }
-
-    // MARK: - Timers
-
-    public func startRefreshTimers() {
-        for (i, bucket) in buckets.enumerated() {
-            refreshTimers[i]?.cancel()
-            refreshTimers[i] = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(900))  // 15 minutes
-                    guard let self = self else { break }
-                    await self.refreshBucket(at: i)
-                }
-            }
-        }
-    }
-
-    private func refreshBucket(at index: Int) {
-        guard index < buckets.count else { return }
-        let bucket = buckets[index]
-        // Pick a random ID in the bucket's range
-        let a = Array(bucket.min.bytes)
-        let b = Array(bucket.max.bytes)
-        var randomBytes = [UInt8](repeating: 0, count: 20)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 20, &randomBytes)
-        // Clamp to range
-        var clamped = [UInt8](repeating: 0, count: 20)
-        for i in 0..<20 {
-            clamped[i] = max(a[i], min(b[i], randomBytes[i]))
-        }
-        let targetID = NodeID(bytes: Data(clamped))!
-        // The refresh itself (findNode) is triggered by the caller
-        print("[Routing] 🔄 Refreshing bucket \(index) with target \(targetID.debugDescription)")
-    }
-
-    // MARK: - Shutdown
-
-    public func shutdown() {
-        for timer in refreshTimers.values { timer.cancel() }
-        refreshTimers.removeAll()
     }
 }

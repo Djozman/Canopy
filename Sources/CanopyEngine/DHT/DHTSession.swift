@@ -92,7 +92,22 @@ public actor DHTSession {
         }
         listener?.start(queue: .global())
         startSecretRotation()
+        startRefreshLoop()
         print("[DHT] 👂 Listening on port \(port) (node \(nodeID.debugDescription))")
+    }
+
+    private func startRefreshLoop() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(900))
+                guard let self = self else { break }
+                let buckets = await self.routingTable.allBuckets()
+                for bucket in buckets {
+                    let target = bucket.randomID()
+                    _ = await self.findNode(target: target)
+                }
+            }
+        }
     }
 
     // MARK: - Incoming Handler
@@ -135,10 +150,10 @@ public actor DHTSession {
                 let closest = await routingTable.findClosest(to: NodeID(bytes: infoHashData)!, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 let cached = peerCache[infoHashData]?.filter { Date().timeIntervalSince($0.storedAt) < 1800 } ?? []
-                let valuesData = Data(cached.flatMap { encodeCompactPeer($0.peer) })
                 var args: [(String, BencodeValue)] = [("token", .string(token)), ("nodes", .string(nodesData))]
-                if !valuesData.isEmpty {
-                    args.append(("values", .string(valuesData)))
+                if !cached.isEmpty {
+                    let valuesList = BencodeValue.list(cached.map { .string(encodeCompactPeer($0.peer)) })
+                    args.append(("values", valuesList))
                 }
                 response = buildResponse(txID: t, ourID: nodeID, args: args)
             case "announce_peer":
@@ -322,7 +337,6 @@ public actor DHTSession {
         isShutdown = true
         rotationTask?.cancel()
         rotationTask = nil
-        await routingTable.shutdown()
         listener?.cancel()
         listener = nil
         print("[DHT] 🛑 Shutdown complete")
