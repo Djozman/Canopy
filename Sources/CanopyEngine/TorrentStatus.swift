@@ -1,6 +1,6 @@
 import Foundation
 
-public enum TorrentState: Int {
+public enum TorrentState: Int, Sendable {
     case checkingFiles       = 0
     case downloadingMetadata = 1
     case downloading         = 2
