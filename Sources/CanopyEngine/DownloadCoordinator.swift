@@ -84,7 +84,7 @@ public actor DownloadCoordinator {
         }
     }
 
-    private func saveResumeData() {
+    public func saveResumeData() {
         let path = resumeFilePath()
         guard let data = try? JSONEncoder().encode(completedPieces.sorted()) else { return }
         try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
@@ -738,14 +738,12 @@ public actor DownloadCoordinator {
 
     /// Returns the set of piece indices to skip (mapped entirely to zero-priority files).
     private func skippedPieces() -> Set<Int> {
+        guard !filePriorities.isEmpty else { return [] }
         var skipped = Set<Int>()
-        for (fileIdx, prio) in filePriorities where prio == .dontDownload {
-            for piece in diskMapper.filesForPiece(fileIdx) {
-                // Only skip if ALL files in this piece are zero-priority
-                let pieceFiles = diskMapper.filesForPiece(piece)
-                if pieceFiles.allSatisfy({ filePriorities[$0] == .dontDownload }) {
-                    skipped.insert(piece)
-                }
+        for piece in 0..<torrent.pieces.count {
+            let pieceFiles = diskMapper.filesForPiece(piece)
+            if !pieceFiles.isEmpty && pieceFiles.allSatisfy({ filePriorities[$0] == .dontDownload }) {
+                skipped.insert(piece)
             }
         }
         return skipped

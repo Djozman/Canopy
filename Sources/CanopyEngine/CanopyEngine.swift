@@ -21,6 +21,8 @@ public final class CanopyEngine: ObservableObject {
     private var dhtSession:   DHTSession?
     private nonisolated(unsafe) var pollTimer: Timer?
     private var lastRates: [String: (downloaded: Int64, timestamp: Date)] = [:]  // for rate calculation
+    private var fileProgressCache: [String: [Int64]] = [:]                       // updated every poll tick
+    private var filePrioritiesCache: [String: [Int: FilePriority]] = [:]         // mirrors coordinator state
 
     public init() {}
 
@@ -53,6 +55,7 @@ public final class CanopyEngine: ObservableObject {
         for (id, c) in coordinators where !pendingRemovals.contains(id) {
             guard let meta = torrentMetas[id] else { continue }
             let snap = await c.statusSnapshot()
+            fileProgressCache[id] = await c.fileProgress()
             let prev = lastRates[id]
             let elapsed = prev.map { max(now.timeIntervalSince($0.timestamp), 0.1) } ?? 2.0
             let dlDelta = prev.map { snap.downloaded - $0.downloaded } ?? 0
@@ -134,6 +137,7 @@ public final class CanopyEngine: ObservableObject {
         coordinators[id] = coordinator
         torrentMetas[id] = torrent
         torrentSavePaths[id] = savePath
+        if !filePriorities.isEmpty { filePrioritiesCache[id] = filePriorities }
         let coordinatorRef = coordinator
         let task = Task { [weak self] in
             do {
@@ -159,7 +163,7 @@ public final class CanopyEngine: ObservableObject {
         }
         let name = URL(fileURLWithPath: torrentPath).deletingPathExtension().lastPathComponent
         return PendingTorrent(source: .file(path: torrentPath),
-                              name: name ?? tf.name,
+                              name: name.isEmpty ? tf.name : name,
                               totalSize: tf.totalSize,
                               savePath: defaultSavePath,
                               files: files)
@@ -281,6 +285,7 @@ public final class CanopyEngine: ObservableObject {
 
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
         let id = torrent.id
+        let savePath = torrentSavePaths[id] ?? torrent.savePath
         pendingRemovals.insert(id)
         torrents.removeAll { $0.id == id }
         tasks[id]?.cancel()
@@ -290,19 +295,21 @@ public final class CanopyEngine: ObservableObject {
         }
         torrentMetas.removeValue(forKey: id)
         torrentSavePaths.removeValue(forKey: id)
+        fileProgressCache.removeValue(forKey: id)
+        filePrioritiesCache.removeValue(forKey: id)
         pausedIDs.remove(id)
         lastRates.removeValue(forKey: id)
-        if deleteFiles, let path = torrentSavePaths[id] ?? Optional(torrent.savePath) {
-            let url = URL(fileURLWithPath: path)
-            try? FileManager.default.removeItem(at: url)
+        if deleteFiles {
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: savePath))
         }
     }
 
     public func recheck(_ torrent: TorrentStatus) {
-        guard let c = coordinators[torrent.id] else { return }
-        Task {
+        let id = torrent.id
+        tasks[id]?.cancel()
+        guard let c = coordinators[id] else { return }
+        let task = Task {
             await c.recheck()
-            // Restart download after recheck
             do {
                 try await c.download()
                 await MainActor.run {
@@ -311,6 +318,7 @@ public final class CanopyEngine: ObservableObject {
                 await c.seed()
             } catch {}
         }
+        tasks[id] = task
     }
 
     public func reannounce(_ torrent: TorrentStatus) {
@@ -334,7 +342,7 @@ public final class CanopyEngine: ObservableObject {
 
     public func saveResumeData() {
         for (_, c) in coordinators {
-            Task { await c.statusSnapshot() }  // triggers resume-data write during download loop
+            Task { await c.saveResumeData() }
         }
     }
 
@@ -348,26 +356,16 @@ public final class CanopyEngine: ObservableObject {
         guard let meta = torrentMetas[torrentID],
               index < meta.files.count else { return nil }
         let f = meta.files[index]
-        var prio = 4 // normal
-        if let task = tasks[torrentID] { } // mark usage
-        // Read priority from coordinator via a synchronous-ish bridge
-        // For now, default to normal; the DownloadCoordinator stores it post-start
+        let prio = filePrioritiesCache[torrentID]?[index]?.rawValue ?? FilePriority.normal.rawValue
         return (f.path, f.size, prio)
     }
 
     public func fileProgress(for torrentID: String) -> [Int64] {
-        guard let c = coordinators[torrentID] else { return [] }
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: [Int64] = []
-        Task {
-            result = await c.fileProgress()
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return result
+        fileProgressCache[torrentID] ?? []
     }
 
     public func setFilePriority(_ priority: FilePriority, at index: Int, for torrentID: String) {
+        filePrioritiesCache[torrentID, default: [:]][index] = priority
         guard let c = coordinators[torrentID] else { return }
         Task { await c.setFilePriority(index: index, priority: priority) }
     }
