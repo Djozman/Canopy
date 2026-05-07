@@ -19,12 +19,13 @@ public actor MagnetSession {
 
     public func fetchMetadata() async throws -> TorrentFile {
         // Step 1: collect candidates (concurrent tracker + DHT, merged and deduplicated)
-        let trackerPeers: [Peer] = await fetchFromTrackers()
-        let dhtPeers: [Peer] = await fetchFromDHT()
+        async let trackerPeers = fetchFromTrackers()
+        async let dhtPeers = fetchFromDHT()
+        let (trackerPeersResult, dhtPeersResult) = await (trackerPeers, dhtPeers)
         var seen = Set<String>()
-        let candidates = (trackerPeers + dhtPeers).filter { seen.insert("\($0.ip):\($0.port)").inserted }
+        let candidates = (trackerPeersResult + dhtPeersResult).filter { seen.insert("\($0.ip):\($0.port)").inserted }
         guard !candidates.isEmpty else { throw MagnetError.noPeers }
-        print("[Magnet] Collected \(candidates.count) candidates (tracker: \(trackerPeers.count), DHT: \(dhtPeers.count))")
+        print("[Magnet] Collected \(candidates.count) candidates (tracker: \(trackerPeersResult.count), DHT: \(dhtPeersResult.count))")
 
         // Step 2: download metadata from candidates (serial, up to 20)
         let downloader = MetadataDownloader(infoHash: magnet.infoHash)
