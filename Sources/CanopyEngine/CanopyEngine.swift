@@ -20,7 +20,7 @@ public final class CanopyEngine: ObservableObject {
     private var magnetTasks:  [String: Task<Void, Never>] = [:]
     private var dhtSession:   DHTSession?
     private nonisolated(unsafe) var pollTimer: Timer?
-    private var lastRates: [String: (downloaded: Int64, timestamp: Date)] = [:]  // for rate calculation
+    private var lastRates: [String: (downloaded: Int64, uploaded: Int64, timestamp: Date)] = [:]
     private var fileProgressCache: [String: [Int64]] = [:]                       // updated every poll tick
     private var filePrioritiesCache: [String: [Int: FilePriority]] = [:]         // mirrors coordinator state
 
@@ -59,8 +59,10 @@ public final class CanopyEngine: ObservableObject {
             let prev = lastRates[id]
             let elapsed = prev.map { max(now.timeIntervalSince($0.timestamp), 0.1) } ?? 2.0
             let dlDelta = prev.map { snap.downloaded - $0.downloaded } ?? 0
+            let ulDelta = prev.map { snap.uploaded - $0.uploaded } ?? 0
             let downloadRate = max(0, Int(Double(dlDelta) / elapsed))
-            lastRates[id] = (snap.downloaded, now)
+            let uploadRate   = max(0, Int(Double(ulDelta) / elapsed))
+            lastRates[id] = (snap.downloaded, snap.uploaded, now)
             let eta: Int64 = downloadRate > 0
                 ? Int64((meta.totalSize - snap.downloaded) / Int64(downloadRate))
                 : -1
@@ -69,7 +71,7 @@ public final class CanopyEngine: ObservableObject {
                 id: id, name: meta.name, savePath: torrentSavePaths[id] ?? "",
                 totalSize: meta.totalSize, totalDone: snap.downloaded,
                 totalUploaded: snap.uploaded, downloadRate: downloadRate,
-                uploadRate: 0, progress: snap.totalPieces > 0
+                uploadRate: uploadRate, progress: snap.totalPieces > 0
                     ? Float(snap.completedPieces) / Float(snap.totalPieces) : 0,
                 numSeeds: snap.seederCount, numPeers: snap.connectedPeers,
                 etaSeconds: eta, state: snap.state, isPaused: isPaused,
@@ -140,8 +142,9 @@ public final class CanopyEngine: ObservableObject {
         if !filePriorities.isEmpty { filePrioritiesCache[id] = filePriorities }
         let coordinatorRef = coordinator
         let task = Task { [weak self] in
+            // Port conflict on second torrent is non-fatal — download proceeds without inbound connections
+            try? await coordinatorRef.startListener()
             do {
-                try await coordinatorRef.startListener()
                 try await coordinatorRef.download()
                 await MainActor.run {
                     NotificationCenter.default.post(name: .torrentFinished, object: nil)
@@ -204,12 +207,12 @@ public final class CanopyEngine: ObservableObject {
         onError: @MainActor @escaping () -> Void
     ) -> String? {
         guard let magnet = MagnetLink.parse(uri) else {
-            DispatchQueue.main.async { onError() }
+            onError()
             return nil
         }
         let id = magnet.infoHash.hex
         metadataCallbacks[id, default: []].append { files in
-            DispatchQueue.main.async { onFiles(files) }
+            onFiles(files)
         }
         ensureDHT()
         let session = MagnetSession(magnet: magnet, dhtSession: dhtSession)
@@ -232,7 +235,7 @@ public final class CanopyEngine: ObservableObject {
                 await MainActor.run {
                     self.pendingMagnets.removeValue(forKey: id)
                     self.metadataCallbacks.removeValue(forKey: id)
-                    DispatchQueue.main.async { onError() }
+                    onError()
                 }
             }
         }
@@ -242,10 +245,10 @@ public final class CanopyEngine: ObservableObject {
 
     public func onMetadataReady(
         for infoHash: String,
-        callback: @escaping ([PendingFile]) -> Void
+        callback: @MainActor @escaping ([PendingFile]) -> Void
     ) {
         metadataCallbacks[infoHash, default: []].append { files in
-            DispatchQueue.main.async { callback(files) }
+            callback(files)
         }
     }
 
@@ -299,6 +302,7 @@ public final class CanopyEngine: ObservableObject {
         filePrioritiesCache.removeValue(forKey: id)
         pausedIDs.remove(id)
         lastRates.removeValue(forKey: id)
+        pendingRemovals.remove(id)
         if deleteFiles {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: savePath))
         }
