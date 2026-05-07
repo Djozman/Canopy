@@ -169,26 +169,26 @@ public actor DHTSession {
                           case .string(let d) = p.1 else { return nil }
                     return d
                 }()
-                // Validate token
-                if let announcedToken, !validateToken(announcedToken, for: ip) {
+                // Validate token — must be present and valid
+                guard let announcedToken, validateToken(announcedToken, for: ip) else {
                     response = buildError(txID: t, code: 203, message: "Invalid token")
-                } else {
-                    // Determine port
-                    let impliedPort: Bool = {
-                        guard let p = args.first(where: { $0.0 == "implied_port" }),
-                              case .integer(let v) = p.1 else { return false }
-                        return v == 1
-                    }()
-                    let announcedPort: UInt16 = {
-                        guard let p = args.first(where: { $0.0 == "port" }),
-                              case .integer(let v) = p.1 else { return 6881 }
-                        return UInt16(v)
-                    }()
-                    let port = impliedPort ? UInt16(connection.endpoint.port?.rawValue ?? announcedPort) : announcedPort
-                    let peer = Peer(ip: ip, port: port)
-                    peerCache[infoHashData, default: []].append((peer, Date()))
-                    response = buildResponse(txID: t, ourID: nodeID, args: [])
+                    break  // don't store the peer
                 }
+                // Determine port
+                let impliedPort: Bool = {
+                    guard let p = args.first(where: { $0.0 == "implied_port" }),
+                          case .integer(let v) = p.1 else { return false }
+                    return v == 1
+                }()
+                let announcedPort: UInt16 = {
+                    guard let p = args.first(where: { $0.0 == "port" }),
+                          case .integer(let v) = p.1 else { return 6881 }
+                    return UInt16(v)
+                }()
+                let port = impliedPort ? UInt16(connection.endpoint.port?.rawValue ?? announcedPort) : announcedPort
+                let peer = Peer(ip: ip, port: port)
+                peerCache[infoHashData, default: []].append((peer, Date()))
+                response = buildResponse(txID: t, ourID: nodeID, args: [])
             default:
                 response = buildError(txID: t, code: 204, message: "Unknown method")
             }

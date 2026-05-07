@@ -243,20 +243,18 @@ public actor RoutingTable {
               let nodes = try? JSONDecoder().decode([NodeEntry].self, from: data) else { return }
         let now = Date()
         let cutoff = now.addingTimeInterval(-86400)  // 24 hours
+        var loaded = 0
         for var entry in nodes {
             guard entry.lastSeen > cutoff else { continue }
-            // Mark as Questionable if last seen >15 min ago
             if entry.lastSeen.timeIntervalSince(now) < -900 {
-                entry.failureCount = 0  // not failed, just stale
+                entry.failureCount = 0
             }
-            _ = Task {
+            loaded += 1
+            Task {
                 let inserted = await self.insert(nodeID: entry.nodeID, ip: entry.ip, port: entry.port)
                 if inserted { await self.markSeen(nodeID: entry.nodeID) }
             }
-            if entry.failureCount > 0 {
-                // Replay failures — approximate
-            }
         }
-        print("[Routing] Loaded \(nodeCount) nodes from disk")
+        print("[Routing] Queued \(loaded) nodes from disk for loading")
     }
 }
