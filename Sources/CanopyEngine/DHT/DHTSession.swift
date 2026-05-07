@@ -182,7 +182,7 @@ public actor DHTSession {
                 let announcedPort: UInt16 = {
                     guard let p = args.first(where: { $0.0 == "port" }),
                           case .integer(let v) = p.1 else { return 6881 }
-                    return UInt16(v)
+                    return UInt16(exactly: v) ?? 6881
                 }()
                 let port = impliedPort ? UInt16(connection.endpoint.port?.rawValue ?? announcedPort) : announcedPort
                 let peer = Peer(ip: ip, port: port)
