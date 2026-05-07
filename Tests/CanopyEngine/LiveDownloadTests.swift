@@ -57,13 +57,13 @@ final class LiveDownloadTests: XCTestCase {
         let coord = DownloadCoordinator(torrent: torrent, savePath: savePath)
 
         do {
-            try await withTimeout(seconds: 60) {
+            try await liveTestTimeout(seconds: 60) {
                 try await coord.download()
             }
         } catch DownloadError.allPeersDisconnected {
             print("[LiveTest] All peers disconnected, retrying...")
             let coord2 = DownloadCoordinator(torrent: torrent, savePath: savePath)
-            try await withTimeout(seconds: 60) {
+            try await liveTestTimeout(seconds: 60) {
                 try await coord2.download()
             }
         }
@@ -82,7 +82,7 @@ final class LiveDownloadTests: XCTestCase {
 }
 
 /// Timeout helper for async tests
-func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+func liveTestTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
         group.addTask { try await operation() }
         group.addTask {
