@@ -1,5 +1,3 @@
-// PendingTorrent.swift — holds parsed file info pre-add
-
 import Foundation
 
 public struct PendingTorrent {
@@ -18,13 +16,29 @@ public struct PendingTorrent {
         if case .magnet = source { return true }
         return false
     }
+
+    public init(source: Source, name: String, totalSize: Int64,
+                savePath: String, files: [PendingFile]) {
+        self.source = source
+        self.name = name
+        self.totalSize = totalSize
+        self.savePath = savePath
+        self.files = files
+    }
 }
 
 public struct PendingFile: Identifiable {
     public let id: Int
     public let path: String
     public let size: Int64
-    public var priority: FilePriority = .normal
+    public var priority: FilePriority
+
+    public init(id: Int, path: String, size: Int64, priority: FilePriority = .normal) {
+        self.id = id
+        self.path = path
+        self.size = size
+        self.priority = priority
+    }
 
     public var name: String { URL(fileURLWithPath: path).lastPathComponent }
     public var directory: String {

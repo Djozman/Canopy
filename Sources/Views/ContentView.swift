@@ -2,7 +2,7 @@
 
 import SwiftUI
 import AppKit
-import ClibtorrentBridge
+import CanopyEngine
 
 struct ContentView: View {
     @StateObject private var vm: TorrentListViewModel
@@ -14,9 +14,9 @@ struct ContentView: View {
     // is observable, which would let two showPreAdd notifications both see
     // a nil holder and each create a window. Using a process-wide singleton
     // makes the check reliable across rapid successive calls.
-    let engine: TorrentEngine
+    let engine: CanopyEngine
 
-    init(engine: TorrentEngine) {
+    init(engine: CanopyEngine) {
         self.engine = engine
         _vm = StateObject(wrappedValue: TorrentListViewModel(engine: engine))
     }
@@ -93,14 +93,14 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
             guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
-            let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
+            let handle = (notif.userInfo?["handle"] as? String) ?? nil
             showPreAddWindow(pending: pending, magnetHandle: handle)
         }
     }
 
     // MARK: - Pre-add window
 
-    private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
+    private func showPreAddWindow(pending: PendingTorrent, magnetHandle: String?) {
         // If a pre-add window already exists, update it in place. This makes
         // a second magnet click reuse the existing window instead of opening
         // a new one. We also bring it to front in case it was hidden.
@@ -254,7 +254,7 @@ struct ContentView: View {
 final class PreAddWindowHolder {
     var window: NSWindow?
     var model: PreAddViewModel?
-    var magnetHandle: LTTorrentHandle?
+    var magnetHandle: String?
     var closeObserver: NSObjectProtocol?
 }
 

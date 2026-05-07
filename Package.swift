@@ -2,8 +2,6 @@
 
 import PackageDescription
 
-let libtorrentPrefix = "/opt/homebrew/opt/libtorrent-rasterbar"
-
 let package = Package(
     name: "Canopy",
     platforms: [.macOS(.v13)],
@@ -11,34 +9,12 @@ let package = Package(
         .executable(name: "Canopy", targets: ["Canopy"])
     ],
     targets: [
-        .target(
-            name: "ClibtorrentBridge",
-            path: "Sources/Engine/Bridge/ObjC",
-            sources: ["LibtorrentWrapper.mm"],
-            publicHeadersPath: "include",
-            cxxSettings: [
-                .unsafeFlags([
-                    "-std=c++17",
-                    "-I\(libtorrentPrefix)/include",
-                    "-I/opt/homebrew/opt/boost/include",
-                ]),
-            ],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-lc++",
-                    "\(libtorrentPrefix)/lib/libtorrent-rasterbar.dylib",
-                ]),
-            ]
-        ),
         .executableTarget(
             name: "Canopy",
-            dependencies: ["ClibtorrentBridge"],
+            dependencies: ["CanopyEngine"],
             path: "Sources",
-            exclude: ["Engine/Bridge", "README.md", "Info.plist", "CanopyEngine", "LiveDownload", "SeedOnly", "LeechOnly", "UDPTest"],
-            resources: [.process("Assets.xcassets")],
-            swiftSettings: [
-                .interoperabilityMode(.C),
-            ]
+            exclude: ["README.md", "Info.plist", "CanopyEngine"],
+            resources: [.process("Assets.xcassets")]
         ),
         .testTarget(
             name: "CanopyTests",
@@ -55,26 +31,6 @@ let package = Package(
             dependencies: ["CanopyEngine"],
             path: "Tests/CanopyEngine",
             resources: [.copy("TestTorrents")]
-        ),
-        .executableTarget(
-            name: "LiveDownload",
-            dependencies: ["CanopyEngine"],
-            path: "Sources/LiveDownload"
-        ),
-        .executableTarget(
-            name: "SeedOnly",
-            dependencies: ["CanopyEngine"],
-            path: "Sources/SeedOnly"
-        ),
-        .executableTarget(
-            name: "LeechOnly",
-            dependencies: ["CanopyEngine"],
-            path: "Sources/LeechOnly"
-        ),
-        .executableTarget(
-            name: "UDPTest",
-            dependencies: ["CanopyEngine"],
-            path: "Sources/UDPTest"
         ),
     ]
 )

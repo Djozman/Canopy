@@ -1,7 +1,7 @@
-// FileTreeViewModel.swift — builds/sorts the file tree from bridge data
+// FileTreeViewModel.swift — builds/sorts the file tree from engine data
 
 import Foundation
-import ClibtorrentBridge
+import CanopyEngine
 
 public enum FileSortOrder {
     case nameAsc, nameDesc, sizeAsc, sizeDesc
@@ -12,14 +12,15 @@ public final class FileTreeViewModel: ObservableObject {
     @Published public private(set) var roots: [FileNode] = []
     @Published public var sortOrder: FileSortOrder = .nameAsc
 
+    private let engine: CanopyEngine
+    private let torrentID: String
     private var torrent: TorrentStatus
-    /// Whether the tree has been built at least once. On first build we
-    /// replace roots entirely; on subsequent refreshes we patch in-place
-    /// so user-toggled isExpanded states are preserved.
     private var treeBuilt = false
 
-    public init(torrent: TorrentStatus) {
+    public init(torrent: TorrentStatus, engine: CanopyEngine) {
         self.torrent = torrent
+        self.engine = engine
+        self.torrentID = torrent.id
         refreshFiles()
     }
 
@@ -51,45 +52,34 @@ public final class FileTreeViewModel: ObservableObject {
     // MARK: - Private
 
     private func refreshFiles() {
-        guard let handle = torrent.handle else { return }
-        let count = Int(handle.fileCount)
+        let count = engine.fileCount(for: torrentID)
         guard count > 0 else { return }
 
-        let progress = handle.fileProgressAll() as [AnyObject]
+        let progress = engine.fileProgress(for: torrentID)
         var infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)] = []
 
         for i in 0..<count {
-            var outSize: Int64 = 0
-            var outPriority: Int32 = 0
-            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority) else { continue }
-            let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
-            infos.append((i, path, outSize, down, Int(outPriority)))
+            guard let info = engine.fileInfos(at: i, for: torrentID) else { continue }
+            let down: Int64 = i < progress.count ? progress[i] : 0
+            infos.append((i, info.path, info.size, down, info.priority))
         }
 
         if !treeBuilt {
-            // First build: create all nodes fresh
             roots = buildTree(infos)
             var r = roots
             applySort(&r, order: sortOrder)
             roots = r
             treeBuilt = true
         } else {
-            // Subsequent refreshes: patch existing nodes in-place so
-            // isExpanded / user interactions survive the timer tick.
             patchTree(&roots, infos: infos)
-            // Re-compute folder sizes without replacing nodes
             for node in roots { computeFolderSize(node) }
         }
     }
 
-    /// Walk the existing tree and update mutable data (progress, priority).
-    /// Nodes are matched by fileIndex for leaves and by name for folders.
-    /// We never replace a node object — only mutate its properties.
     private func patchTree(
         _ nodes: inout [FileNode],
         infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
     ) {
-        // Build a flat index -> info map for O(1) lookup
         var byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)] = [:]
         for info in infos {
             byIndex[info.index] = (info.size, info.downloaded, info.priority)
@@ -103,14 +93,11 @@ public final class FileTreeViewModel: ObservableObject {
     ) {
         for node in nodes {
             if let idx = node.fileIndex, let info = byIndex[idx] {
-                // Leaf: update live data only, never touch isExpanded
                 node.downloaded = info.downloaded
-                // Only sync priority if libtorrent disagrees (e.g. after re-check)
                 if let p = FilePriority(rawValue: info.priority), p != node.priority {
                     node.priority = p
                 }
             } else if node.isFolder, var children = node.children {
-                // Folder: recurse, keep the same node object
                 patchNodes(&children, byIndex: byIndex)
                 node.children = children
             }
@@ -118,13 +105,12 @@ public final class FileTreeViewModel: ObservableObject {
     }
 
     private func refreshProgress() {
-        guard let handle = torrent.handle else { return }
-        let count = Int(handle.fileCount)
+        let count = engine.fileCount(for: torrentID)
         guard count > 0 else { return }
-        let progress = handle.fileProgressAll() as [AnyObject]
+        let progress = engine.fileProgress(for: torrentID)
 
         for i in 0..<count {
-            let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
+            let down: Int64 = i < progress.count ? progress[i] : 0
             patchProgress(nodes: roots, fileIndex: i, downloaded: down)
         }
         for node in roots { computeFolderSize(node) }
@@ -146,13 +132,12 @@ public final class FileTreeViewModel: ObservableObject {
             for child in children { applyPriority(priority, to: child) }
         } else {
             node.priority = priority
-            if let idx = node.fileIndex, let handle = torrent.handle {
-                handle.setFilePriority(Int32(priority.rawValue), at: Int32(idx))
+            if let idx = node.fileIndex {
+                engine.setFilePriority(priority, at: idx, for: torrentID)
             }
         }
-
-        if priority != .dontDownload, let handle = torrent.handle {
-            handle.resume()
+        if priority != .dontDownload {
+            engine.resume(torrent)
         }
     }
 

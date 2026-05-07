@@ -1,6 +1,7 @@
 // FilesTab.swift — recursive file tree with checkboxes and sorting
 
 import SwiftUI
+import CanopyEngine
 
 struct FilesTab: View {
     @ObservedObject var vm: FileTreeViewModel

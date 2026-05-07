@@ -2,6 +2,7 @@
 
 import SwiftUI
 import Combine
+import CanopyEngine
 
 enum FilterCategory: String, CaseIterable {
     case all          = "All"
@@ -28,7 +29,7 @@ final class TorrentListViewModel: ObservableObject {
     @Published var torrents: [TorrentStatus] = []
     private var cancellables = Set<AnyCancellable>()
 
-    init(engine: TorrentEngine) {
+    init(engine: CanopyEngine) {
         engine.$torrents
             .receive(on: RunLoop.main)
             .assign(to: &$torrents)

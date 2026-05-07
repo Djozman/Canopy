@@ -2,7 +2,7 @@
 
 import SwiftUI
 import AppKit
-import ClibtorrentBridge
+import CanopyEngine
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// De-duplicate URL openings. macOS sometimes calls open(urls:) twice in
@@ -48,9 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct CanopyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    private let engine = TorrentEngine()
+    private let engine = CanopyEngine()
     @State var pendingPreAdd: PendingTorrent?
-    @State var pendingMagnetHandle: LTTorrentHandle?
+    @State var pendingMagnetHandle: String?
 
     init() {
         CanopyApp.engine = engine
@@ -88,7 +88,7 @@ struct CanopyApp: App {
         }
     }
 
-    static var engine: TorrentEngine!
+    static var engine: CanopyEngine!
 
     static func handleIncomingURL(_ url: URL) {
         let saveDir = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
@@ -110,7 +110,7 @@ struct CanopyApp: App {
                 userInfo: ["pending": pending, "handle": NSNull(), "fetching": true]
             )
             // Start metadata fetch in background
-            var magnetHandle: LTTorrentHandle?
+            var magnetHandle: String?
             magnetHandle = engine.fetchMetadata(
                 uri: url.absoluteString,
                 onFiles: { files in

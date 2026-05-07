@@ -1,6 +1,7 @@
 // TorrentRowView.swift
 
 import SwiftUI
+import CanopyEngine
 
 struct TorrentRowView: View {
     let torrent: TorrentStatus

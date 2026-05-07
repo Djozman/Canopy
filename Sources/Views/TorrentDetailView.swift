@@ -1,6 +1,7 @@
 // TorrentDetailView.swift
 
 import SwiftUI
+import CanopyEngine
 
 enum DetailTab: String, CaseIterable {
     case general  = "General"
@@ -12,14 +13,14 @@ enum DetailTab: String, CaseIterable {
 
 struct TorrentDetailView: View {
     let torrent: TorrentStatus
-    let engine: TorrentEngine
+    let engine: CanopyEngine
     @State private var tab: DetailTab = .general
     @StateObject private var fileTreeVM: FileTreeViewModel
 
-    init(torrent: TorrentStatus, engine: TorrentEngine) {
+    init(torrent: TorrentStatus, engine: CanopyEngine) {
         self.torrent = torrent
         self.engine = engine
-        _fileTreeVM = StateObject(wrappedValue: FileTreeViewModel(torrent: torrent))
+        _fileTreeVM = StateObject(wrappedValue: FileTreeViewModel(torrent: torrent, engine: engine))
     }
 
     var body: some View {

@@ -2,7 +2,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
-import ClibtorrentBridge
+import CanopyEngine
 
 struct AddTorrentSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -14,8 +14,8 @@ struct AddTorrentSheet: View {
     @State private var tab            = 0
     @State private var parseError: String?
 
-    let engine: TorrentEngine
-    let onNext: (PendingTorrent, LTTorrentHandle?) -> Void
+    let engine: CanopyEngine
+    let onNext: (PendingTorrent, String?) -> Void
 
     var body: some View {
         NavigationStack {
@@ -103,7 +103,7 @@ struct AddTorrentSheet: View {
         )
 
         // Add magnet in paused/metadata-only mode, get handle back
-        var magnetHandle: LTTorrentHandle?
+        var magnetHandle: String?
         magnetHandle = engine.fetchMetadata(
             uri: uri,
             onFiles: { files in

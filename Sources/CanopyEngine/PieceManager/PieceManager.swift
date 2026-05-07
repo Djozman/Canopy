@@ -133,6 +133,43 @@ public actor PieceManager {
         downloadedBlocks.removeValue(forKey: piece)
         return .verified(assembled)
     }
+
+    /// Compute per-file download progress by mapping completed pieces to file byte ranges.
+    /// Requires an external DiskMapper to map piece indices to file indices.
+    public func fileProgress(files: [TorrentFile.FileEntry], pieceLength: Int64) -> [Int64] {
+        var downloadedPerFile = [Int64](repeating: 0, count: files.count)
+        let mapper = DiskMapper(files: files, pieceLength: pieceLength)
+        for piece in 0..<pieceCount where bitfield.isSet(piece) {
+            let fileIndices = mapper.filesForPiece(piece)
+            for fi in fileIndices {
+                let pieceStart = Int64(piece) * pieceLength
+                let fileStart = mapper.fileSize(at: fi) > 0 ? fileOffset(for: fi, files: files) : 0
+                let fileEnd = fileStart + files[fi].size
+                let overlap = min(pieceStart + pieceLength, fileEnd) - max(pieceStart, fileStart)
+                if overlap > 0 { downloadedPerFile[fi] += overlap }
+            }
+        }
+        // Clamp downloaded to file sizes (last piece can overshoot)
+        for i in downloadedPerFile.indices {
+            if downloadedPerFile[i] > files[i].size {
+                downloadedPerFile[i] = files[i].size
+            }
+        }
+        return downloadedPerFile
+    }
+
+    /// Clear all completed pieces (for recheck).
+    public func reset() {
+        bitfield.clear()
+        downloadedBlocks.removeAll()
+        pendingBlocks.removeAll()
+    }
+}
+
+private func fileOffset(for fileIndex: Int, files: [TorrentFile.FileEntry]) -> Int64 {
+    var offset: Int64 = 0
+    for i in 0..<fileIndex { offset += files[i].size }
+    return offset
 }
 
 public struct BlockRequest: Hashable {
@@ -151,6 +188,11 @@ struct Bitfield {
     init(size: Int) {
         self.bits = Array(repeating: 0, count: (size + 7) / 8)
         self.count = 0
+    }
+
+    mutating func clear() {
+        bits = Array(repeating: 0, count: bits.count)
+        count = 0
     }
 
     mutating func set(_ index: Int) {

@@ -2,6 +2,7 @@
 
 import Foundation
 import SwiftUI
+import CanopyEngine
 
 // MARK: - Byte formatting
 

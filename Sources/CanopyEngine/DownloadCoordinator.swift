@@ -24,6 +24,8 @@ public actor DownloadCoordinator {
     private var fileHandles: [FileHandle]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
     private var isShutdown = false
+    private var isPaused = false
+    private var pauseContinuation: CheckedContinuation<Void, Never>?
     private var totalUploaded: Int64 = 0
     private var totalDownloaded: Int64 = 0
     private var listener: NWListener?
@@ -37,11 +39,14 @@ public actor DownloadCoordinator {
     private var unchokedPeers: Set<String> = []
     private var lastChokeRound: Date = .distantPast
     private var dhtSession: DHTSession?
+    private var filePriorities: [Int: FilePriority] = [:]
 
-    public init(torrent: TorrentFile, savePath: String, dhtSession: DHTSession? = nil) {
+    public init(torrent: TorrentFile, savePath: String, dhtSession: DHTSession? = nil,
+                filePriorities: [Int: FilePriority] = [:]) {
         self.torrent = torrent
         self.savePath = savePath
         self.dhtSession = dhtSession
+        self.filePriorities = filePriorities
 
         self.pieceManager = PieceManager(
             pieceCount: torrent.pieces.count,
@@ -126,6 +131,13 @@ public actor DownloadCoordinator {
             completionContinuation = cont
             Task {
                 while await !pieceManager.isComplete {
+                    // Pause gate — suspend the loop until resume() is called
+                    if isPaused {
+                        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                            pauseContinuation = c
+                        }
+                    }
+                    if isShutdown { break }
                     if await peers.isEmpty {
                         print("[Coordinator] 🔄 All peers dropped — re-announcing...")
                         if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded) {
@@ -437,7 +449,7 @@ public actor DownloadCoordinator {
 
         // Endgame: >95% done — request remaining pieces from ALL peers
         if await pieceManager.progress > 0.95 {
-            guard let piece = await pieceManager.nextNeededPiece(excluding: []) else { return }
+            guard let piece = await pieceManager.nextNeededPiece(excluding: skippedPieces()) else { return }
             peerPieces[key] = piece
             pieceAssignedAt[piece] = Date()
             let requests = await pieceManager.nextBlockRequests(for: piece)
@@ -449,7 +461,7 @@ public actor DownloadCoordinator {
 
         // Rarest-first: pick the piece this peer has that fewest OTHER peers also have
         let peersPieces = peerBitfields[key] ?? []
-        guard let piece = await rarestPiece(available: peersPieces, excluding: assignedPieces) else { return }
+        guard let piece = await rarestPiece(available: peersPieces, excluding: assignedPieces.union(skippedPieces())) else { return }
 
         assignedPieces.insert(piece)
         peerPieces[key] = piece
@@ -463,11 +475,12 @@ public actor DownloadCoordinator {
 
     private func rarestPiece(available: Set<Int>, excluding: Set<Int>) async -> Int? {
         guard !available.isEmpty else {
-            return await pieceManager.nextNeededPiece(excluding: excluding)
+            return await pieceManager.nextNeededPiece(excluding: excluding.union(skippedPieces()))
         }
+        let skipped = skippedPieces()
         var best: Int?; var bestCount = Int.max
         for piece in available {
-            guard !excluding.contains(piece), !(await pieceManager.hasPiece(piece)) else { continue }
+            guard !excluding.contains(piece), !skipped.contains(piece), !(await pieceManager.hasPiece(piece)) else { continue }
             let freq = pieceFrequency[piece] ?? 0
             if freq < bestCount { bestCount = freq; best = piece }
         }
@@ -633,6 +646,10 @@ public actor DownloadCoordinator {
             completionContinuation = nil
             cont.resume(throwing: CancellationError())
         }
+        if let cont = pauseContinuation {
+            pauseContinuation = nil
+            cont.resume()
+        }
         listener?.cancel()
         listener = nil
         for p in peers.values { await p.disconnect() }
@@ -654,6 +671,84 @@ public actor DownloadCoordinator {
             await dht.shutdown()
         }
         await trackerSession.stop()
+    }
+
+    // MARK: - Status queries (for CanopyEngine polling)
+
+    public func statusSnapshot() -> CoordinatorSnapshot {
+        let seederCount = peerBitfields.values.filter { $0.count == torrent.pieces.count }.count
+        let state: TorrentState = completedPieces.count == torrent.pieces.count
+            ? .seeding
+            : (completedPieces.isEmpty ? .downloading : .downloading)
+        return CoordinatorSnapshot(
+            downloaded: totalDownloaded,
+            uploaded: totalUploaded,
+            completedPieces: completedPieces.count,
+            totalPieces: torrent.pieces.count,
+            connectedPeers: peerBitfields.count,
+            seederCount: seederCount,
+            state: state,
+            isPaused: isPaused,
+            errorMessage: nil
+        )
+    }
+
+    public func fileInfos() -> [(index: Int, path: String, size: Int64)] {
+        torrent.files.enumerated().map { ($0.offset, $0.element.path, $0.element.size) }
+    }
+
+    public func fileProgress() async -> [Int64] {
+        // Use PieceManager's per-file progress mapping
+        await pieceManager.fileProgress(files: torrent.files, pieceLength: torrent.pieceLength)
+    }
+
+    public func setFilePriority(index: Int, priority: FilePriority) {
+        filePriorities[index] = priority
+    }
+
+    // MARK: - Pause / resume
+
+    public func suspend() {
+        isPaused = true
+        saveResumeData()
+    }
+
+    public func resume() {
+        isPaused = false
+        pauseContinuation?.resume()
+        pauseContinuation = nil
+    }
+
+    // MARK: - Recheck / reannounce
+
+    public func recheck() async {
+        await pieceManager.reset()
+        completedPieces.removeAll()
+        try? FileManager.default.removeItem(atPath: resumeFilePath())
+        fileHandles?.forEach { try? $0.close() }
+        fileHandles = nil
+        totalDownloaded = 0
+    }
+
+    public func reannounce() async {
+        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded)
+    }
+
+    // MARK: - Piece selection helper
+
+    /// Returns the set of piece indices to skip (mapped entirely to zero-priority files).
+    private func skippedPieces() -> Set<Int> {
+        var skipped = Set<Int>()
+        for (fileIdx, prio) in filePriorities where prio == .dontDownload {
+            for piece in diskMapper.filesForPiece(fileIdx) {
+                // Only skip if ALL files in this piece are zero-priority
+                let pieceFiles = diskMapper.filesForPiece(piece)
+                if pieceFiles.allSatisfy({ filePriorities[$0] == .dontDownload }) {
+                    skipped.insert(piece)
+                }
+            }
+        }
+        return skipped
     }
 }
 

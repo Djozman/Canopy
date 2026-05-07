@@ -79,4 +79,25 @@ public struct DiskMapper {
         let fileEnd = fileOffsets[idx] + files[idx].size
         return offset < fileEnd ? idx : nil
     }
+
+    /// Return the set of file indices that overlap with a given piece.
+    public func filesForPiece(_ piece: Int) -> Set<Int> {
+        let pieceStart = Int64(piece) * pieceLength
+        let pieceEnd = pieceStart + pieceLength
+        var result = Set<Int>()
+        for (idx, f) in files.enumerated() {
+            let fileStart = fileOffsets[idx]
+            let fileEnd = fileStart + f.size
+            if fileStart < pieceEnd && fileEnd > pieceStart {
+                result.insert(idx)
+            }
+        }
+        return result
+    }
+
+    /// Return total byte size of a torrent file entry.
+    public func fileSize(at index: Int) -> Int64 {
+        guard index < files.count else { return 0 }
+        return files[index].size
+    }
 }

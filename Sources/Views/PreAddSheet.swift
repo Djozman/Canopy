@@ -1,6 +1,7 @@
 // PreAddSheet.swift — file selection before adding torrent
 
 import SwiftUI
+import CanopyEngine
 
 // MARK: - Sheet
 

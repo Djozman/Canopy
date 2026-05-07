@@ -2,6 +2,7 @@
 
 import Foundation
 import SwiftUI
+import CanopyEngine
 
 @MainActor
 public final class PreAddViewModel: ObservableObject {
