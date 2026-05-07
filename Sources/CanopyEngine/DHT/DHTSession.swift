@@ -14,7 +14,6 @@ public actor DHTSession {
     private var txCounter: UInt16 = 0
     private var rotationTask: Task<Void, Never>?
     private var refreshLoopTask: Task<Void, Never>?
-    private var isShutdown = false
 
     public init(nodeID: NodeID, routingTable: RoutingTable) {
         self.nodeID = nodeID
@@ -128,7 +127,7 @@ public actor DHTSession {
             await routingTable.markSeen(nodeID: senderID)
             await routingTable.insert(nodeID: senderID, ip: ip, port: port)
             // Send appropriate response
-            let response: Data
+            var response: Data = buildError(txID: t, code: 203, message: "Protocol error")
             switch type {
             case "ping":
                 response = buildResponse(txID: t, ourID: nodeID, args: [])
@@ -137,7 +136,7 @@ public actor DHTSession {
                     guard let p = args.first(where: { $0.0 == "target" }),
                           case .string(let d) = p.1 else { return nil }
                     return d
-                }(), let targetID = NodeID(bytes: targetData) else { return }
+                }(), let targetID = NodeID(bytes: targetData) else { break }
                 let closest = await routingTable.findClosest(to: targetID, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 response = buildResponse(txID: t, ourID: nodeID, args: [("nodes", .string(nodesData))])
@@ -146,24 +145,24 @@ public actor DHTSession {
                     guard let p = args.first(where: { $0.0 == "info_hash" }),
                           case .string(let d) = p.1 else { return nil }
                     return d
-                }() else { return }
+                }() else { break }
+                guard let targetID = NodeID(bytes: infoHashData) else { break }
                 let token = generateToken(for: ip)
-                guard let targetID = NodeID(bytes: infoHashData) else { return }
                 let closest = await routingTable.findClosest(to: targetID, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 let cached = peerCache[infoHashData]?.filter { Date().timeIntervalSince($0.storedAt) < 1800 } ?? []
-                var args: [(String, BencodeValue)] = [("token", .string(token)), ("nodes", .string(nodesData))]
+                var respArgs: [(String, BencodeValue)] = [("token", .string(token)), ("nodes", .string(nodesData))]
                 if !cached.isEmpty {
                     let valuesList = BencodeValue.list(cached.map { .string(encodeCompactPeer($0.peer)) })
-                    args.append(("values", valuesList))
+                    respArgs.append(("values", valuesList))
                 }
-                response = buildResponse(txID: t, ourID: nodeID, args: args)
+                response = buildResponse(txID: t, ourID: nodeID, args: respArgs)
             case "announce_peer":
                 guard let infoHashData: Data = {
                     guard let p = args.first(where: { $0.0 == "info_hash" }),
                           case .string(let d) = p.1 else { return nil }
                     return d
-                }() else { return }
+                }() else { break }
                 let announcedToken: Data? = {
                     guard let p = args.first(where: { $0.0 == "token" }),
                           case .string(let d) = p.1 else { return nil }
@@ -172,7 +171,7 @@ public actor DHTSession {
                 // Validate token — must be present and valid
                 guard let announcedToken, validateToken(announcedToken, for: ip) else {
                     response = buildError(txID: t, code: 203, message: "Invalid token")
-                    break  // don't store the peer
+                    break
                 }
                 // Determine port
                 let impliedPort: Bool = {
@@ -347,7 +346,6 @@ public actor DHTSession {
     // MARK: - Shutdown
 
     public func shutdown() async {
-        isShutdown = true
         rotationTask?.cancel()
         rotationTask = nil
         refreshLoopTask?.cancel()
