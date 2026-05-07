@@ -86,7 +86,9 @@ public actor PieceManager {
     /// Store a downloaded block.
     public func storeBlock(piece: Int, begin: Int, data: Data) {
         downloadedBlocks[piece, default: [:]][begin] = data
-        pendingBlocks.remove(BlockRequest(piece: piece, begin: begin, length: data.count))
+        // Remove by piece+begin only — peer may have sent a smaller block than requested,
+        // so matching on length would leak the original request.
+        pendingBlocks = pendingBlocks.filter { !($0.piece == piece && $0.begin == begin) }
     }
 
     /// Try to assemble and verify a complete piece.

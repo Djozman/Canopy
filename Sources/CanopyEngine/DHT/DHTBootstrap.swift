@@ -18,9 +18,10 @@ public enum DHTBootstrap {
 
         // Ping each router
         for (ip, port) in routers {
-            let data = buildPing(txID: makeTransactionID(0), ourID: nodeID)
+            let txID = makeTransactionID(0)
+            let data = buildPing(txID: txID, ourID: nodeID)
             do {
-                _ = try await session.sendQuery(to: ip, port: port, data: data)
+                _ = try await session.sendQuery(to: ip, port: port, txID: txID, data: data)
                 anyResponded = true
                 print("[Bootstrap] ✅ Router \(ip):\(port) responded")
             } catch {

@@ -30,7 +30,7 @@ public struct UDPTracker {
         let key = UInt32.random(in: 0...UInt32.max)  // stable across retries
         let request = encodeAnnounce(cid: cid, txID: txID, announce: announce, key: key)
 
-        for i in 0..<4 {
+        for i in 0..<8 {
             try await conn.send(content: request)
             do {
                 let data = try await withTimeout(seconds: 5) {
@@ -53,7 +53,7 @@ public struct UDPTracker {
         let txID = UInt32.random(in: 0...UInt32.max)
         let connectReq = encodeConnect(txID: txID)
 
-        for _ in 0..<4 {
+        for _ in 0..<8 {
             try await conn.send(content: connectReq)
             do {
                 let data = try await withTimeout(seconds: 5) {

@@ -492,10 +492,12 @@ public actor DownloadCoordinator {
         let segments = diskMapper.map(piece: piece, blockBegin: 0, blockLength: data.count)
         var cursor = 0
         for seg in segments {
-            let chunk = data.subdata(in: cursor..<(cursor + seg.length))
+            let end = cursor + seg.length
+            guard end <= data.count, seg.fileIndex < handles.count else { break }
+            let chunk = data.subdata(in: cursor..<end)
             try? handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
             try? handles[seg.fileIndex].write(contentsOf: chunk)
-            cursor += seg.length
+            cursor = end
         }
     }
 

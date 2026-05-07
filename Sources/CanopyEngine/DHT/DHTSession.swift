@@ -215,7 +215,8 @@ public actor DHTSession {
 
     /// Send a query to a remote node and wait for response on the same UDP socket.
     /// Same pattern as UDPTracker: send, then receive on the same connection.
-    public func sendQuery(to ip: String, port: UInt16, data: Data) async throws -> DHTResponse {
+    /// `expectedTxID` is validated against the response's `t` field per BEP 5.
+    public func sendQuery(to ip: String, port: UInt16, txID: Data, data: Data) async throws -> DHTResponse {
         let conn = NWConnection(host: NWEndpoint.Host(ip), port: NWEndpoint.Port(integerLiteral: port), using: .udp)
         conn.start(queue: .global())
         defer { conn.cancel() }
@@ -226,7 +227,8 @@ public actor DHTSession {
         }
         guard let msg = parseDHTMessage(raw) else { throw DHTError.invalidMessage }
         switch msg {
-        case .response(_, let r, let token):
+        case .response(let respTxID, let r, let token):
+            guard respTxID == txID else { throw DHTError.invalidMessage }
             let resp = extractResponse(from: r)
             return DHTResponse(nodes: resp.nodes, values: resp.values, token: token)
         case .error(_, let code, let message):
@@ -261,10 +263,11 @@ public actor DHTSession {
             let results = await withTaskGroup(of: DHTResponse?.self) { group in
                 for node in unqueried {
                     queried.insert(node.nodeID)
-                    let data = buildFindNode(txID: nextTxID(), ourID: self.nodeID, target: target)
+                    let txID = nextTxID()
+                    let data = buildFindNode(txID: txID, ourID: self.nodeID, target: target)
                     group.addTask {
                         do {
-                            return try await self.sendQuery(to: node.ip, port: node.port, data: data)
+                            return try await self.sendQuery(to: node.ip, port: node.port, txID: txID, data: data)
                         } catch {
                             await self.routingTable.markFailed(nodeID: node.nodeID)
                             return nil
@@ -307,15 +310,19 @@ public actor DHTSession {
         guard let targetID = NodeID(bytes: infoHash) else { return [] }
         let result = await findNode(target: targetID)
         // Try get_peers on the closest nodes
+        var seen = Set<String>()
         var peers: [Peer] = []
         for node in result.prefix(8) {
-            let data = buildGetPeers(txID: nextTxID(), ourID: nodeID, infoHash: infoHash)
+            let txID = nextTxID()
+            let data = buildGetPeers(txID: txID, ourID: nodeID, infoHash: infoHash)
             do {
-                let resp = try await sendQuery(to: node.ip, port: node.port, data: data)
+                let resp = try await sendQuery(to: node.ip, port: node.port, txID: txID, data: data)
                 if let token = resp.token {
                     tokenCache[node.ip] = token
                 }
-                peers.append(contentsOf: resp.values)
+                for peer in resp.values where seen.insert("\(peer.ip):\(peer.port)").inserted {
+                    peers.append(peer)
+                }
                 // Insert returned nodes into routing table
                 for node in resp.nodes {
                     _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port)
@@ -333,9 +340,10 @@ public actor DHTSession {
         let closest = await routingTable.findClosest(to: target, k: 8)
         for node in closest {
             guard let token = tokenCache[node.ip] else { continue }
-            let data = buildAnnouncePeer(txID: nextTxID(), ourID: nodeID, infoHash: infoHash, port: port, token: token)
+            let txID = nextTxID()
+            let data = buildAnnouncePeer(txID: txID, ourID: nodeID, infoHash: infoHash, port: port, token: token)
             do {
-                _ = try await sendQuery(to: node.ip, port: node.port, data: data)
+                _ = try await sendQuery(to: node.ip, port: node.port, txID: txID, data: data)
                 await routingTable.markSeen(nodeID: node.nodeID)
             } catch {
                 await routingTable.markFailed(nodeID: node.nodeID)

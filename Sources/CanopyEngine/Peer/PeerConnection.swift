@@ -42,14 +42,18 @@ public actor PeerConnection {
 
         // Wait for connection or failure — only resume once
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let resumed = AtomicFlag()
             conn.stateUpdateHandler = { state in
                 switch state {
-                case .ready: cont.resume()
-                case .failed(let err): cont.resume(throwing: err)
-                case .cancelled: cont.resume(throwing: PeerConnectionError.disconnected)
+                case .ready:
+                    if resumed.testAndSet() { cont.resume() }
+                case .failed(let err):
+                    if resumed.testAndSet() { cont.resume(throwing: err) }
+                case .cancelled:
+                    if resumed.testAndSet() { cont.resume(throwing: PeerConnectionError.disconnected) }
                 default: return
                 }
-                conn.stateUpdateHandler = nil // Clear after terminal state
+                conn.stateUpdateHandler = nil
             }
             conn.start(queue: .global())
         }
@@ -154,5 +158,19 @@ public actor PeerConnection {
         receiveTask = nil
         connection?.cancel()
         connection = nil
+    }
+}
+
+/// One-shot flag for guarding single-resume of CheckedContinuation
+/// across NWConnection state callbacks (which are dispatched on a serial queue
+/// per connection, but defensively guarded here).
+private final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    func testAndSet() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !fired else { return false }
+        fired = true
+        return true
     }
 }

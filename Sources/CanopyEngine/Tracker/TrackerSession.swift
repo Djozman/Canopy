@@ -45,9 +45,10 @@ public actor TrackerSession {
         totalDownloaded = downloaded
         if let left { totalLeft = left }
 
-        // Determine event: .started on first call, nil on subsequent calls
+        // Determine event: .started on first call, nil on subsequent calls.
+        // hasSentStarted is set AFTER a successful announce — if all trackers fail,
+        // we retry as "started" rather than losing the event forever.
         let event: TrackerEvent? = hasSentStarted ? nil : .started
-        hasSentStarted = true
 
         // Check interval — don't re-announce too early
         let now = Date()
@@ -85,6 +86,7 @@ public actor TrackerSession {
                     currentInterval = resp.interval
                     if let mini = resp.minInterval { currentMinInterval = mini }
                     lastAnnounceTime = now
+                    if event == .started { hasSentStarted = true }
                     return resp
                 } catch {
                     // URL failed — try next in tier
