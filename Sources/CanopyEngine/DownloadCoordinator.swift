@@ -96,19 +96,25 @@ public actor DownloadCoordinator {
         await loadResumeData()
         fileHandles = try diskMapper.openFiles(at: savePath)
 
-        let response = try await trackerSession.announce()
-        print("[Coordinator] Tracker returned \(response.peers.count) peers, interval=\(response.interval)")
-        guard !response.peers.isEmpty else { throw DownloadError.noPeers }
-
-        // Start DHT if available and torrent isn't private
+        // Start DHT early so bootstrap can run in parallel with tracker announce
         if let dht = dhtSession, !torrent.isPrivate {
             await dht.loadRoutingTable()
             try? await dht.start(port: 6882)
             Task { await DHTBootstrap.bootstrap(session: dht) }
         }
 
-        // DHT peer supplement if tracker returned few peers
-        if response.peers.count < 10, let dht = dhtSession, !torrent.isPrivate {
+        let firstResponse = try? await trackerSession.announce()
+        let trackerPeerList = firstResponse?.peers ?? []
+        print("[Coordinator] Tracker returned \(trackerPeerList.count) peers")
+
+        for peer in trackerPeerList {
+            let key = "\(peer.ip):\(peer.port)"
+            peers[key] = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+            print("[Coordinator] Connecting to \(key)")
+        }
+
+        // DHT peer supplement — always run in background when DHT is available
+        if let dht = dhtSession, !torrent.isPrivate {
             Task {
                 let dhtPeers = await dht.getPeers(infoHash: torrent.infoHash)
                 for peer in dhtPeers {
@@ -116,14 +122,13 @@ public actor DownloadCoordinator {
                     guard peers[key] == nil, !bannedPeers.contains(key) else { continue }
                     peers[key] = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
                 }
+                print("[Coordinator] DHT returned \(dhtPeers.count) peers")
             }
         }
 
-        for peer in response.peers { // try all returned peers
-            let key = "\(peer.ip):\(peer.port)"
-            let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
-            peers[key] = conn
-            print("[Coordinator] Connecting to \(key)")
+        // If we truly have no way to find peers at all, fail fast
+        if peers.isEmpty && dhtSession == nil {
+            throw DownloadError.noPeers
         }
 
         // Suspend until download completes, re-announcing if all peers drop
@@ -138,14 +143,30 @@ public actor DownloadCoordinator {
                         }
                     }
                     if isShutdown { break }
-                    if await peers.isEmpty {
-                        print("[Coordinator] 🔄 All peers dropped — re-announcing...")
-                        if let response = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded) {
+
+                    let activePeers = peers.count
+                    if activePeers < 5 {
+                        // Use forceAnnounce to bypass the 30-min interval when we're starved for peers.
+                        // forceAnnounce still respects min_interval (usually 60s or unset).
+                        print("[Coordinator] 🔄 Low peers (\(activePeers)) — force re-announcing to tracker...")
+                        if let response = try? await trackerSession.forceAnnounce(uploaded: totalUploaded, downloaded: totalDownloaded) {
                             for peer in response.peers {
                                 let key = "\(peer.ip):\(peer.port)"
                                 if bannedPeers.contains(key) { continue }
-                                let conn = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
-                                peers[key] = conn
+                                peers[key] = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                            }
+                            print("[Coordinator] Re-announce returned \(response.peers.count) peers")
+                        }
+                        // Also query DHT in parallel
+                        if let dht = dhtSession, !torrent.isPrivate {
+                            Task {
+                                let dhtPeers = await dht.getPeers(infoHash: torrent.infoHash)
+                                for peer in dhtPeers {
+                                    let key = "\(peer.ip):\(peer.port)"
+                                    guard peers[key] == nil, !bannedPeers.contains(key) else { continue }
+                                    peers[key] = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                                }
+                                print("[Coordinator] DHT re-query returned \(dhtPeers.count) peers")
                             }
                         }
                     }
@@ -171,6 +192,7 @@ public actor DownloadCoordinator {
                     // Check for stall — re-queue pieces taking >30s
                     let now = Date()
                     let stale = pieceAssignedAt.filter { now.timeIntervalSince($0.value) > 30 }.map(\.key)
+                    var stalePeerKeys: [String] = []
                     for piece in stale {
                         await pieceManager.cancelPending(for: piece)
                         assignedPieces.remove(piece)
@@ -178,8 +200,15 @@ public actor DownloadCoordinator {
                         pieceBlockSources.removeValue(forKey: piece)
                         if let peerKey = peerPieces.first(where: { $0.value == piece })?.key {
                             peerPieces.removeValue(forKey: peerKey)
+                            stalePeerKeys.append(peerKey)
                         }
                         print("[Coordinator] ⏱ Piece \(piece) timed out, re-queuing")
+                    }
+                    // Re-trigger block requests for peers that lost their stale piece assignment
+                    for peerKey in stalePeerKeys {
+                        if let conn = peers[peerKey] {
+                            await requestBlocks(key: peerKey, conn: conn)
+                        }
                     }
                 }
                 // Download complete — signal caller but keep connections alive for seeding

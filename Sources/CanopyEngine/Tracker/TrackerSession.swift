@@ -31,16 +31,30 @@ public actor TrackerSession {
         }
     }
 
-    /// Announce to trackers with BEP 12 tier failover. Shuffles within each tier,
-    /// tries URLs sequentially, promotes successful URL to front. Only moves to next
-    /// tier if the entire current tier fails.
-    /// Respects interval — returns cached result if re-announce not due yet.
-    /// Sends .started on first call, nil event on subsequent calls.
+    /// Announce to trackers with BEP 12 tier failover.
+    /// Respects the tracker's interval — throws `TrackerError.noResponse` if called too early.
     public func announce(
         uploaded: Int64 = 0,
         downloaded: Int64 = 0,
         left: Int64? = nil
     ) async throws -> TrackerResponse {
+        try await doAnnounce(bypassInterval: false, uploaded: uploaded, downloaded: downloaded, left: left)
+    }
+
+    /// Like `announce()` but bypasses the normal re-announce interval.
+    /// Still respects `min_interval` (the tracker's hard throttle, usually 60s or unset).
+    /// Use when all peers have dropped and we urgently need new ones.
+    public func forceAnnounce(
+        uploaded: Int64 = 0,
+        downloaded: Int64 = 0,
+        left: Int64? = nil
+    ) async throws -> TrackerResponse {
+        try await doAnnounce(bypassInterval: true, uploaded: uploaded, downloaded: downloaded, left: left)
+    }
+
+    // MARK: - Core announce logic
+
+    private func doAnnounce(bypassInterval: Bool, uploaded: Int64, downloaded: Int64, left: Int64?) async throws -> TrackerResponse {
         totalUploaded = uploaded
         totalDownloaded = downloaded
         if let left { totalLeft = left }
@@ -50,11 +64,18 @@ public actor TrackerSession {
         // we retry as "started" rather than losing the event forever.
         let event: TrackerEvent? = hasSentStarted ? nil : .started
 
-        // Check interval — don't re-announce too early
         let now = Date()
-        let minWait = TimeInterval(max(currentMinInterval, currentInterval))
-        if now.timeIntervalSince(lastAnnounceTime) < minWait {
-            throw TrackerError.noResponse // caller can retry later
+        if bypassInterval {
+            // Respect min_interval if set, otherwise use a 60s floor to avoid spamming.
+            let floor = currentMinInterval > 0 ? TimeInterval(currentMinInterval) : 60
+            if now.timeIntervalSince(lastAnnounceTime) < floor {
+                throw TrackerError.noResponse
+            }
+        } else {
+            let minWait = TimeInterval(max(currentMinInterval, currentInterval))
+            if now.timeIntervalSince(lastAnnounceTime) < minWait {
+                throw TrackerError.noResponse
+            }
         }
 
         let params = TrackerAnnounce(
@@ -76,10 +97,8 @@ public actor TrackerSession {
                         resp = try await HTTPTracker.announce(to: urls[urlIndex], with: params)
                     }
                     if resp.isFailure {
-                        // Tracker rejected us — try next URL in this tier
                         continue
                     }
-                    // Promote successful URL to front of tier
                     tiers[tierIndex].removeAll { $0 == urls[urlIndex] }
                     tiers[tierIndex].insert(urls[urlIndex], at: 0)
 
