@@ -14,15 +14,16 @@ public let localMetadataID: UInt8 = 2
 
 /// Build the extension handshake payload (raw bencoded dict, no length prefix).
 /// Local extension IDs: ut_pex=localPEXID, ut_metadata=localMetadataID.
-public func buildExtensionHandshake() -> Data {
+public func buildExtensionHandshake(metadataSize: Int? = nil) -> Data {
     let m: BencodeValue = .dict([
         ("ut_pex", .integer(Int64(localPEXID))),
         ("ut_metadata", .integer(Int64(localMetadataID))),
     ])
-    let dict: BencodeValue = .dict([
-        ("m", m),
-    ])
-    return BencodeEncoder.encode(dict)
+    var pairs: [(String, BencodeValue)] = [("m", m)]
+    if let size = metadataSize {
+        pairs.append(("metadata_size", .integer(Int64(size))))
+    }
+    return BencodeEncoder.encode(.dict(pairs))
 }
 
 /// Parse the remote peer's extension handshake dict. Returns nil if malformed.

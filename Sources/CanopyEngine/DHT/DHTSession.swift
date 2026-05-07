@@ -343,6 +343,11 @@ public actor DHTSession {
         }
     }
 
+    // MARK: - Public RoutingTable wrappers
+
+    public func loadRoutingTable() async { await routingTable.loadFromDisk() }
+    public func saveRoutingTable() async { await routingTable.saveToDisk() }
+
     // MARK: - Shutdown
 
     public func shutdown() async {

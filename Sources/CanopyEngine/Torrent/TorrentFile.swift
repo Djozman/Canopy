@@ -10,6 +10,7 @@ public struct TorrentFile: Equatable {
     public let infoHash: Data
     public let totalSize: Int64
     public let isPrivate: Bool
+    public let rawInfoDict: Data?  // raw bencoded info dict bytes; nil only if re-encode fails
 
     public struct FileEntry: Equatable {
         public let path: String

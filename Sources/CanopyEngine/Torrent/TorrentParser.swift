@@ -116,6 +116,12 @@ public struct TorrentParser {
             infoHash = SHA1.hash(encoded)
         }
 
+        // Raw info dict for ut_metadata serving
+        let rawInfo: Data? = {
+            if let r = infoRange(in: data) { return data[r] }
+            return nil
+        }()
+
         return TorrentFile(
             announce: announceStr,
             announceList: announceList,
@@ -125,7 +131,92 @@ public struct TorrentParser {
             files: files,
             infoHash: infoHash,
             totalSize: totalSize,
-            isPrivate: isPrivate
+            isPrivate: isPrivate,
+            rawInfoDict: rawInfo
+        )
+    }
+
+    /// Parse an already-verified info dict (from magnet metadata download).
+    /// rawBytes is the bencoded info dict; caller has already verified SHA1(rawBytes) == infoHash.
+    public static func parse(infoDict rawBytes: Data) throws -> TorrentFile {
+        let (value, _) = try BencodeDecoder.decode(rawBytes)
+        guard case .dict(let infoDict) = value else {
+            throw TorrentParseError.invalidBencode
+        }
+
+        guard let namePair = infoDict.first(where: { $0.0 == "name" }),
+              case .string(let nameData) = namePair.1,
+              let name = String(data: nameData, encoding: .utf8) else {
+            throw TorrentParseError.missingField("name")
+        }
+
+        guard let plPair = infoDict.first(where: { $0.0 == "piece length" }),
+              case .integer(let pieceLength) = plPair.1 else {
+            throw TorrentParseError.missingField("piece length")
+        }
+
+        guard let piecesPair = infoDict.first(where: { $0.0 == "pieces" }),
+              case .string(let piecesData) = piecesPair.1 else {
+            throw TorrentParseError.missingField("pieces")
+        }
+        guard piecesData.count % 20 == 0, !piecesData.isEmpty else {
+            throw TorrentParseError.invalidFormat("pieces length must be a multiple of 20 bytes")
+        }
+        let pieces: [Data] = stride(from: 0, to: piecesData.count, by: 20).map {
+            piecesData.subdata(in: $0..<min($0 + 20, piecesData.count))
+        }
+
+        let isPrivate: Bool = {
+            guard let priv = infoDict.first(where: { $0.0 == "private" }),
+                  case .integer(let v) = priv.1 else { return false }
+            return v == 1
+        }()
+
+        let files: [TorrentFile.FileEntry]
+        if let lengthPair = infoDict.first(where: { $0.0 == "length" }),
+           case .integer(let length) = lengthPair.1 {
+            files = [TorrentFile.FileEntry(path: name, size: length)]
+        } else if let filesPair = infoDict.first(where: { $0.0 == "files" }),
+                   case .list(let fileList) = filesPair.1 {
+            files = try fileList.map { entry in
+                guard case .dict(let fd) = entry else {
+                    throw TorrentParseError.invalidFormat("files entry not a dict")
+                }
+                guard let len = fd.first(where: { $0.0 == "length" }),
+                      case .integer(let size) = len.1 else {
+                    throw TorrentParseError.missingField("files[].length")
+                }
+                guard let pathEl = fd.first(where: { $0.0 == "path" }),
+                      case .list(let comps) = pathEl.1 else {
+                    throw TorrentParseError.missingField("files[].path")
+                }
+                let path = comps.compactMap { comp -> String? in
+                    guard case .string(let d) = comp else { return nil }
+                    return String(data: d, encoding: .utf8)
+                }.joined(separator: "/")
+                guard !path.isEmpty else {
+                    throw TorrentParseError.invalidFormat("empty file path")
+                }
+                return TorrentFile.FileEntry(path: path, size: size)
+            }
+        } else {
+            throw TorrentParseError.missingField("length or files")
+        }
+
+        let totalSize = files.reduce(0) { $0 + $1.size }
+        let infoHash = SHA1.hash(rawBytes)
+
+        return TorrentFile(
+            announce: nil,
+            announceList: nil,
+            name: name,
+            pieceLength: pieceLength,
+            pieces: pieces,
+            files: files,
+            infoHash: infoHash,
+            totalSize: totalSize,
+            isPrivate: isPrivate,
+            rawInfoDict: rawBytes
         )
     }
 

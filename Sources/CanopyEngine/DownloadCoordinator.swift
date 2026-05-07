@@ -36,10 +36,12 @@ public actor DownloadCoordinator {
     private var interestedPeers: Set<String> = []
     private var unchokedPeers: Set<String> = []
     private var lastChokeRound: Date = .distantPast
+    private var dhtSession: DHTSession?
 
-    public init(torrent: TorrentFile, savePath: String) {
+    public init(torrent: TorrentFile, savePath: String, dhtSession: DHTSession? = nil) {
         self.torrent = torrent
         self.savePath = savePath
+        self.dhtSession = dhtSession
 
         self.pieceManager = PieceManager(
             pieceCount: torrent.pieces.count,
@@ -92,6 +94,25 @@ public actor DownloadCoordinator {
         let response = try await trackerSession.announce()
         print("[Coordinator] Tracker returned \(response.peers.count) peers, interval=\(response.interval)")
         guard !response.peers.isEmpty else { throw DownloadError.noPeers }
+
+        // Start DHT if available and torrent isn't private
+        if let dht = dhtSession, !torrent.isPrivate {
+            await dht.loadRoutingTable()
+            try? await dht.start(port: 6882)
+            Task { await DHTBootstrap.bootstrap(session: dht) }
+        }
+
+        // DHT peer supplement if tracker returned few peers
+        if response.peers.count < 10, let dht = dhtSession, !torrent.isPrivate {
+            Task {
+                let dhtPeers = await dht.getPeers(infoHash: torrent.infoHash)
+                for peer in dhtPeers {
+                    let key = "\(peer.ip):\(peer.port)"
+                    guard peers[key] == nil, !bannedPeers.contains(key) else { continue }
+                    peers[key] = PeerConnection(peer: peer, infoHash: torrent.infoHash, localPeerID: PeerID.current)
+                }
+            }
+        }
 
         for peer in response.peers { // try all returned peers
             let key = "\(peer.ip):\(peer.port)"
@@ -152,6 +173,10 @@ public actor DownloadCoordinator {
                 // Download complete — signal caller but keep connections alive for seeding
                 try? FileManager.default.removeItem(atPath: resumeFilePath())
                 await trackerSession.completed()
+                // Announce to DHT that we have this torrent
+                if let dht = dhtSession, !torrent.isPrivate {
+                    Task { await dht.announcePeer(infoHash: torrent.infoHash, port: 6881) }
+                }
                 // We're done downloading — tell peers we're no longer interested
                 for p in peers.values { try? await p.send(.notInterested) }
                 if let c = completionContinuation {
@@ -191,7 +216,7 @@ public actor DownloadCoordinator {
         if reserved.isEmpty {
             print("[Coordinator] ⚠️ Reserved bytes not yet set for \(key) — skipping extension handshake")
         } else if (reserved[5] & 0x10) != 0 {
-            try? await conn.send(.extended(id: 0, data: buildExtensionHandshake()))
+            try? await conn.send(.extended(id: 0, data: buildExtensionHandshake(metadataSize: torrent.rawInfoDict?.count)))
         } else {
             print("[Coordinator] ℹ️ No extension protocol from \(key)")
         }
@@ -354,6 +379,24 @@ public actor DownloadCoordinator {
                         print("[Coordinator] 🔄 PEX discovered \(pKey)")
                     }
                 }
+
+            case .extended(localMetadataID, let data):
+                // Serve ut_metadata (BEP 9) — respond to magnet metadata requests
+                guard let rawInfo = torrent.rawInfoDict,
+                      let msg = parseMetadataMessage(from: data),
+                      case .request(let piece) = msg,
+                      let remoteMetaID = await conn.peerExtensions?.utMetadata else { break }
+                let start = piece * 16384
+                guard start < rawInfo.count else {
+                    try? await conn.send(buildMetadataReject(piece: piece, extensionID: remoteMetaID))
+                    break
+                }
+                let end = min(start + 16384, rawInfo.count)
+                try? await conn.send(buildMetadataData(
+                    piece: piece,
+                    totalSize: rawInfo.count,
+                    data: rawInfo.subdata(in: start..<end),
+                    extensionID: remoteMetaID))
 
             case .extended(let id, _):
                 print("[Coordinator] Unhandled extended msg id=\(id) from \(key)")
@@ -606,6 +649,10 @@ public actor DownloadCoordinator {
         unchokedPeers.removeAll()
         fileHandles?.forEach { try? $0.close() }
         fileHandles = nil
+        if let dht = dhtSession, !torrent.isPrivate {
+            await dht.saveRoutingTable()
+            await dht.shutdown()
+        }
         await trackerSession.stop()
     }
 }
