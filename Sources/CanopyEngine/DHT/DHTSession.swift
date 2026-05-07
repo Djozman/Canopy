@@ -188,6 +188,10 @@ public actor DHTSession {
                 let port = impliedPort ? UInt16(connection.endpoint.port?.rawValue ?? announcedPort) : announcedPort
                 let peer = Peer(ip: ip, port: port)
                 peerCache[infoHashData, default: []].append((peer, Date()))
+                // Prune stale entries for this infohash
+                peerCache[infoHashData] = peerCache[infoHashData]?.filter {
+                    Date().timeIntervalSince($0.storedAt) < 1800
+                }
                 response = buildResponse(txID: t, ourID: nodeID, args: [])
             default:
                 response = buildError(txID: t, code: 204, message: "Unknown method")
@@ -251,6 +255,7 @@ public actor DHTSession {
         let maxRounds = 10
 
         for _ in 0..<maxRounds {
+            let preRoundTop = Set(closest.prefix(8).map(\.nodeID))
             let unqueried = closest.filter { !queried.contains($0.nodeID) }.prefix(3)
             if unqueried.isEmpty { break }
 
@@ -284,15 +289,16 @@ public actor DHTSession {
                 }
             }
 
-            // Sort and check convergence
+            // Sort, deduplicate, and check convergence
             let sorted = newClosest.sorted { a, b in
                 a.nodeID.xor(target) < b.nodeID.xor(target)
             }
-            let newTop = Array(sorted.prefix(8)).map(\.nodeID)
-            let oldTop = closest.prefix(8).map(\.nodeID)
-            closest = sorted
+            var seenIDs = Set<NodeID>()
+            closest = sorted.filter { seenIDs.insert($0.nodeID).inserted }
 
-            if Set(newTop) == Set(oldTop) { break }
+            // Convergence: K-closest unchanged after complete round
+            let postRoundTop = Set(closest.prefix(8).map(\.nodeID))
+            if postRoundTop == preRoundTop { break }
         }
         return Array(closest.prefix(8))
     }
@@ -311,6 +317,10 @@ public actor DHTSession {
                     tokenCache[node.ip] = token
                 }
                 peers.append(contentsOf: resp.values)
+                // Insert returned nodes into routing table
+                for node in resp.nodes {
+                    _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port)
+                }
             } catch {
                 await routingTable.markFailed(nodeID: node.nodeID)
             }
