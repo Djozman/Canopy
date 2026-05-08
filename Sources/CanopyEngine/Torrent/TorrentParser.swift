@@ -79,6 +79,7 @@ public struct TorrentParser {
             files = [TorrentFile.FileEntry(path: name, size: length)]
         } else if let filesPair = infoDict.first(where: { $0.0 == "files" }),
                   case .list(let fileList) = filesPair.1 {
+            // BEP 3: multi-file torrents store files under a directory named `name`
             files = try fileList.map { entry in
                 guard case .dict(let fd) = entry else {
                     throw TorrentParseError.invalidFormat("files entry not a dict")
@@ -91,14 +92,14 @@ public struct TorrentParser {
                       case .list(let comps) = pathEl.1 else {
                     throw TorrentParseError.missingField("files[].path")
                 }
-                let path = comps.compactMap { comp -> String? in
+                let relPath = comps.compactMap { comp -> String? in
                     guard case .string(let d) = comp else { return nil }
                     return String(data: d, encoding: .utf8)
                 }.joined(separator: "/")
-                guard !path.isEmpty else {
+                guard !relPath.isEmpty else {
                     throw TorrentParseError.invalidFormat("empty file path")
                 }
-                return TorrentFile.FileEntry(path: path, size: size)
+                return TorrentFile.FileEntry(path: name + "/" + relPath, size: size)
             }
         } else {
             throw TorrentParseError.missingField("length or files")

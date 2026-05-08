@@ -41,7 +41,18 @@ public actor MagnetSession {
         guard let rawInfo = await downloader.assembleAndVerify() else {
             throw MagnetError.verificationFailed
         }
-        return try TorrentParser.parse(infoDict: rawInfo)
+        var tf = try TorrentParser.parse(infoDict: rawInfo)
+        // Inject tracker URLs from the magnet link — TorrentParser.parse(infoDict:) can't know them
+        if !magnet.trackers.isEmpty {
+            tf = TorrentFile(
+                announce: magnet.trackers.first,
+                announceList: [magnet.trackers],
+                name: tf.name, pieceLength: tf.pieceLength, pieces: tf.pieces,
+                files: tf.files, infoHash: tf.infoHash, totalSize: tf.totalSize,
+                isPrivate: tf.isPrivate, rawInfoDict: tf.rawInfoDict
+            )
+        }
+        return tf
     }
 
     // MARK: - Peer Sources

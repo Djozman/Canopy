@@ -96,13 +96,6 @@ public actor DownloadCoordinator {
         await loadResumeData()
         fileHandles = try diskMapper.openFiles(at: savePath)
 
-        // Start DHT early so bootstrap can run in parallel with tracker announce
-        if let dht = dhtSession, !torrent.isPrivate {
-            await dht.loadRoutingTable()
-            try? await dht.start(port: 6882)
-            Task { await DHTBootstrap.bootstrap(session: dht) }
-        }
-
         let firstResponse = try? await trackerSession.announce()
         let trackerPeerList = firstResponse?.peers ?? []
         print("[Coordinator] Tracker returned \(trackerPeerList.count) peers")
@@ -126,8 +119,8 @@ public actor DownloadCoordinator {
             }
         }
 
-        // If we truly have no way to find peers at all, fail fast
-        if peers.isEmpty && dhtSession == nil {
+        // If tracker failed and we can't use DHT (no session or private torrent), fail fast
+        if peers.isEmpty && (dhtSession == nil || torrent.isPrivate) {
             throw DownloadError.noPeers
         }
 
@@ -149,7 +142,8 @@ public actor DownloadCoordinator {
                         // Use forceAnnounce to bypass the 30-min interval when we're starved for peers.
                         // forceAnnounce still respects min_interval (usually 60s or unset).
                         print("[Coordinator] 🔄 Low peers (\(activePeers)) — force re-announcing to tracker...")
-                        if let response = try? await trackerSession.forceAnnounce(uploaded: totalUploaded, downloaded: totalDownloaded) {
+                        let bytesLeft = max(0, torrent.totalSize - totalDownloaded)
+                        if let response = try? await trackerSession.forceAnnounce(uploaded: totalUploaded, downloaded: totalDownloaded, left: bytesLeft) {
                             for peer in response.peers {
                                 let key = "\(peer.ip):\(peer.port)"
                                 if bannedPeers.contains(key) { continue }
@@ -656,7 +650,7 @@ public actor DownloadCoordinator {
     /// Call shutdown() to stop.
     public func seed() async {
         guard fileHandles != nil else { return }
-        // Announce once so tracker knows we're seeding
+        // Announce with left=0 so tracker knows we're seeding
         try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
         print("[Coordinator] 🌱 Entering seeding mode (inbound only)")
         while !isShutdown {
@@ -665,6 +659,8 @@ public actor DownloadCoordinator {
                 lastChokeRound = Date()
                 await runChokeAlgorithm()
             }
+            // Periodic re-announce — TrackerSession self-throttles via interval, so this is safe to call often
+            try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
             try? await Task.sleep(for: .seconds(10))
         }
     }

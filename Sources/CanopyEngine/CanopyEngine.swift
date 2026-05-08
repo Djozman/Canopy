@@ -380,10 +380,12 @@ public final class CanopyEngine: ObservableObject {
         guard dhtSession == nil else { return }
         let nodeID = NodeID.random()
         let routingTable = RoutingTable(ourID: nodeID)
-        dhtSession = DHTSession(nodeID: nodeID, routingTable: routingTable)
+        let dht = DHTSession(nodeID: nodeID, routingTable: routingTable)
+        dhtSession = dht
         Task {
-            await dhtSession?.loadRoutingTable()
-            try? await dhtSession?.start(port: 6882)
+            await dht.loadRoutingTable()
+            try? await dht.start(port: 6882)
+            await DHTBootstrap.bootstrap(session: dht)
         }
     }
 
