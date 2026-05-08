@@ -150,6 +150,8 @@ public final class CanopyEngine: ObservableObject {
                     NotificationCenter.default.post(name: .torrentFinished, object: nil)
                 }
                 await coordinatorRef.seed()
+            } catch is CancellationError {
+                // Normal shutdown — task was cancelled by remove() or app exit
             } catch {
                 NSLog("[CanopyEngine] Torrent \(torrent.name) failed: \(error)")
             }
