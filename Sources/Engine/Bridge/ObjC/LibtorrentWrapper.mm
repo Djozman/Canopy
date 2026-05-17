@@ -214,6 +214,51 @@ static int mapState(lt::torrent_status::state_t s) {
                           lt::download_priority_t{(std::uint8_t)priority});
 }
 
+- (int)trackerCount {
+    try { return (int)_handle.trackers().size(); } catch (...) { return 0; }
+}
+
+- (NSDictionary *)trackerInfoAtIndex:(int)index {
+    try {
+        auto trackers = _handle.trackers();
+        if (index < 0 || index >= (int)trackers.size()) return nil;
+        auto &t = trackers[index];
+        return @{
+            @"url": [NSString stringWithUTF8String:t.url.c_str()],
+            @"tier": @(t.tier),
+            @"working": @(t.is_working()),
+            @"verified": @(t.verified),
+        };
+    } catch (...) { return nil; }
+}
+
+- (int)peerCount {
+    try {
+        std::vector<lt::peer_info> peers;
+        _handle.get_peer_info(peers);
+        return (int)peers.size();
+    } catch (...) { return 0; }
+}
+
+- (NSDictionary *)peerInfoAtIndex:(int)index {
+    try {
+        std::vector<lt::peer_info> peers;
+        _handle.get_peer_info(peers);
+        if (index < 0 || index >= (int)peers.size()) return nil;
+        auto &p = peers[index];
+        return @{
+            @"ip": [NSString stringWithUTF8String:p.ip.address().to_string().c_str()],
+            @"port": @(p.ip.port()),
+            @"client": [NSString stringWithUTF8String:p.client.c_str()],
+            @"progress": @(p.progress),
+            @"downSpeed": @(p.down_speed),
+            @"upSpeed": @(p.up_speed),
+            @"seeder": @(p.flags & lt::peer_info::seed ? YES : NO),
+            @"encrypted": @(p.flags & lt::peer_info::rc4_encrypted ? YES : NO),
+        };
+    } catch (...) { return nil; }
+}
+
 @end
 
 // ─── LibtorrentSession ─────────────────────────────────────────────────────

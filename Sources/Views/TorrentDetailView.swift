@@ -37,8 +37,8 @@ struct TorrentDetailView: View {
             ScrollView {
                 switch tab {
                 case .general:  GeneralTab(torrent: torrent)
-                case .trackers: TrackersTab()
-                case .peers:    PeersTab()
+                case .trackers: TrackersTab(torrent: torrent, engine: engine)
+                case .peers:    PeersTab(torrent: torrent, engine: engine)
                 case .files:    FilesTab(vm: fileTreeVM)
                                     .onAppear { fileTreeVM.refresh(torrent: torrent) }
                                     .onChange(of: torrent.totalDone) { _ in fileTreeVM.refresh(torrent: torrent) }
@@ -94,51 +94,111 @@ private struct GeneralTab: View {
 // MARK: - Trackers Tab
 
 private struct TrackersTab: View {
-    let trackers = [
-        ("udp://tracker.opentrackr.org:1337/announce", true,  "120 seeds / 45 peers"),
-        ("udp://open.tracker.cl:1337/announce",        true,  "98 seeds / 30 peers"),
-        ("udp://tracker.torrent.eu.org:451/announce",  false, "Connection timed out"),
-        ("http://tracker.bt4g.com:2095/announce",      true,  "44 seeds / 12 peers"),
-    ]
+    let torrent: TorrentStatus
+    let engine: TorrentEngine
+
+    @State private var trackerRows: [TrackerRow] = []
+    @State private var timer: Timer?
 
     var body: some View {
-        Table(trackers.enumerated().map { TrackerRow(id: $0.offset, url: $0.element.0, working: $0.element.1, message: $0.element.2) }) {
-            TableColumn("URL")    { Text($0.url).font(.caption).foregroundStyle($0.working ? Color.primary : Color.red) }
-            TableColumn("Status") { Text($0.working ? "Working" : "Error").font(.caption).foregroundStyle($0.working ? Color.green : Color.red) }
-            TableColumn("Info")   { Text($0.message).font(.caption).foregroundStyle(.secondary) }
+        Table(trackerRows) {
+            TableColumn("URL") { row in
+                Text(row.url).font(.caption).foregroundStyle(row.working ? Color.primary : Color.red)
+            }
+            TableColumn("Tier") { row in
+                Text(String(row.tier)).font(.caption).monospacedDigit()
+            }
+            TableColumn("Status") { row in
+                Text(row.working ? "Working" : "Error").font(.caption)
+                    .foregroundStyle(row.working ? Color.green : Color.red)
+            }
         }
         .padding()
+        .onAppear { refresh(); timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in refresh() } }
+        .onDisappear { timer?.invalidate() }
+    }
+
+    private func refresh() {
+        guard let h = torrent.handle else { return }
+        let count = Int(h.trackerCount)
+        var rows: [TrackerRow] = []
+        for i in 0..<count {
+            if let info = h.trackerInfo(at: Int32(i)) {
+                rows.append(TrackerRow(
+                    id: i,
+                    url: info["url"] as? String ?? "",
+                    tier: (info["tier"] as? NSNumber)?.intValue ?? 0,
+                    working: info["working"] as? Bool ?? false
+                ))
+            }
+        }
+        trackerRows = rows
     }
 }
 
 private struct TrackerRow: Identifiable {
-    let id: Int; let url: String; let working: Bool; let message: String
+    let id: Int; let url: String; let tier: Int; let working: Bool
 }
 
 // MARK: - Peers Tab
 
 private struct PeersTab: View {
-    let peers = [
-        ("192.168.1.45",  "qBittorrent 5.0.0",   0.92, "↓ 1.2 MiB/s", "↑ 45 KiB/s"),
-        ("10.0.0.12",     "Transmission 4.0.3",   0.77, "↓ 800 KiB/s", "↑ 120 KiB/s"),
-        ("203.0.113.5",   "Deluge 2.1.1",         1.0,  "↓ 0",          "↑ 200 KiB/s"),
-        ("198.51.100.22", "μTorrent 3.6.0",       0.33, "↓ 400 KiB/s", "↑ 0"),
-    ]
+    let torrent: TorrentStatus
+    let engine: TorrentEngine
+
+    @State private var peerRows: [PeerRow] = []
+    @State private var timer: Timer?
 
     var body: some View {
-        Table(peers.enumerated().map { PeerRow(id: $0.offset, ip: $0.element.0, client: $0.element.1, progress: $0.element.2, down: $0.element.3, up: $0.element.4) }) {
-            TableColumn("IP")       { Text($0.ip).font(.caption).monospacedDigit() }
-            TableColumn("Client")   { Text($0.client).font(.caption) }
-            TableColumn("Progress") { Text(String(format: "%.0f%%", $0.progress * 100)).font(.caption).monospacedDigit() }
-            TableColumn("Down")     { Text($0.down).font(.caption).foregroundStyle(.blue) }
-            TableColumn("Up")       { Text($0.up).font(.caption).foregroundStyle(.green) }
+        Table(peerRows) {
+            TableColumn("IP") { row in
+                Text(row.ip).font(.caption).monospacedDigit()
+            }
+            TableColumn("Port") { row in
+                Text(String(row.port)).font(.caption).monospacedDigit()
+            }
+            TableColumn("Client") { row in
+                Text(row.client).font(.caption)
+            }
+            TableColumn("Progress") { row in
+                Text(String(format: "%.0f%%", row.progress * 100)).font(.caption).monospacedDigit()
+            }
+            TableColumn("Down") { row in
+                Text(formatBytes(Int64(row.downSpeed)) + "/s").font(.caption).foregroundStyle(.blue)
+            }
+            TableColumn("Up") { row in
+                Text(formatBytes(Int64(row.upSpeed)) + "/s").font(.caption).foregroundStyle(.green)
+            }
         }
         .padding()
+        .onAppear { refresh(); timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in refresh() } }
+        .onDisappear { timer?.invalidate() }
+    }
+
+    private func refresh() {
+        guard let h = torrent.handle else { return }
+        let count = Int(h.peerCount)
+        var rows: [PeerRow] = []
+        for i in 0..<count {
+            if let info = h.peerInfo(at: Int32(i)) {
+                rows.append(PeerRow(
+                    id: i,
+                    ip: info["ip"] as? String ?? "",
+                    port: (info["port"] as? NSNumber)?.intValue ?? 0,
+                    client: info["client"] as? String ?? "",
+                    progress: (info["progress"] as? NSNumber)?.doubleValue ?? 0,
+                    downSpeed: (info["downSpeed"] as? NSNumber)?.intValue ?? 0,
+                    upSpeed: (info["upSpeed"] as? NSNumber)?.intValue ?? 0
+                ))
+            }
+        }
+        peerRows = rows
     }
 }
 
 private struct PeerRow: Identifiable {
-    let id: Int; let ip: String; let client: String; let progress: Double; let down: String; let up: String
+    let id: Int; let ip: String; let port: Int; let client: String
+    let progress: Double; let downSpeed: Int; let upSpeed: Int
 }
 
 // MARK: - Content Tab (piece map)

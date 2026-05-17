@@ -122,7 +122,7 @@ public final class UpdateChecker: ObservableObject {
             await MainActor.run { [weak self] in
                 self?.installState = .relaunching
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NSApp.terminate(nil)
+                    exit(0)
                 }
             }
         } catch {
