@@ -2,6 +2,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 import ClibtorrentBridge
 
 struct AddTorrentSheet: View {
@@ -26,9 +27,12 @@ struct AddTorrentSheet: View {
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
+                .onChange(of: tab) { newTab in
+                    if newTab == 0 { checkClipboard() }
+                }
 
                 if tab == 0 {
-                    Section("Magnet URI") {
+                    Section("Magnet URL") {
                         TextEditor(text: $magnetURI)
                             .font(.system(.caption, design: .monospaced))
                             .frame(minHeight: 60)
@@ -79,6 +83,14 @@ struct AddTorrentSheet: View {
         } message: {
             Text(parseError ?? "")
         }
+        .onAppear { checkClipboard() }
+    }
+
+    private func checkClipboard() {
+        guard magnetURI.isEmpty else { return }
+        guard let str = NSPasteboard.general.string(forType: .string),
+              str.hasPrefix("magnet:?") else { return }
+        magnetURI = str
     }
 
     // MARK: - Magnet: open window immediately, fetch metadata in background
@@ -87,7 +99,6 @@ struct AddTorrentSheet: View {
         let uri  = magnetURI
         let save = saveDir
 
-        // Extract display name from dn= if present
         var displayName = "Fetching metadata\u{2026}"
         if let comps = URLComponents(string: uri),
            let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
@@ -102,15 +113,10 @@ struct AddTorrentSheet: View {
             files:     []
         )
 
-        // Add magnet in paused/metadata-only mode, get handle back
         var magnetHandle: LTTorrentHandle?
         magnetHandle = engine.fetchMetadata(
             uri: uri,
             onFiles: { files in
-                // Metadata arrived. Push the file list into the open
-                // PreAddSheet via the same notification ContentView listens
-                // to. ContentView.showPreAddWindow updates the existing
-                // window in-place when currentPreAddHolder is set.
                 let updated = PendingTorrent(
                     source:    .magnet(uri: uri),
                     name:      displayName,
