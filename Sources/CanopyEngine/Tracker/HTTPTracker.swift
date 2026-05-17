@@ -28,6 +28,7 @@ public struct HTTPTracker {
 
         var request = URLRequest(url: requestURL)
         request.timeoutInterval = 15
+        request.setValue("Canopy/1.0", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -44,6 +45,7 @@ public struct HTTPTracker {
 
     /// Announce to all tracker URLs in order until one succeeds.
     /// - Parameter urls: Tracker URLs in priority order.
+    /// Each URL is retried up to 3 times with exponential backoff for transient errors.
     ///
     /// NOTE: This flattens BEP 12 tiered `announce-list` into a single sequence.
     /// A proper implementation would shuffle URLs within each tier, try them
@@ -60,13 +62,47 @@ public struct HTTPTracker {
 
         for url in urls {
             do {
-                return try await announce(to: url, with: params)
+                return try await announceWithRetry(to: url, with: params, attempts: 3)
             } catch {
                 lastError = error
-                // Try next tracker in the tier list
             }
         }
 
+        throw lastError
+    }
+
+    /// Announce to a single URL with retry logic for transient failures.
+    private static func announceWithRetry(to url: String, with params: TrackerAnnounce,
+                                          attempts: Int) async throws -> TrackerResponse {
+        var lastError: Error = TrackerError.noResponse
+        for attempt in 0..<attempts {
+            do {
+                return try await announce(to: url, with: params)
+            } catch let error as TrackerError {
+                lastError = error
+                // Don't retry on client errors (4xx) or parse failures
+                if case .httpError(let code) = error, (400...499).contains(code) {
+                    throw error
+                }
+                if case .invalidURL = error { throw error }
+            } catch let error as URLError {
+                lastError = error
+                // Only retry on transient network errors
+                switch error.code {
+                case .timedOut, .cannotConnectToHost, .networkConnectionLost,
+                     .dnsLookupFailed, .cannotFindHost:
+                    break  // retryable
+                default:
+                    throw error
+                }
+            } catch {
+                throw error
+            }
+            if attempt < attempts - 1 {
+                let delay = Double(1 << attempt)  // 1s, 2s, 4s
+                try? await Task.sleep(for: .seconds(delay))
+            }
+        }
         throw lastError
     }
 
@@ -137,21 +173,29 @@ public struct HTTPTracker {
 
     // MARK: - Peer list parsing
 
-    /// Parse peers from both compact (6-byte) and non-compact (list-of-dicts) formats.
+    /// Parse peers from both compact (6-byte IPv4, 18-byte IPv6) and non-compact formats.
     static func parsePeers(from dict: [(String, BencodeValue)]) throws -> [Peer] {
-        // Try compact format first (preferred)
+        var peers: [Peer] = []
+
+        // Try compact IPv4 format first (preferred)
         if let p = dict.first(where: { $0.0 == "peers" }),
            case .string(let compactData) = p.1 {
-            return parseCompactPeers(compactData)
+            peers.append(contentsOf: parseCompactPeers(compactData))
+        }
+
+        // Try compact IPv6 format (BEP 7)
+        if let p = dict.first(where: { $0.0 == "peers6" }),
+           case .string(let compactData) = p.1 {
+            peers.append(contentsOf: parseCompactPeers6(compactData))
         }
 
         // Try non-compact (list of dicts)
         if let p = dict.first(where: { $0.0 == "peers" }),
            case .list(let peerList) = p.1 {
-            return try parsePlainPeers(peerList)
+            peers.append(contentsOf: try parsePlainPeers(peerList))
         }
 
-        return []
+        return peers
     }
 
     /// Parse non-compact peer list (list of dicts with "ip" and "port" keys).

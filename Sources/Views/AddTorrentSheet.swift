@@ -102,15 +102,13 @@ struct AddTorrentSheet: View {
             files:     []
         )
 
-        // Add magnet in paused/metadata-only mode, get handle back
-        var magnetHandle: String?
-        magnetHandle = engine.fetchMetadata(
+        // The handle is the infohash hex — derivable from the URI before the
+        // fetch starts, so closures can capture it as `let` without the
+        // sendable-mutation warning.
+        let handle = engine.magnetHandle(for: uri)
+        let magnetHandle = engine.fetchMetadata(
             uri: uri,
             onFiles: { files in
-                // Metadata arrived. Push the file list into the open
-                // PreAddSheet via the same notification ContentView listens
-                // to. ContentView.showPreAddWindow updates the existing
-                // window in-place when currentPreAddHolder is set.
                 let updated = PendingTorrent(
                     source:    .magnet(uri: uri),
                     name:      displayName,
@@ -120,11 +118,17 @@ struct AddTorrentSheet: View {
                 )
                 NotificationCenter.default.post(
                     name: .showPreAdd, object: nil,
-                    userInfo: ["pending": updated, "handle": magnetHandle as Any]
+                    userInfo: ["pending": updated, "handle": handle as Any]
                 )
             },
             onError: {
                 parseError = "Could not fetch magnet metadata."
+            },
+            onProgress: { msg in
+                NotificationCenter.default.post(
+                    name: .magnetMetadataProgress, object: nil,
+                    userInfo: ["handle": handle as Any, "message": msg]
+                )
             }
         )
 

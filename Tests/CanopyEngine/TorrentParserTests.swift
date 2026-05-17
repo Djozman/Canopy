@@ -66,9 +66,9 @@ final class TorrentParserTests: XCTestCase {
 
         XCTAssertEqual(tf.name, "test")
         XCTAssertEqual(tf.files.count, 2)
-        XCTAssertEqual(tf.files[0].path, "file1")
+        XCTAssertEqual(tf.files[0].path, "test/file1")
         XCTAssertEqual(tf.files[0].size, 100)
-        XCTAssertEqual(tf.files[1].path, "folder/file2")
+        XCTAssertEqual(tf.files[1].path, "test/folder/file2")
         XCTAssertEqual(tf.files[1].size, 200)
         XCTAssertEqual(tf.totalSize, 300)
         XCTAssertTrue(tf.isPrivate)

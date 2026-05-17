@@ -55,11 +55,11 @@ public actor MetadataDownloader {
         }
         let hash = SHA1.hash(assembled)
         guard hash == infoHash else {
-            print("[MetadataDownloader] ❌ SHA1 mismatch — resetting")
+            Log.engine.error("❌ SHA1 mismatch — resetting")
             reset()
             return nil
         }
-        print("[MetadataDownloader] ✅ Metadata verified (\(assembled.count) bytes)")
+        Log.engine.info("✅ Metadata verified (\(assembled.count) bytes)")
         return assembled
     }
 

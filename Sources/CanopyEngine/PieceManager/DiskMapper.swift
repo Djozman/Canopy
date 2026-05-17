@@ -1,7 +1,7 @@
 import Foundation
 
 /// Maps (pieceIndex, blockOffset) → (fileIndex, fileOffset, length) for multi-file torrents.
-public struct DiskMapper {
+public struct DiskMapper: Sendable {
     private let files: [TorrentFile.FileEntry]
     private let pieceLength: Int64
 
@@ -41,11 +41,14 @@ public struct DiskMapper {
     }
 
     /// Return file handles for all files, created/opened at the given root path.
-    /// Preserves the torrent's directory structure.
-    public func openFiles(at rootPath: String) throws -> [FileHandle] {
+    /// Files whose index is in `skippedFiles` are not created on disk and the
+    /// returned handle for that index is nil. Preserves the torrent's directory
+    /// structure for files that are kept.
+    public func openFiles(at rootPath: String, skippedFiles: Set<Int> = []) throws -> [FileHandle?] {
         let root = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
         let fm = FileManager.default
-        return try files.map { entry in
+        return try files.enumerated().map { (idx, entry) in
+            if skippedFiles.contains(idx) { return nil }
             let filePath = root + entry.path
             let dir = (filePath as NSString).deletingLastPathComponent
             try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)

@@ -6,36 +6,80 @@ public enum MagnetError: Error {
     case verificationFailed
 }
 
+public typealias MagnetProgress = @Sendable (String) -> Void
+
 /// Orchestrates metadata download from a magnet link.
-/// Collects peers from tracker hints + DHT concurrently, then downloads metadata pieces serially.
+/// Collects peers from tracker hints + DHT concurrently, then downloads metadata pieces in parallel.
 public actor MagnetSession {
     private let magnet: MagnetLink
     private let dhtSession: DHTSession?
+    private var progress: MagnetProgress?
 
     public init(magnet: MagnetLink, dhtSession: DHTSession? = nil) {
         self.magnet = magnet
         self.dhtSession = dhtSession
     }
 
+    public func setProgress(_ cb: @escaping MagnetProgress) {
+        self.progress = cb
+    }
+
+    private func report(_ msg: String) {
+        Log.engine.info("\(msg)")
+        progress?(msg)
+    }
+
     public func fetchMetadata() async throws -> TorrentFile {
-        // Step 1: collect candidates (concurrent tracker + DHT, merged and deduplicated)
+        // Hard ceiling on the entire fetch — better to fail fast than spin forever.
+        return try await withTimeout(seconds: 45) {
+            try await self.fetchMetadataInner()
+        }
+    }
+
+    private func fetchMetadataInner() async throws -> TorrentFile {
+        report("Searching for peers…")
         async let trackerPeers = fetchFromTrackers()
         async let dhtPeers = fetchFromDHT()
         let (trackerPeersResult, dhtPeersResult) = await (trackerPeers, dhtPeers)
         var seen = Set<String>()
         let candidates = (trackerPeersResult + dhtPeersResult).filter { seen.insert("\($0.ip):\($0.port)").inserted }
-        guard !candidates.isEmpty else { throw MagnetError.noPeers }
-        print("[Magnet] Collected \(candidates.count) candidates (tracker: \(trackerPeersResult.count), DHT: \(dhtPeersResult.count))")
-
-        // Step 2: download metadata from candidates (serial, up to 20)
-        let downloader = MetadataDownloader(infoHash: magnet.infoHash)
-        for peer in candidates.prefix(20) {
-            guard !(await downloader.isComplete) else { break }
-            await fetchFromPeer(peer, into: downloader)
+        guard !candidates.isEmpty else {
+            report("No peers found (trackers + DHT both empty)")
+            throw MagnetError.noPeers
         }
+        report("Found \(candidates.count) peers (tracker: \(trackerPeersResult.count), DHT: \(dhtPeersResult.count)) — fetching metadata…")
+
+        // Step 2: download metadata — try up to 50 peers concurrently, each with a 12s timeout
+        let downloader = MetadataDownloader(infoHash: magnet.infoHash)
+        let attempted = Counter()
+        let succeeded = Counter()
+        let bep10Skipped = Counter()
+        await withTaskGroup(of: Void.self) { group in
+            for peer in candidates.prefix(50) {
+                group.addTask {
+                    guard !(await downloader.isComplete) else { return }
+                    await attempted.inc()
+                    do {
+                        try await withTimeout(seconds: 12) {
+                            let ok = await self.fetchFromPeer(peer, into: downloader)
+                            if ok == .gotData { await succeeded.inc() }
+                            else if ok == .noBEP10 { await bep10Skipped.inc() }
+                        }
+                    } catch {
+                        // expected for unresponsive peers — just move on
+                    }
+                }
+            }
+        }
+        let a = await attempted.value
+        let s = await succeeded.value
+        let b = await bep10Skipped.value
+        report("Attempted \(a) peers, \(s) served data, \(b) skipped (no BEP 10)")
         guard await downloader.isComplete else {
+            report("All \(candidates.count) peers exhausted — metadata not received")
             throw MagnetError.metadataUnavailable
         }
+        report("Metadata received — verifying…")
 
         // Step 3: verify and parse
         guard let rawInfo = await downloader.assembleAndVerify() else {
@@ -59,7 +103,6 @@ public actor MagnetSession {
 
     private func fetchFromTrackers() async -> [Peer] {
         guard !magnet.trackers.isEmpty else { return [] }
-        // Create a temporary tracker session for the magnet's info hash
         let session = TrackerSession(
             infoHash: magnet.infoHash,
             peerID: PeerID.current,
@@ -72,7 +115,7 @@ public actor MagnetSession {
             let resp = try await session.announce(uploaded: 0, downloaded: 0)
             return resp.peers
         } catch {
-            print("[Magnet] Tracker announce failed: \(error)")
+            Log.engine.warning("Tracker announce failed: \(error)")
             return []
         }
     }
@@ -84,54 +127,63 @@ public actor MagnetSession {
 
     // MARK: - Per-peer metadata download
 
-    private func fetchFromPeer(_ peer: Peer, into downloader: MetadataDownloader) async {
+    enum FetchOutcome { case gotData, noBEP10, failed }
+
+    private func fetchFromPeer(_ peer: Peer, into downloader: MetadataDownloader) async -> FetchOutcome {
         let conn = PeerConnection(peer: peer, infoHash: magnet.infoHash, localPeerID: PeerID.current)
         let stream: AsyncStream<PeerMessage>
         do {
             stream = try await conn.connect()
         } catch {
-            return
+            return .failed
         }
 
-        // Wait for extension handshake to get remote's ut_metadata ID
+        // BEP 10 support check — bit 20 (byte 5, mask 0x10) of reserved bytes.
+        // Peers without it will never serve metadata, no point holding the connection.
+        let reserved = await conn.peerReservedBytes
+        guard reserved.count >= 8, (reserved[5] & 0x10) != 0 else {
+            await conn.disconnect()
+            return .noBEP10
+        }
+
         try? await conn.send(.extended(id: 0, data: buildExtensionHandshake()))
         var remoteMetaID: UInt8?
+        var receivedAnyData = false
 
         for await msg in stream {
             switch msg {
             case .extended(0, let data):
-                // Extension handshake response
                 if let ext = parseExtensionHandshake(from: data) {
                     remoteMetaID = ext.utMetadata
-                    guard remoteMetaID != nil else { await conn.disconnect(); return }
-                    // Send first request
-                    if let piece = await downloader.nextNeededPiece {
-                        try? await conn.send(buildMetadataRequest(piece: piece, extensionID: remoteMetaID!))
-                    }
+                    guard let metaID = remoteMetaID else { await conn.disconnect(); return .failed }
+                    // Always request piece 0 first — nextNeededPiece returns nil until
+                    // totalSize is known, which only arrives with the first data response.
+                    let piece = await downloader.nextNeededPiece ?? 0
+                    try? await conn.send(buildMetadataRequest(piece: piece, extensionID: metaID))
                 }
 
             case .extended(let id, let data) where id == remoteMetaID:
                 guard let msg = parseMetadataMessage(from: data) else { continue }
                 switch msg {
                 case .data(let piece, let totalSize, let payload):
+                    receivedAnyData = true
                     await downloader.receivePiece(index: piece, totalSize: totalSize, data: payload)
                     if await downloader.isComplete {
                         await conn.disconnect()
-                        return
+                        return .gotData
                     }
                     if let next = await downloader.nextNeededPiece, let metaID = remoteMetaID {
                         try? await conn.send(buildMetadataRequest(piece: next, extensionID: metaID))
                     }
                 case .reject:
-                    // Peer rejected this piece — request next or give up
                     if let next = await downloader.nextNeededPiece, let metaID = remoteMetaID {
                         try? await conn.send(buildMetadataRequest(piece: next, extensionID: metaID))
                     } else {
                         await conn.disconnect()
-                        return
+                        return receivedAnyData ? .gotData : .failed
                     }
                 case .request:
-                    break  // we're downloading, not serving
+                    break
                 }
 
             default:
@@ -139,5 +191,11 @@ public actor MagnetSession {
             }
         }
         await conn.disconnect()
+        return receivedAnyData ? .gotData : .failed
     }
+}
+
+private actor Counter {
+    private(set) var value: Int = 0
+    func inc() { value += 1 }
 }

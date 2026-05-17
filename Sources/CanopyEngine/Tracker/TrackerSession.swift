@@ -11,10 +11,13 @@ public actor TrackerSession {
     private var lastAnnounceTime: Date = .distantPast
     private var currentInterval: Int = 0
     private var currentMinInterval: Int = 0
+    private var currentTrackerID: String? = nil
     private var hasSentStarted = false
     private var totalUploaded: Int64 = 0
     private var totalDownloaded: Int64 = 0
     private var totalLeft: Int64
+    private var failureCounts: [String: Int] = [:]     // per-URL failure counter
+    private var cooldownUntil: [String: Date] = [:]    // per-URL backoff cooldown
 
     public init(infoHash: Data, peerID: Data, port: UInt16, announce: String?, announceList: [[String]]?, totalSize: Int64) {
         self.infoHash = infoHash
@@ -66,9 +69,10 @@ public actor TrackerSession {
 
         let now = Date()
         if bypassInterval {
-            // Respect min_interval if set, otherwise use a 60s floor to avoid spamming.
-            let floor = currentMinInterval > 0 ? TimeInterval(currentMinInterval) : 60
+            // Respect min_interval if set, otherwise use a 30s floor to avoid spamming.
+            let floor = currentMinInterval > 0 ? TimeInterval(currentMinInterval) : 30
             if now.timeIntervalSince(lastAnnounceTime) < floor {
+                Log.tracker.debug("Skipping force-announce — within \(Int(floor))s floor")
                 throw TrackerError.noResponse
             }
         } else {
@@ -81,34 +85,45 @@ public actor TrackerSession {
         let params = TrackerAnnounce(
             infoHash: infoHash, peerID: peerID, port: port,
             uploaded: totalUploaded, downloaded: totalDownloaded,
-            left: totalLeft, event: event
+            left: totalLeft, event: event, trackerID: currentTrackerID
         )
 
         // BEP 12 tier failover: shuffle each tier, promote successful URL
         for tierIndex in 0..<tiers.count {
-            var urls = tiers[tierIndex].shuffled()
+            let urls = tiers[tierIndex].shuffled()
             for urlIndex in 0..<urls.count {
+                let url = urls[urlIndex]
+                // Skip if in exponential backoff cooldown
+                if let cooldown = cooldownUntil[url], now < cooldown { continue }
                 do {
                     let resp: TrackerResponse
-                    if urls[urlIndex].hasPrefix("udp://") {
-                        let udp = try UDPTracker(url: urls[urlIndex])
+                    if url.hasPrefix("udp://") {
+                        let udp = try UDPTracker(url: url)
                         resp = try await udp.announce(with: params)
                     } else {
-                        resp = try await HTTPTracker.announce(to: urls[urlIndex], with: params)
+                        resp = try await HTTPTracker.announce(to: url, with: params)
                     }
                     if resp.isFailure {
                         continue
                     }
-                    tiers[tierIndex].removeAll { $0 == urls[urlIndex] }
-                    tiers[tierIndex].insert(urls[urlIndex], at: 0)
+                    tiers[tierIndex].removeAll { $0 == url }
+                    tiers[tierIndex].insert(url, at: 0)
+                    failureCounts.removeValue(forKey: url)
+                    cooldownUntil.removeValue(forKey: url)
 
-                    currentInterval = resp.interval
+                    currentInterval = max(resp.interval, 300)  // libtorrent: min_announce_interval floor
                     if let mini = resp.minInterval { currentMinInterval = mini }
+                    if let tid = resp.trackerID { currentTrackerID = tid }
                     lastAnnounceTime = now
                     if event == .started { hasSentStarted = true }
                     return resp
                 } catch {
-                    // URL failed — try next in tier
+                    // URL failed — apply exponential backoff
+                    let failures = (failureCounts[url] ?? 0) + 1
+                    failureCounts[url] = failures
+                    let delay = TimeInterval(min(1 << min(failures, 6), 60))
+                    cooldownUntil[url] = now.addingTimeInterval(delay)
+                    Log.tracker.warning("⚠️ \(url) failed (strike \(failures)) — backoff \(Int(delay))s")
                 }
             }
         }
@@ -149,9 +164,9 @@ public actor TrackerSession {
     private func announceTo(url: String, with params: TrackerAnnounce) async throws {
         if url.hasPrefix("udp://") {
             let udp = try UDPTracker(url: url)
-            try await udp.announce(with: params)
+            _ = try await udp.announce(with: params)
         } else {
-            try await HTTPTracker.announce(to: url, with: params)
+            _ = try await HTTPTracker.announce(to: url, with: params)
         }
     }
 }

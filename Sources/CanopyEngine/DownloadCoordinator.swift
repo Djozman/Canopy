@@ -13,6 +13,7 @@ public actor DownloadCoordinator {
     private var peerBitfields: [String: Set<Int>] = [:]
     private var peers: [String: PeerConnection] = [:]
     private var peerPieces: [String: Int] = [:]
+    private var peerLookahead: [String: Int] = [:]  // second piece queued per peer for TCP pipeline
     private var assignedPieces: Set<Int> = []
     private var pieceAssignedAt: [Int: Date] = [:]
     private var completedPieces: Set<Int> = []     // resume: which pieces are done
@@ -20,8 +21,15 @@ public actor DownloadCoordinator {
     private var peerHashFailures: [String: Int] = [:]  // ban tracking: strike count per peer
     private var bannedPeers: Set<String> = []          // banned peer keys
     private var spawnedPeers: Set<String> = []          // peers with a handlePeer task spawned
+    private var peerLastMessageAt: [String: Date] = [:]
+    private var peerChokedSince: [String: Date] = [:]
+    private var peerLastBlockAt: [String: Date] = [:]
+    private var peerConnectedAt: [String: Date] = [:]
+    private var peerBlockCount: [String: Int] = [:]
+    private var inflightPeers: Set<String> = []
+    private var connectBoostRemaining = 30
     private var pieceBlockSources: [Int: [Int: String]] = [:]  // piece → blockBegin → peerKey
-    private var fileHandles: [FileHandle]?
+    private var fileHandles: [FileHandle?]?
     private var completionContinuation: CheckedContinuation<Void, Error>?
     private var isShutdown = false
     private var isPaused = false
@@ -40,13 +48,28 @@ public actor DownloadCoordinator {
     private var lastChokeRound: Date = .distantPast
     private var dhtSession: DHTSession?
     private var filePriorities: [Int: FilePriority] = [:]
+    private let encryption: EngineSettings.EncryptionMode
+    private let listenPort: UInt16
+    private let maxPeers: Int
+    private let uploadLimitKiB: Int
+    private let downloadLimitKiB: Int
 
     public init(torrent: TorrentFile, savePath: String, dhtSession: DHTSession? = nil,
-                filePriorities: [Int: FilePriority] = [:]) {
+                filePriorities: [Int: FilePriority] = [:],
+                encryption: EngineSettings.EncryptionMode = .preferred,
+                listenPort: UInt16 = 6881,
+                maxPeers: Int = 50,
+                uploadLimitKiB: Int = 0,
+                downloadLimitKiB: Int = 0) {
         self.torrent = torrent
         self.savePath = savePath
         self.dhtSession = dhtSession
         self.filePriorities = filePriorities
+        self.encryption = encryption
+        self.listenPort = listenPort
+        self.maxPeers = maxPeers
+        self.uploadLimitKiB = uploadLimitKiB
+        self.downloadLimitKiB = downloadLimitKiB
 
         self.pieceManager = PieceManager(
             pieceCount: torrent.pieces.count,
@@ -94,7 +117,8 @@ public actor DownloadCoordinator {
     /// Call `seed()` afterwards to serve uploads to the swarm.
     public func download() async throws {
         await loadResumeData()
-        fileHandles = try diskMapper.openFiles(at: savePath)
+        let skipped = Set(filePriorities.compactMap { $0.value == .dontDownload ? $0.key : nil })
+        fileHandles = try diskMapper.openFiles(at: savePath, skippedFiles: skipped)
 
         let firstResponse = try? await trackerSession.announce()
         let trackerPeerList = firstResponse?.peers ?? []
@@ -237,29 +261,29 @@ public actor DownloadCoordinator {
             }
             print("[Coordinator] ✅ Connected to \(key)")
         }
-        // Send our bitfield first (BEP 3: must be first message after handshake if we have pieces)
-        let bf = await pieceManager.encodedBitfield()
-        if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
+        // BEP 10: extension handshake BEFORE bitfield (libtorrent order)
+        let reserved = await conn.peerReservedBytes
+        let supportsFast = reserved.count >= 8 && (reserved[7] & 0x04) != 0
+        if !reserved.isEmpty, (reserved[5] & 0x10) != 0 {
+            try? await conn.send(.extended(id: 0, data: buildExtensionHandshake(metadataSize: torrent.rawInfoDict.count)))
+        }
+        // Bitfield (use Fast Extension have_all when peer supports BEP 6)
+        if await pieceManager.isComplete && supportsFast {
+            try? await conn.send(.haveAll)
+        } else {
+            let bf = await pieceManager.encodedBitfield()
+            if !bf.isEmpty { try? await conn.send(.bitfield(bf)) }
+        }
         if await pieceManager.isComplete {
             try? await conn.send(.notInterested)
         } else {
             try? await conn.send(.interested)
         }
-        // BEP 10: send extension handshake if peer supports it
-        let reserved = await conn.peerReservedBytes
-        assert(reserved.isEmpty || reserved.count == 8, "Malformed reserved bytes: \(reserved.count)")
-        if reserved.isEmpty {
-            print("[Coordinator] ⚠️ Reserved bytes not yet set for \(key) — skipping extension handshake")
-        } else if (reserved[5] & 0x10) != 0 {
-            try? await conn.send(.extended(id: 0, data: buildExtensionHandshake(metadataSize: torrent.rawInfoDict?.count)))
-        } else {
-            print("[Coordinator] ℹ️ No extension protocol from \(key)")
-        }
 
-        // Send keepalive every 90s to prevent peer timeout
+        // Send keepalive every 60s to prevent peer timeout (libtorrent: half of peer_timeout=120)
         let keepaliveTask = Task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(90))
+                try? await Task.sleep(for: .seconds(60))
                 if Task.isCancelled { break }
                 try? await conn.send(.keepAlive)
             }
@@ -285,6 +309,7 @@ public actor DownloadCoordinator {
                 if await !conn.isChoked {
                     await requestBlocks(key: key, conn: conn)
                 }
+                await disconnectIfRedundant(key: key)
 
             case .unchoke:
                 print("[Coordinator] ✨ Unchoked by \(key)")
@@ -295,6 +320,14 @@ public actor DownloadCoordinator {
                 await pieceManager.storeBlock(piece: piece, begin: begin, data: data)
                 totalDownloaded += Int64(data.count)
                 pieceBlockSources[piece, default: [:]][begin] = key
+                // Endgame: cancel duplicate block requests from other peers immediately (libtorrent)
+                if await pieceManager.progress > 0.95 {
+                    for (otherKey, otherConn) in peers where otherKey != key {
+                        if peerPieces[otherKey] == piece || peerLookahead[otherKey] == piece {
+                            try? await otherConn.send(.cancel(piece: piece, begin: begin, length: data.count))
+                        }
+                    }
+                }
                 if let currentPiece = peerPieces[key], currentPiece == piece {
                     await requestBlocks(key: key, conn: conn)
                 }
@@ -320,6 +353,7 @@ public actor DownloadCoordinator {
                     await writePieceToDisk(piece: piece, data: data)
                     completedPieces.insert(piece)
                     saveResumeData()
+                    await disconnectIfRedundant(key: key)
                     for (k, c) in peers where k != key { try? await c.send(.have(piece: piece)) }
                     await requestBlocks(key: key, conn: conn)
 
@@ -363,6 +397,29 @@ public actor DownloadCoordinator {
                 peerBitfields[key, default: []].insert(piece)
                 pieceFrequency[piece, default: 0] += 1
 
+            // BEP 6 Fast Extension handlers
+
+            case .haveAll:
+                let allPieces = Set(0..<torrent.pieces.count)
+                let old = peerBitfields[key] ?? []
+                for piece in allPieces.subtracting(old) { pieceFrequency[piece, default: 0] += 1 }
+                for piece in old.subtracting(allPieces) { pieceFrequency[piece] = max(0, (pieceFrequency[piece] ?? 1) - 1) }
+                peerBitfields[key] = allPieces
+                if await !conn.isChoked { await requestBlocks(key: key, conn: conn) }
+
+            case .haveNone:
+                if let old = peerBitfields.removeValue(forKey: key) {
+                    for piece in old { pieceFrequency[piece] = max(0, (pieceFrequency[piece] ?? 1) - 1) }
+                }
+                peerBitfields[key] = []
+
+            case .suggest(let piece):
+                guard piece < torrent.pieces.count else { break }
+            case .reject(_, _, _):
+                break
+            case .allowedFast:
+                break
+
             case .choke:
                 if let piece = peerPieces[key] {
                     await pieceManager.cancelPending(for: piece)
@@ -373,11 +430,7 @@ public actor DownloadCoordinator {
 
             case .interested:
                 interestedPeers.insert(key)
-                // Immediately try to unchoke an interested peer if we have slots
-                if unchokedPeers.count < 4 && !unchokedPeers.contains(key) {
-                    unchokedPeers.insert(key)
-                    try? await conn.send(.unchoke)
-                }
+                // Defer unchoke to periodic choke round (libtorrent: on_interested only sets flag)
 
             case .notInterested:
                 interestedPeers.remove(key)
@@ -385,7 +438,7 @@ public actor DownloadCoordinator {
             case .request(let piece, let begin, let length):
                 // Only serve if we have the piece and the peer is unchoked
                 guard await pieceManager.hasPiece(piece), unchokedPeers.contains(key) else { break }
-                if let data = readBlockFromDisk(piece: piece, begin: begin, length: length) {
+                if let data = await asyncReadBlockFromDisk(piece: piece, begin: begin, length: length) {
                     try? await conn.send(.piece(piece: piece, begin: begin, data: data))
                     let now = Date()
                     uploadRate[key, default: []].append((now, data.count))
@@ -417,8 +470,8 @@ public actor DownloadCoordinator {
 
             case .extended(localMetadataID, let data):
                 // Serve ut_metadata (BEP 9) — respond to magnet metadata requests
-                guard let rawInfo = torrent.rawInfoDict,
-                      let msg = parseMetadataMessage(from: data),
+                let rawInfo = torrent.rawInfoDict
+                guard let msg = parseMetadataMessage(from: data),
                       case .request(let piece) = msg,
                       let remoteMetaID = await conn.peerExtensions?.utMetadata else { break }
                 let start = piece * 16384
@@ -471,8 +524,29 @@ public actor DownloadCoordinator {
         }
 
         // Endgame: >95% done — request remaining pieces from ALL peers
+        // libtorrent strict_end_game_mode: only duplicate when every remaining
+        // piece has at least one outstanding request
         if await pieceManager.progress > 0.95 {
-            guard let piece = await pieceManager.nextNeededPiece(excluding: skippedPieces()) else { return }
+            let needed = await pieceManager.nextNeededPiece(excluding: skippedPieces())
+            guard let needed else { return }
+            let unassignedCount = (0..<torrent.pieces.count).filter { i in
+                !completedPieces.contains(i) && !skippedPieces().contains(i) && !assignedPieces.contains(i)
+            }.count
+            guard unassignedCount == 0, let piece = await pieceManager.nextNeededPiece(excluding: skippedPieces().union(assignedPieces)) else {
+                // Not all pieces have assignments yet — use rarest-first instead of duplicating
+                let peersPieces = peerBitfields[key] ?? []
+                if let piece = await rarestPiece(available: peersPieces, excluding: assignedPieces.union(skippedPieces())) {
+                    assignedPieces.insert(piece)
+                    peerPieces[key] = piece
+                    pieceAssignedAt[piece] = Date()
+                    let requests = await pieceManager.nextBlockRequests(for: piece)
+                    for req in requests {
+                        try? await conn.send(.request(piece: req.piece, begin: req.begin, length: req.length))
+                    }
+                }
+                return
+            }
+            // All pieces have assignments — send duplicate requests
             peerPieces[key] = piece
             pieceAssignedAt[piece] = Date()
             let requests = await pieceManager.nextBlockRequests(for: piece)
@@ -501,9 +575,31 @@ public actor DownloadCoordinator {
             return await pieceManager.nextNeededPiece(excluding: excluding.union(skippedPieces()))
         }
         let skipped = skippedPieces()
+        // libtorrent initial_picker_threshold: when <4 pieces, pick randomly
+        if completedPieces.count < 4 {
+            // Prioritize partials first, even during random phase (prioritize_partials)
+            let partials = await pieceManager.partialPieces.intersection(available).filter { !excluding.contains($0) && !skipped.contains($0) }
+            if let partial = partials.randomElement() { return partial }
+            var candidates: [Int] = []
+            for p in available {
+                if !excluding.contains(p) && !skipped.contains(p) {
+                    let hasIt = await pieceManager.hasPiece(p)
+                    if !hasIt { candidates.append(p) }
+                }
+            }
+            if let pick = candidates.randomElement() { return pick }
+            return await pieceManager.nextNeededPiece(excluding: excluding.union(skippedPieces()))
+        }
+        // Rarest-first: prioritize partials first, then rarest
+        let partials = await pieceManager.partialPieces.intersection(available)
+        if let partial = partials.first(where: { !excluding.contains($0) && !skipped.contains($0) }) {
+            return partial
+        }
         var best: Int?; var bestCount = Int.max
         for piece in available {
-            guard !excluding.contains(piece), !skipped.contains(piece), !(await pieceManager.hasPiece(piece)) else { continue }
+            guard !excluding.contains(piece), !skipped.contains(piece) else { continue }
+            let hasIt = await pieceManager.hasPiece(piece)
+            guard !hasIt else { continue }
             let freq = pieceFrequency[piece] ?? 0
             if freq < bestCount { bestCount = freq; best = piece }
         }
@@ -517,10 +613,16 @@ public actor DownloadCoordinator {
         for seg in segments {
             let end = cursor + seg.length
             guard end <= data.count, seg.fileIndex < handles.count else { break }
+            guard let fh = handles[seg.fileIndex] else { cursor = end; continue }
             let chunk = data.subdata(in: cursor..<end)
-            try? handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
-            try? handles[seg.fileIndex].write(contentsOf: chunk)
+            try? fh.seek(toOffset: UInt64(seg.fileOffset))
+            try? fh.write(contentsOf: chunk)
             cursor = end
+        }
+        // fsync after write (libtorrent: flush metadata on piece completion)
+        for seg in segments {
+            guard seg.fileIndex < handles.count else { continue }
+            try? handles[seg.fileIndex]?.synchronize()
         }
     }
 
@@ -529,12 +631,12 @@ public actor DownloadCoordinator {
         let segments = diskMapper.map(piece: piece, blockBegin: begin, blockLength: length)
         var result = Data(capacity: length)
         for seg in segments {
-            guard seg.fileIndex < handles.count else { return nil }
+            guard seg.fileIndex < handles.count, let fh = handles[seg.fileIndex] else { return nil }
             do {
-                try handles[seg.fileIndex].seek(toOffset: UInt64(seg.fileOffset))
+                try fh.seek(toOffset: UInt64(seg.fileOffset))
                 var remaining = seg.length
                 while remaining > 0 {
-                    guard let part = try handles[seg.fileIndex].read(upToCount: remaining),
+                    guard let part = try fh.read(upToCount: remaining),
                           !part.isEmpty else { return nil }
                     result.append(part)
                     remaining -= part.count
@@ -544,6 +646,38 @@ public actor DownloadCoordinator {
             }
         }
         return result.isEmpty ? nil : result
+    }
+
+    /// Background disk I/O queue (POSIX file descriptors are thread-safe).
+    private nonisolated static let diskQueue = DispatchQueue(label: "canopy.disk-write", qos: .utility)
+
+    private func asyncReadBlockFromDisk(piece: Int, begin: Int, length: Int) async -> Data? {
+        // Capture handles + mapper before dispatching to avoid actor isolation issues
+        let handles = fileHandles
+        let mapper = diskMapper
+        return await withCheckedContinuation { cont in
+            Self.diskQueue.async {
+                guard let h = handles else { cont.resume(returning: nil); return }
+                let segments = mapper.map(piece: piece, blockBegin: begin, blockLength: length)
+                var result = Data(capacity: length)
+                for seg in segments {
+                    guard seg.fileIndex < h.count, let fh = h[seg.fileIndex] else { cont.resume(returning: nil); return }
+                    do {
+                        try fh.seek(toOffset: UInt64(seg.fileOffset))
+                        var remaining = seg.length
+                        while remaining > 0 {
+                            guard let part = try fh.read(upToCount: remaining), !part.isEmpty else { cont.resume(returning: nil); return }
+                            result.append(part)
+                            remaining -= part.count
+                        }
+                    } catch {
+                        cont.resume(returning: nil)
+                        return
+                    }
+                }
+                cont.resume(returning: result.isEmpty ? nil : result)
+            }
+        }
     }
 
     /// Run the choke algorithm: unchoke top 4 peers by upload rate,
@@ -598,11 +732,15 @@ public actor DownloadCoordinator {
             let droppedKeys = last.subtracting(current)
             guard !addedKeys.isEmpty || !droppedKeys.isEmpty else { continue }
             let added = addedKeys.compactMap { peers[$0]?.peer }
+            let addedSeedFlags: [UInt8] = addedKeys.compactMap { k in
+                guard let bf = peerBitfields[k] else { return nil }
+                return bf.count == torrent.pieces.count ? 0x02 : 0x01
+            }
             let dropped = droppedKeys.compactMap { k -> Peer? in
                 let parts = k.split(separator: ":"); guard parts.count == 2 else { return nil }
                 return Peer(ip: String(parts[0]), port: UInt16(parts[1]) ?? 0)
             }
-            if let msg = buildPEXMessage(added: added, dropped: dropped, utPEXID: utPEXID) {
+            if let msg = buildPEXMessage(added: added, dropped: dropped, addedFlags: addedSeedFlags, utPEXID: utPEXID) {
                 try? await peers[key]?.send(msg)
             }
             pexLastKnown[key] = current
@@ -637,7 +775,7 @@ public actor DownloadCoordinator {
         let key = "\(peerIP):\(peerPort)"
         let conn = PeerConnection(peer: Peer(ip: peerIP, port: peerPort), infoHash: torrent.infoHash, localPeerID: PeerID.current)
         do {
-            let stream = try await conn.accept(connection: connection)
+            let stream = try await conn.accept(connection: connection, knownInfoHashes: [torrent.infoHash])
             if peerBitfields.count >= 50 { await conn.disconnect(); return }
             print("[Coordinator] 🔗 Inbound connection from \(key)")
             peers[key] = conn
@@ -651,7 +789,7 @@ public actor DownloadCoordinator {
     public func seed() async {
         guard fileHandles != nil else { return }
         // Announce with left=0 so tracker knows we're seeding
-        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
+        _ = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
         print("[Coordinator] 🌱 Entering seeding mode (inbound only)")
         while !isShutdown {
             if Task.isCancelled { break }
@@ -660,7 +798,7 @@ public actor DownloadCoordinator {
                 await runChokeAlgorithm()
             }
             // Periodic re-announce — TrackerSession self-throttles via interval, so this is safe to call often
-            try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
+            _ = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded, left: 0)
             try? await Task.sleep(for: .seconds(10))
         }
     }
@@ -691,7 +829,7 @@ public actor DownloadCoordinator {
         uploadRate.removeAll()
         interestedPeers.removeAll()
         unchokedPeers.removeAll()
-        fileHandles?.forEach { try? $0.close() }
+                fileHandles?.forEach { try? $0?.close() }
         fileHandles = nil
         if let dht = dhtSession, !torrent.isPrivate {
             await dht.saveRoutingTable()
@@ -752,13 +890,13 @@ public actor DownloadCoordinator {
         await pieceManager.reset()
         completedPieces.removeAll()
         try? FileManager.default.removeItem(atPath: resumeFilePath())
-        fileHandles?.forEach { try? $0.close() }
+                fileHandles?.forEach { try? $0?.close() }
         fileHandles = nil
         totalDownloaded = 0
     }
 
     public func reannounce() async {
-        try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded)
+        _ = try? await trackerSession.announce(uploaded: totalUploaded, downloaded: totalDownloaded)
     }
 
     // MARK: - Piece selection helper
@@ -774,6 +912,37 @@ public actor DownloadCoordinator {
             }
         }
         return skipped
+    }
+
+    /// Disconnect if both sides are complete — no further utility (libtorrent: close_redundant_connections).
+    private func disconnectIfRedundant(key: String) async {
+        guard await pieceManager.isComplete else { return }
+        let peerPieceSet = peerBitfields[key] ?? []
+        guard peerPieceSet.count == torrent.pieces.count else { return }
+        Log.coord.info("🔌 Disconnecting redundant connection to \(key) (both sides complete)")
+        if let conn = peers.removeValue(forKey: key) { await conn.disconnect() }
+        if let bf = peerBitfields.removeValue(forKey: key) {
+            for p in bf { pieceFrequency[p] = max(0, (pieceFrequency[p] ?? 1) - 1) }
+        }
+        if let piece = peerPieces.removeValue(forKey: key) {
+            await pieceManager.cancelPending(for: piece)
+            assignedPieces.remove(piece)
+            pieceAssignedAt.removeValue(forKey: piece)
+        }
+        if let la = peerLookahead.removeValue(forKey: key) {
+            await pieceManager.cancelPending(for: la)
+            assignedPieces.remove(la)
+        }
+        peerLastMessageAt.removeValue(forKey: key)
+        peerChokedSince.removeValue(forKey: key)
+        peerLastBlockAt.removeValue(forKey: key)
+        peerConnectedAt.removeValue(forKey: key)
+        peerBlockCount.removeValue(forKey: key)
+        uploadRate.removeValue(forKey: key)
+        interestedPeers.remove(key)
+        unchokedPeers.remove(key)
+        spawnedPeers.remove(key)
+        inflightPeers.remove(key)
     }
 }
 

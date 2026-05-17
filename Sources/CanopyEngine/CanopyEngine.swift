@@ -19,16 +19,19 @@ public final class CanopyEngine: ObservableObject {
     private var pendingMagnets: [String: MagnetSession] = [:]
     private var magnetTasks:  [String: Task<Void, Never>] = [:]
     private var dhtSession:   DHTSession?
-    private nonisolated(unsafe) var pollTimer: Timer?
+    private var pollTask: Task<Void, Never>?
     private var lastRates: [String: (downloaded: Int64, uploaded: Int64, timestamp: Date)] = [:]
     private var fileProgressCache: [String: [Int64]] = [:]                       // updated every poll tick
     private var filePrioritiesCache: [String: [Int: FilePriority]] = [:]         // mirrors coordinator state
+    public let settings: EngineSettings
 
-    public init() {}
+    public init(settings: EngineSettings = EngineSettings()) {
+        self.settings = settings
+    }
 
     public func shutdown() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
         for (_, task) in magnetTasks { task.cancel() }
         magnetTasks.removeAll()
         for (_, task) in tasks { task.cancel() }
@@ -43,9 +46,11 @@ public final class CanopyEngine: ObservableObject {
     // MARK: - Polling
 
     public func startPolling(interval: TimeInterval = 2.0) {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in await self.poll() }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.poll()
+                try? await Task.sleep(for: .seconds(interval))
+            }
         }
     }
 
@@ -134,16 +139,32 @@ public final class CanopyEngine: ObservableObject {
     private func startTorrent(torrent: TorrentFile, id: String, savePath: String,
                                filePriorities: [Int: FilePriority] = [:]) {
         ensureDHT()
+        // Read bandwidth limits from UserDefaults (synced with SettingsView AppStorage).
+        // Use configured settings values unless they're 0 (unlimited), in which case
+        // check UserDefaults for user-set values. SettingsView writes to the keys
+        // "downloadLimit" and "uploadLimit" via AppStorage.
+        let dlDefault = UserDefaults.standard.integer(forKey: "downloadLimit")
+        let ulDefault = UserDefaults.standard.integer(forKey: "uploadLimit")
+        let effectiveDL = settings.downloadLimitKiB > 0 ? settings.downloadLimitKiB : max(0, dlDefault)
+        let effectiveUL = settings.uploadLimitKiB > 0 ? settings.uploadLimitKiB : max(0, ulDefault)
         let coordinator = DownloadCoordinator(torrent: torrent, savePath: savePath,
-                                              dhtSession: dhtSession, filePriorities: filePriorities)
+                                                dhtSession: dhtSession, filePriorities: filePriorities,
+                                                encryption: settings.encryption,
+                                                listenPort: settings.listenPort,
+                                                maxPeers: settings.maxPeers,
+                                                uploadLimitKiB: effectiveUL,
+                                                downloadLimitKiB: effectiveDL)
         coordinators[id] = coordinator
         torrentMetas[id] = torrent
         torrentSavePaths[id] = savePath
         if !filePriorities.isEmpty { filePrioritiesCache[id] = filePriorities }
         let coordinatorRef = coordinator
-        let task = Task { [weak self] in
-            // Port conflict on second torrent is non-fatal — download proceeds without inbound connections
-            try? await coordinatorRef.startListener()
+        let task = Task {
+            do {
+                try await coordinatorRef.startListener()
+            } catch {
+                Log.coord.error("Failed to start listener on port \(self.settings.listenPort): \(error)")
+            }
             do {
                 try await coordinatorRef.download()
                 await MainActor.run {
@@ -203,10 +224,17 @@ public final class CanopyEngine: ObservableObject {
 
     // MARK: - Magnet metadata fetch
 
+    /// Pre-compute the handle (infohash hex) for a magnet URI without starting a fetch.
+    /// Returns nil if the URI is not a valid magnet link.
+    public func magnetHandle(for uri: String) -> String? {
+        MagnetLink.parse(uri)?.infoHash.hex
+    }
+
     public func fetchMetadata(
         uri: String,
         onFiles: @MainActor @escaping ([PendingFile]) -> Void,
-        onError: @MainActor @escaping () -> Void
+        onError: @MainActor @escaping () -> Void,
+        onProgress: (@MainActor @Sendable (String) -> Void)? = nil
     ) -> String? {
         guard let magnet = MagnetLink.parse(uri) else {
             onError()
@@ -219,6 +247,13 @@ public final class CanopyEngine: ObservableObject {
         ensureDHT()
         let session = MagnetSession(magnet: magnet, dhtSession: dhtSession)
         pendingMagnets[id] = session
+        if let onProgress {
+            Task {
+                await session.setProgress { msg in
+                    Task { @MainActor in onProgress(msg) }
+                }
+            }
+        }
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -234,10 +269,16 @@ public final class CanopyEngine: ObservableObject {
                     }
                 }
             } catch {
+                NSLog("[CanopyEngine] Magnet metadata fetch failed: \(error)")
                 await MainActor.run {
                     self.pendingMagnets.removeValue(forKey: id)
                     self.metadataCallbacks.removeValue(forKey: id)
                     onError()
+                    NotificationCenter.default.post(
+                        name: Notification.Name("MagnetMetadataFailed"),
+                        object: nil,
+                        userInfo: ["handle": id, "error": "\(error)"]
+                    )
                 }
             }
         }
@@ -291,6 +332,7 @@ public final class CanopyEngine: ObservableObject {
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
         let id = torrent.id
         let savePath = torrentSavePaths[id] ?? torrent.savePath
+        let meta = torrentMetas[id]
         pendingRemovals.insert(id)
         torrents.removeAll { $0.id == id }
         tasks[id]?.cancel()
@@ -306,7 +348,17 @@ public final class CanopyEngine: ObservableObject {
         lastRates.removeValue(forKey: id)
         pendingRemovals.remove(id)
         if deleteFiles {
-            try? FileManager.default.removeItem(at: URL(fileURLWithPath: savePath))
+            let fm = FileManager.default
+            let root = savePath.hasSuffix("/") ? savePath : savePath + "/"
+            if let meta {
+                for entry in meta.files {
+                    let filePath = root + entry.path
+                    try? fm.removeItem(at: URL(fileURLWithPath: filePath))
+                }
+            }
+            let dirPath = root + torrent.name
+            try? fm.removeItem(at: URL(fileURLWithPath: dirPath))
+            try? fm.removeItem(at: URL(fileURLWithPath: root + ".canopy_resume"))
         }
     }
 
@@ -380,14 +432,13 @@ public final class CanopyEngine: ObservableObject {
 
     private func ensureDHT() {
         guard dhtSession == nil else { return }
-        let nodeID = NodeID.random()
+        let nodeID = NodeID.loadOrCreate()
         let routingTable = RoutingTable(ourID: nodeID)
         let dht = DHTSession(nodeID: nodeID, routingTable: routingTable)
         dhtSession = dht
         Task {
-            await dht.loadRoutingTable()
             try? await dht.start(port: 6882)
-            await DHTBootstrap.bootstrap(session: dht)
+            _ = await DHTBootstrap.bootstrap(session: dht)
         }
     }
 

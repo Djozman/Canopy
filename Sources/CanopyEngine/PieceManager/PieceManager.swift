@@ -1,7 +1,7 @@
 import Foundation
 
-/// Maximum number of in-flight block requests per peer.
-public let maxPipelineDepth = 5
+/// Maximum number of in-flight block requests per peer (libtorrent: max_out_request_queue = 500).
+public let maxPipelineDepth = 500
 
 /// Standard block size for requests (16 KB).
 public let blockSize = 16384
@@ -37,7 +37,6 @@ public actor PieceManager {
 
     public func encodedBitfield() -> Data { Data(bitfield.bytes) }
 
-    /// Get the next needed piece (rarest-first selection happens at a higher level).
     /// Get the next needed piece, optionally excluding pieces already assigned to other peers
     /// and restricted to pieces available from a specific peer. Empty availableIn = unknown, assume all.
     public func nextNeededPiece(excluding: Set<Int> = [], availableIn: Set<Int> = []) -> Int? {
@@ -45,6 +44,11 @@ public actor PieceManager {
             if availableIn.isEmpty || availableIn.contains(i) { return i }
         }
         return nil
+    }
+
+    /// Set of piece indices that have some blocks downloaded but aren't yet complete.
+    public var partialPieces: Set<Int> {
+        Set(downloadedBlocks.keys).filter { !bitfield.isSet($0) }
     }
 
     /// Progress 0–1.
@@ -92,7 +96,7 @@ public actor PieceManager {
     }
 
     /// Try to assemble and verify a complete piece.
-    public func tryAssemble(piece: Int) -> AssembleResult {
+    public func tryAssemble(piece: Int) async -> AssembleResult {
         let actualSize: Int = (piece == pieceCount - 1)
             ? Int(totalSize - (Int64(piece) * pieceLength))
             : Int(pieceLength)
@@ -117,10 +121,13 @@ public actor PieceManager {
             assembled.append(data)
         }
 
-        // SHA1 verify
-        let hash = SHA1.hash(assembled)
-        guard hash == expectedHashes[piece] else {
-            print("[Piece] ❌ Hash mismatch! piece=\(piece) expected=\(expectedHashes[piece].hexString.prefix(16)) got=\(hash.hexString.prefix(16)) size=\(assembled.count)")
+        // SHA1 verify — offload to background priority to avoid blocking the actor
+        let expected = expectedHashes[piece]
+        let hash = await Task.detached(priority: .utility) {
+            SHA1.hash(assembled)
+        }.value
+        guard hash == expected else {
+            Log.piece.error("❌ Hash mismatch! piece=\(piece) expected=\(self.expectedHashes[piece].hexString.prefix(16)) got=\(hash.hexString.prefix(16)) size=\(assembled.count)")
             // Hash mismatch — discard all blocks for this piece, will re-request
             for blk in 0..<blockCount {
                 let begin = blk * blockSize
@@ -130,7 +137,7 @@ public actor PieceManager {
             return .hashMismatch
         }
 
-        print("[Piece] ✅ Verified piece \(piece)")
+        Log.piece.info("✅ Verified piece \(piece)")
         bitfield.set(piece)
         downloadedBlocks.removeValue(forKey: piece)
         return .verified(assembled)

@@ -96,6 +96,29 @@ struct ContentView: View {
             let handle = (notif.userInfo?["handle"] as? String) ?? nil
             showPreAddWindow(pending: pending, magnetHandle: handle)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .magnetMetadataProgress)) { notif in
+            let h = notif.userInfo?["handle"] as? String
+            let msg = (notif.userInfo?["message"] as? String) ?? ""
+            if let holder = PreAddCoordinator.shared.holder,
+               holder.magnetHandle == h,
+               let model = holder.model {
+                model.progressMessage = msg
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .magnetMetadataFailed)) { notif in
+            let failedHandle = notif.userInfo?["handle"] as? String
+            let errorMsg = (notif.userInfo?["error"] as? String) ?? "Unknown error"
+            if let holder = PreAddCoordinator.shared.holder,
+               holder.magnetHandle == failedHandle {
+                holder.window?.close()
+                PreAddCoordinator.shared.holder = nil
+            }
+            let alert = NSAlert()
+            alert.messageText = "Could not fetch magnet metadata"
+            alert.informativeText = "No peers responded with the torrent metadata within the timeout. \n\nDetails: \(errorMsg)"
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
     }
 
     // MARK: - Pre-add window
@@ -256,6 +279,12 @@ final class PreAddWindowHolder {
     var model: PreAddViewModel?
     var magnetHandle: String?
     var closeObserver: NSObjectProtocol?
+
+    deinit {
+        if let obs = closeObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+    }
 }
 
 /// Process-wide single-instance guard for the pre-add window. Plain stored

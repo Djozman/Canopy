@@ -1,6 +1,6 @@
 import Foundation
 
-/// Wire-level BitTorrent peer messages (BEP 3).
+/// Wire-level BitTorrent peer messages (BEP 3 + BEP 6 Fast Extension).
 public enum PeerMessage: Equatable {
     case choke              // id 0
     case unchoke            // id 1
@@ -12,22 +12,42 @@ public enum PeerMessage: Equatable {
     case piece(piece: Int, begin: Int, data: Data)      // id 7
     case cancel(piece: Int, begin: Int, length: Int)    // id 8
     case port(port: UInt16) // id 9 (DHT)
+    // BEP 6 Fast Extension
+    case suggest(piece: Int)        // id 13
+    case haveAll                    // id 14
+    case haveNone                   // id 15
+    case reject(piece: Int, begin: Int, length: Int)   // id 16
+    case allowedFast(piece: Int)    // id 17
     case keepAlive          // 0-length message
     case extended(id: UInt8, data: Data)
 
-    /// Parse a single message from a byte stream. Returns nil if more data is needed.
-    public static func decode(from data: inout Data) -> PeerMessage? {
-        let bytes = Array(data) // Avoid Data subscript crashes on ARM64 macOS 26
-        guard bytes.count >= 4 else { return nil }
-        let length = (Int(bytes[0]) << 24) | (Int(bytes[1]) << 16) | (Int(bytes[2]) << 8) | Int(bytes[3])
+    /// Maximum message length in bytes (BEP 3 recommends 128KB for piece; cap at 1MB to prevent
+    /// memory exhaustion from malicious peers sending huge length prefixes).
+    private static let maxMessageLength = 1_048_576
+
+    /// Parse a single message from a byte buffer. Returns nil if more data is needed.
+    /// Uses a read offset to avoid O(n) buffer shifting; callers should trim the buffer
+    /// periodically to prevent unbounded growth.
+    public static func decode(from bytes: [UInt8], readOffset: inout Int) -> PeerMessage? {
+        let available = bytes.count - readOffset
+        guard available >= 4 else { return nil }
+        let length = (Int(bytes[readOffset]) << 24)
+                   | (Int(bytes[readOffset+1]) << 16)
+                   | (Int(bytes[readOffset+2]) << 8)
+                   |  Int(bytes[readOffset+3])
         if length == 0 {
-            data.removeFirst(4)
+            readOffset += 4
             return .keepAlive
         }
-        guard bytes.count >= 4 + length else { return nil }
-        let id = bytes[4]
-        let payload = Data(bytes[5..<(4 + length)])
-        data.removeFirst(4 + length)
+        guard length <= maxMessageLength else {
+            Log.peer.warning("⚠️ Dropping oversized message (length=\(length))")
+            readOffset = bytes.count
+            return nil
+        }
+        guard available >= 4 + length else { return nil }
+        let id = bytes[readOffset + 4]
+        let payload = Data(bytes[readOffset+5..<(readOffset+4+length)])
+        readOffset += 4 + length
         return messageFrom(id: id, payload: payload)
     }
 
@@ -50,6 +70,12 @@ public enum PeerMessage: Equatable {
             payload = p.encodeBigEndian() + b.encodeBigEndian() + l.encodeBigEndian(); id = 8
         case .port(let port):
             payload = Data([UInt8(port >> 8), UInt8(port & 0xFF)]); id = 9
+        case .suggest(let piece): payload = piece.encodeBigEndian(); id = 13
+        case .haveAll:            payload = Data(); id = 14
+        case .haveNone:           payload = Data(); id = 15
+        case .reject(let p, let b, let l):
+            payload = p.encodeBigEndian() + b.encodeBigEndian() + l.encodeBigEndian(); id = 16
+        case .allowedFast(let piece): payload = piece.encodeBigEndian(); id = 17
         case .extended(let extID, let d):
             payload = Data([extID]) + d; id = 20
         }
@@ -94,6 +120,25 @@ public enum PeerMessage: Equatable {
             let b = Array(payload)
             let port = (UInt16(b[0]) << 8) | UInt16(b[1])
             return .port(port: port)
+        case 13:
+            guard payload.count >= 4 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
+            let piece = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            return .suggest(piece: piece)
+        case 14: return .haveAll
+        case 15: return .haveNone
+        case 16:
+            guard payload.count >= 12 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
+            let p = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            let beg = (Int(b[4]) << 24) | (Int(b[5]) << 16) | (Int(b[6]) << 8) | Int(b[7])
+            let len = (Int(b[8]) << 24) | (Int(b[9]) << 16) | (Int(b[10]) << 8) | Int(b[11])
+            return .reject(piece: p, begin: beg, length: len)
+        case 17:
+            guard payload.count >= 4 else { return .extended(id: id, data: payload) }
+            let b = Array(payload)
+            let piece = (Int(b[0]) << 24) | (Int(b[1]) << 16) | (Int(b[2]) << 8) | Int(b[3])
+            return .allowedFast(piece: piece)
         case 20:
             guard payload.count > 0 else { return .extended(id: 0, data: payload) }
             return .extended(id: payload[0], data: payload.count > 1 ? payload.subdata(in: 1..<payload.count) : Data())

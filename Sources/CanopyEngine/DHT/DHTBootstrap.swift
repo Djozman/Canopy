@@ -12,8 +12,13 @@ public enum DHTBootstrap {
 
     /// Run full bootstrap against a DHT session. Returns true if at least one router responded.
     public static func bootstrap(session: DHTSession) async -> Bool {
-        print("[Bootstrap] Starting bootstrap...")
+        Log.dht.info("Starting bootstrap...")
         let nodeID = await session.nodeID
+
+        // Load saved routing table first so we have existing nodes to query
+        // even if all bootstrap routers are down.
+        await session.loadRoutingTable()
+
         var anyResponded = false
 
         // Ping each router
@@ -23,24 +28,24 @@ public enum DHTBootstrap {
             do {
                 _ = try await session.sendQuery(to: ip, port: port, txID: txID, data: data)
                 anyResponded = true
-                print("[Bootstrap] ✅ Router \(ip):\(port) responded")
+                Log.dht.info("✅ Router \(ip):\(port) responded")
             } catch {
-                print("[Bootstrap] ⚠️ Router \(ip):\(port) failed: \(error)")
+                Log.dht.warning("⚠️ Router \(ip):\(port) failed: \(error)")
             }
         }
 
         guard anyResponded else {
-            print("[Bootstrap] ❌ No routers responded — DHT will populate from incoming queries")
+            Log.dht.error("❌ No routers responded — DHT will populate from incoming queries")
             return false
         }
 
         // Pass 1: iterative self-lookup
-        print("[Bootstrap] Running self-lookup...")
+        Log.dht.info("Running self-lookup...")
         let _ = await session.findNode(target: nodeID)
-        print("[Bootstrap] Self-lookup complete")
+        Log.dht.info("Self-lookup complete")
 
         // Pass 2: per-bucket findNode for stale buckets (deferred to refresh timer)
-        print("[Bootstrap] Bootstrap complete")
+        Log.dht.info("Bootstrap complete")
         return true
     }
 }

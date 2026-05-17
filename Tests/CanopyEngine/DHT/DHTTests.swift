@@ -74,10 +74,12 @@ final class DHTTests: XCTestCase {
     // MARK: - TXID Encoding
 
     func testTransactionIDEncoding() {
-        let tx = makeTransactionID(0x1122)
+        // TX IDs are now random (libtorrent: random(0xffff)), not sequential
+        let tx = makeTransactionID(0)
         XCTAssertEqual(tx.count, 2)
-        XCTAssertEqual(tx[0], 0x11)
-        XCTAssertEqual(tx[1], 0x22)
+        // Verify each call produces data (randomness means we can't check specific bytes)
+        let tx2 = makeTransactionID(0)
+        XCTAssertEqual(tx2.count, 2)
     }
 
     // MARK: - Message Encode/Decode

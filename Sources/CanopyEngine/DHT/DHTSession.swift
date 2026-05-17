@@ -11,6 +11,7 @@ public actor DHTSession {
     private var previousSecret: Data?
     private var peerCache: [Data: [(peer: Peer, storedAt: Date)]] = [:]
     private var tokenCache: [String: Data] = [:]
+    private var rateLimitCounts: [String: (count: Int, windowStart: Date)] = [:]  // per-IP rate limiter
     private var txCounter: UInt16 = 0
     private var rotationTask: Task<Void, Never>?
     private var refreshLoopTask: Task<Void, Never>?
@@ -31,7 +32,7 @@ public actor DHTSession {
     private func startSecretRotation() {
         rotationTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(600))
+                try? await Task.sleep(for: .seconds(300))  // libtorrent: 5 minutes
                 guard let self = self else { break }
                 await self.rotateSecret()
             }
@@ -41,26 +42,43 @@ public actor DHTSession {
     private func rotateSecret() {
         previousSecret = currentSecret
         currentSecret = Self.generateSecret()
-        print("[DHT] 🔐 Secret rotated")
+        Log.dht.info("🔐 Secret rotated")
     }
 
-    private func generateToken(for ip: String) -> Data {
-        // SHA1(currentSecret + ip)
-        var input = currentSecret
-        input.append(Data(ip.utf8))
-        return SHA1.hash(input)
+    /// Convert an IP string to its compact binary form (4 bytes for IPv4, 16 for IPv6).
+    /// Falls back to nil if parsing fails.
+    private static func compactIP(from ip: String) -> Data {
+        var addr = sockaddr_in()
+        if ip.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 {
+            return Data(bytes: &addr.sin_addr, count: 4)
+        }
+        var addr6 = sockaddr_in6()
+        if ip.withCString({ inet_pton(AF_INET6, $0, &addr6.sin6_addr) }) == 1 {
+            return Data(bytes: &addr6.sin6_addr, count: 16)
+        }
+        return Data()
     }
 
-    private func validateToken(_ token: Data, for ip: String) -> Bool {
-        // Check against current secret
+    private static let writeTokenSize = 4  // libtorrent: 4-byte tokens
+
+    private func generateToken(for ip: String, infoHash: Data) -> Data {
+        // BEP 5 §5: first 4 bytes of SHA1(secret + IP compact form + info_hash)
         var input = currentSecret
-        input.append(Data(ip.utf8))
-        if SHA1.hash(input) == token { return true }
+        input.append(Self.compactIP(from: ip))
+        input.append(infoHash)
+        let hash = SHA1.hash(input)
+        return hash.prefix(Self.writeTokenSize)
+    }
+
+    private func validateToken(_ token: Data, for ip: String, infoHash: Data) -> Bool {
+        guard token.count == Self.writeTokenSize else { return false }
+        if generateToken(for: ip, infoHash: infoHash) == token { return true }
         // Check against previous secret
         if let prev = previousSecret {
             var prevInput = prev
-            prevInput.append(Data(ip.utf8))
-            return SHA1.hash(prevInput) == token
+            prevInput.append(Self.compactIP(from: ip))
+            prevInput.append(infoHash)
+            return SHA1.hash(prevInput).prefix(Self.writeTokenSize) == token
         }
         return false
     }
@@ -93,7 +111,7 @@ public actor DHTSession {
         listener?.start(queue: .global())
         startSecretRotation()
         startRefreshLoop()
-        print("[DHT] 👂 Listening on port \(port) (node \(nodeID.debugDescription))")
+        Log.dht.info("👂 Listening on port \(port.rawValue) (node \(self.nodeID.debugDescription))")
     }
 
     private func startRefreshLoop() {
@@ -113,6 +131,20 @@ public actor DHTSession {
     // MARK: - Incoming Handler
 
     private func handleIncoming(data: Data, from ip: String, port: UInt16, connection: NWConnection) async {
+        // Per-IP rate limiting (libtorrent: dos_blocker, 50 msgs/10s → block)
+        let now = Date()
+        if var entry = rateLimitCounts[ip] {
+            if now.timeIntervalSince(entry.windowStart) > 10 {
+                entry = (count: 0, windowStart: now)
+            }
+            entry.count += 1
+            rateLimitCounts[ip] = entry
+            if entry.count > 50 {
+                return  // drop silently
+            }
+        } else {
+            rateLimitCounts[ip] = (count: 1, windowStart: now)
+        }
         guard let msg = parseDHTMessage(data) else { return }
 
         switch msg {
@@ -125,7 +157,7 @@ public actor DHTSession {
 
             // Update routing table: this node contacted us
             await routingTable.markSeen(nodeID: senderID)
-            await routingTable.insert(nodeID: senderID, ip: ip, port: port)
+            _ = await routingTable.insert(nodeID: senderID, ip: ip, port: port)
             // Send appropriate response
             var response: Data = buildError(txID: t, code: 203, message: "Protocol error")
             switch type {
@@ -147,7 +179,7 @@ public actor DHTSession {
                     return d
                 }() else { break }
                 guard let targetID = NodeID(bytes: infoHashData) else { break }
-                let token = generateToken(for: ip)
+                let token = generateToken(for: ip, infoHash: infoHashData)
                 let closest = await routingTable.findClosest(to: targetID, k: 8)
                 let nodesData = Data(closest.flatMap { encodeCompactNode(nodeID: $0.nodeID, ip: $0.ip, port: $0.port) })
                 let cached = peerCache[infoHashData]?.filter { Date().timeIntervalSince($0.storedAt) < 1800 } ?? []
@@ -169,7 +201,7 @@ public actor DHTSession {
                     return d
                 }()
                 // Validate token — must be present and valid
-                guard let announcedToken, validateToken(announcedToken, for: ip) else {
+                guard let announcedToken, validateToken(announcedToken, for: ip, infoHash: infoHashData) else {
                     response = buildError(txID: t, code: 203, message: "Invalid token")
                     break
                 }
@@ -186,6 +218,12 @@ public actor DHTSession {
                 }()
                 let port = impliedPort ? UInt16(connection.endpoint.port?.rawValue ?? announcedPort) : announcedPort
                 let peer = Peer(ip: ip, port: port)
+                let cache = peerCache[infoHashData, default: []]
+                // Cap at 500 peers per info_hash (libtorrent dht_max_peers default)
+                guard cache.count < 500 else {
+                    response = buildError(txID: t, code: 203, message: "Too many peers")
+                    break
+                }
                 peerCache[infoHashData, default: []].append((peer, Date()))
                 // Prune stale entries for this infohash
                 peerCache[infoHashData] = peerCache[infoHashData]?.filter {
@@ -201,7 +239,25 @@ public actor DHTSession {
             break  // responses arrive via sendQuery's own connection, not through listener
 
         case .error(_, let code, let message):
-            print("[DHT] ⚠️ Error from \(ip): [\(code)] \(message)")
+            Log.dht.warning("⚠️ Error from \(ip): [\(code)] \(message)")
+        }
+    }
+
+    private func pingRemote(ip: String, port: UInt16) async -> Bool {
+        let txID = nextTxID()
+        let data = buildPing(txID: txID, ourID: nodeID)
+        do {
+            _ = try await sendQuery(to: ip, port: port, txID: txID, data: data)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func makePinger() -> (@Sendable (String, UInt16) async -> Bool) {
+        return { [weak self] ip, port in
+            guard let self else { return false }
+            return await self.pingRemote(ip: ip, port: port)
         }
     }
 
@@ -232,7 +288,7 @@ public actor DHTSession {
             let resp = extractResponse(from: r)
             return DHTResponse(nodes: resp.nodes, values: resp.values, token: token)
         case .error(_, let code, let message):
-            print("[DHT] ⚠️ Error from \(ip): [\(code)] \(message)")
+            Log.dht.warning("⚠️ Error from \(ip): [\(code)] \(message)")
             throw DHTError.invalidMessage
         default:
             throw DHTError.invalidMessage
@@ -283,7 +339,7 @@ public actor DHTSession {
             var newClosest = closest
             for resp in results {
                 for node in resp.nodes {
-                    _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port)
+                    _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port, pinger: makePinger())
                     newClosest.append(NodeEntry(
                         nodeIDBytes: node.nodeID.bytes, ip: node.ip, port: node.port,
                         failureCount: 0, lastSeen: Date()
@@ -325,7 +381,7 @@ public actor DHTSession {
                 }
                 // Insert returned nodes into routing table
                 for node in resp.nodes {
-                    _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port)
+                    _ = await routingTable.insert(nodeID: node.nodeID, ip: node.ip, port: node.port, pinger: makePinger())
                 }
             } catch {
                 await routingTable.markFailed(nodeID: node.nodeID)
@@ -365,7 +421,7 @@ public actor DHTSession {
         refreshLoopTask = nil
         listener?.cancel()
         listener = nil
-        print("[DHT] 🛑 Shutdown complete")
+        Log.dht.info("🛑 Shutdown complete")
     }
 }
 

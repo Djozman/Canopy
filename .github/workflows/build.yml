@@ -15,9 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: brew install libtorrent-rasterbar boost
-
       - name: Test
         run: swift test
 

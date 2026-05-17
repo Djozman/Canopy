@@ -25,6 +25,7 @@ public struct TrackerAnnounce {
     public let downloaded: Int64
     public let left: Int64
     public let event: TrackerEvent?  // nil = periodic re-announce (no event param)
+    public let trackerID: String?     // echoed back from tracker response
 
     public init(
         infoHash: Data,
@@ -33,7 +34,8 @@ public struct TrackerAnnounce {
         uploaded: Int64 = 0,
         downloaded: Int64 = 0,
         left: Int64,
-        event: TrackerEvent? = nil
+        event: TrackerEvent? = nil,
+        trackerID: String? = nil
     ) {
         self.infoHash = infoHash
         self.peerID = peerID
@@ -42,6 +44,14 @@ public struct TrackerAnnounce {
         self.downloaded = downloaded
         self.left = left
         self.event = event
+        self.trackerID = trackerID
+    }
+
+    /// Per-torrent stable random key for tracker announces (NAT traversal).
+    private func key() -> Data {
+        // SHA1(peerID + infoHash) truncated to 4 bytes — stable across restarts
+        let hash = SHA1.hash(peerID + infoHash)
+        return hash.prefix(4)
     }
 
     /// Build the URL-encoded query string for an HTTP tracker announce.
@@ -67,8 +77,12 @@ public struct TrackerAnnounce {
             ("downloaded", "\(downloaded)"),
             ("left", "\(left)"),
             ("compact", "1"),
+            ("numwant", event == .stopped ? "0" : "200"),
             ("event", event?.rawValue ?? ""),
-        ]
+            ("key", percentEncode(key())),
+            ("supportcrypto", "1"),
+            ("no_peer_id", "1"),
+        ] + (trackerID.map { [("trackerid", $0)] } ?? [])
 
         return params
             .filter { !$0.1.isEmpty }

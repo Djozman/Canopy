@@ -5,9 +5,21 @@ public enum TorrentParseError: Error {
     case invalidBencode
     case missingField(String)
     case invalidFormat(String)
+    case pathTraversal
 }
 
 public struct TorrentParser {
+
+    /// Strip path separators and reject traversal components (`.` and `..`).
+    /// Mirrors libtorrent's `sanitize_append_path_element`.
+    private static func sanitizePathComponent(_ comp: String) throws -> String {
+        let cleaned = comp.replacingOccurrences(of: "/", with: "")
+                         .replacingOccurrences(of: "\\", with: "")
+        guard !cleaned.isEmpty else { throw TorrentParseError.pathTraversal }
+        // Reject components consisting only of dots (e.g. ".", "..", "...")
+        if cleaned.allSatisfy({ $0 == "." }) { throw TorrentParseError.pathTraversal }
+        return cleaned
+    }
 
     public static func parse(path: String) throws -> TorrentFile {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
@@ -92,9 +104,10 @@ public struct TorrentParser {
                       case .list(let comps) = pathEl.1 else {
                     throw TorrentParseError.missingField("files[].path")
                 }
-                let relPath = comps.compactMap { comp -> String? in
-                    guard case .string(let d) = comp else { return nil }
-                    return String(data: d, encoding: .utf8)
+                let relPath = try comps.map { comp -> String in
+                    guard case .string(let d) = comp else { throw TorrentParseError.invalidFormat("non-string path component") }
+                    guard let str = String(data: d, encoding: .utf8) else { throw TorrentParseError.invalidFormat("non-UTF8 path") }
+                    return try sanitizePathComponent(str)
                 }.joined(separator: "/")
                 guard !relPath.isEmpty else {
                     throw TorrentParseError.invalidFormat("empty file path")
@@ -117,10 +130,10 @@ public struct TorrentParser {
             infoHash = SHA1.hash(encoded)
         }
 
-        // Raw info dict for ut_metadata serving
-        let rawInfo: Data? = {
+        // Raw info dict for ut_metadata serving (always non-nil)
+        let rawInfo: Data = {
             if let r = infoRange(in: data) { return data[r] }
-            return nil
+            return BencodeEncoder.encode(.dict(infoDict.map { ($0.0, $0.1) }))
         }()
 
         return TorrentFile(
@@ -191,14 +204,15 @@ public struct TorrentParser {
                       case .list(let comps) = pathEl.1 else {
                     throw TorrentParseError.missingField("files[].path")
                 }
-                let path = comps.compactMap { comp -> String? in
-                    guard case .string(let d) = comp else { return nil }
-                    return String(data: d, encoding: .utf8)
+                let path = try comps.map { comp -> String in
+                    guard case .string(let d) = comp else { throw TorrentParseError.invalidFormat("non-string path component") }
+                    guard let str = String(data: d, encoding: .utf8) else { throw TorrentParseError.invalidFormat("non-UTF8 path") }
+                    return try sanitizePathComponent(str)
                 }.joined(separator: "/")
                 guard !path.isEmpty else {
                     throw TorrentParseError.invalidFormat("empty file path")
                 }
-                return TorrentFile.FileEntry(path: path, size: size)
+                return TorrentFile.FileEntry(path: name + "/" + path, size: size)
             }
         } else {
             throw TorrentParseError.missingField("length or files")

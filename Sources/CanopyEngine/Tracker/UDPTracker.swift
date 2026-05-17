@@ -2,11 +2,14 @@ import Foundation
 import Network
 
 /// BEP 15 — UDP tracker protocol.
-/// Per-announce UDP socket, connection ID cached for 2 minutes.
+/// Connection IDs cached per address for 60s (libtorrent: udp_tracker_token_expiry).
 public struct UDPTracker {
     private let url: String
     private let host: String
     private let port: UInt16
+
+    private static let cacheLock = NSLock()
+    private static var connectionCache: [String: (cid: UInt64, expires: Date)] = [:]
 
     public init(url: String) throws {
         self.url = url
@@ -25,6 +28,7 @@ public struct UDPTracker {
         defer { conn.cancel() }
 
         let cid = try await getConnectionID(on: conn)
+        Self.setCachedConnectionID(cid, for: host, port: port)
 
         let txID = UInt32.random(in: 0...UInt32.max)
         let key = UInt32.random(in: 0...UInt32.max)  // stable across retries
@@ -47,9 +51,24 @@ public struct UDPTracker {
         throw TrackerError.noResponse
     }
 
-    // MARK: - Connection ID (always handshake — per-announce socket)
+    // MARK: - Connection ID (cached for 60s)
+
+    private static func cachedConnectionID(for host: String, port: UInt16) -> UInt64? {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        let key = "\(host):\(port)"
+        guard let entry = connectionCache[key], entry.expires > Date() else { return nil }
+        return entry.cid
+    }
+
+    private static func setCachedConnectionID(_ cid: UInt64, for host: String, port: UInt16) {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        connectionCache["\(host):\(port)"] = (cid, Date().addingTimeInterval(60))
+    }
 
     private func getConnectionID(on conn: NWConnection) async throws -> UInt64 {
+        if let cached = Self.cachedConnectionID(for: host, port: port) {
+            return cached
+        }
         let txID = UInt32.random(in: 0...UInt32.max)
         let connectReq = encodeConnect(txID: txID)
 
@@ -103,7 +122,8 @@ public struct UDPTracker {
         data.append(writeUInt32(event))
         data.append(writeUInt32(0))               // ip = 0 (use sender's)
         data.append(writeUInt32(key))
-        data.append(writeInt32(-1))               // num_want = -1
+        let numWant = announce.event == .stopped ? Int32(0) : Int32(200)
+        data.append(writeInt32(numWant))
         data.append(writeUInt16(announce.port))
         return data
     }
@@ -139,7 +159,3 @@ public struct UDPTracker {
     }
 
 }
-
-// MARK: - Timeout helper (uses shared Network/Timeout.swift)
-
-

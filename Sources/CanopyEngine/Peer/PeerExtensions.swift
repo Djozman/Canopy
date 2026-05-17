@@ -14,12 +14,17 @@ public let localMetadataID: UInt8 = 2
 
 /// Build the extension handshake payload (raw bencoded dict, no length prefix).
 /// Local extension IDs: ut_pex=localPEXID, ut_metadata=localMetadataID.
-public func buildExtensionHandshake(metadataSize: Int? = nil) -> Data {
+public func buildExtensionHandshake(metadataSize: Int? = nil, listenPort: UInt16 = 6881) -> Data {
     let m: BencodeValue = .dict([
         ("ut_pex", .integer(Int64(localPEXID))),
         ("ut_metadata", .integer(Int64(localMetadataID))),
     ])
-    var pairs: [(String, BencodeValue)] = [("m", m)]
+    var pairs: [(String, BencodeValue)] = [
+        ("m", m),
+        ("v", .string(Data("Canopy 1.0".utf8))),
+        ("reqq", .integer(500)),
+        ("p", .integer(Int64(listenPort))),
+    ]
     if let size = metadataSize {
         pairs.append(("metadata_size", .integer(Int64(size))))
     }
@@ -58,15 +63,19 @@ public func parseExtensionHandshake(from data: Data) -> PeerExtensions? {
 // MARK: - PEX (BEP 11)
 
 /// Build a PEX message (added/dropped peer lists). Returns nil if utPEXID is nil.
-public func buildPEXMessage(added: [Peer], dropped: [Peer], utPEXID: UInt8?) -> PeerMessage? {
+public func buildPEXMessage(added: [Peer], dropped: [Peer], addedFlags: [UInt8] = [],
+                             utPEXID: UInt8?) -> PeerMessage? {
     guard let utPEXID, !added.isEmpty || !dropped.isEmpty else { return nil }
     let addedBlob = Data(added.flatMap { encodeCompactPeer($0) })
     let droppedBlob = Data(dropped.flatMap { encodeCompactPeer($0) })
-    let dict: BencodeValue = .dict([
+    var dictPairs: [(String, BencodeValue)] = [
         ("added", .string(addedBlob)),
         ("dropped", .string(droppedBlob)),
-    ])
-    return .extended(id: utPEXID, data: BencodeEncoder.encode(dict))
+    ]
+    if !addedFlags.isEmpty {
+        dictPairs.append(("added.f", .string(Data(addedFlags))))
+    }
+    return .extended(id: utPEXID, data: BencodeEncoder.encode(.dict(dictPairs)))
 }
 
 /// Parse a PEX message. added.f and dropped.f are separate bencode keys — ignored.

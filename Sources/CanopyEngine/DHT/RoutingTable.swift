@@ -132,7 +132,10 @@ public actor RoutingTable {
     // MARK: - Insert
 
     /// Insert or update a node. Returns true if inserted, false if rejected.
-    public func insert(nodeID: NodeID, ip: String, port: UInt16) async -> Bool {
+    /// When `pinger` is provided and a bucket is full without covering our ID, the least-recently-seen
+    /// node is pinged. If it's dead, it's evicted to make room for the new node.
+    public func insert(nodeID: NodeID, ip: String, port: UInt16,
+                       pinger: (@Sendable (String, UInt16) async -> Bool)? = nil) async -> Bool {
         let idx = bucketIndex(for: nodeID)
 
         // Check if node already exists — update and move to tail
@@ -163,8 +166,25 @@ public actor RoutingTable {
             return await insert(nodeID: nodeID, ip: ip, port: port)
         }
 
-        // Full + doesn't cover our ID — reject (eviction requires ping, deferred)
-        print("[Routing] Bucket \(idx) full, rejecting \(nodeID.debugDescription)")
+        // Full + doesn't cover our ID — try eviction via ping
+        if let pinger = pinger {
+            let stale = buckets[idx].nodes[0]
+            if await pinger(stale.ip, stale.port) {
+                // Alive — move to tail, reject new
+                let entry = buckets[idx].nodes.remove(at: 0)
+                buckets[idx].nodes.append(entry)
+                Log.dht.info("Bucket \(idx) full, ping OK, rejecting \(nodeID.debugDescription)")
+                return false
+            } else {
+                // Dead — evict stale, insert new
+                buckets[idx].nodes.remove(at: 0)
+                buckets[idx].nodes.append(entry)
+                Log.dht.info("Bucket \(idx) full, stale node evicted for \(nodeID.debugDescription)")
+                return true
+            }
+        }
+        // No pinger available — plain reject
+        Log.dht.info("Bucket \(idx) full, rejecting \(nodeID.debugDescription)")
         return false
     }
 
@@ -238,23 +258,32 @@ public actor RoutingTable {
         try? data.write(to: Self.storageURL, options: .atomic)
     }
 
-    public func loadFromDisk() {
+    public func loadFromDisk() async {
         guard let data = try? Data(contentsOf: Self.storageURL),
               let nodes = try? JSONDecoder().decode([NodeEntry].self, from: data) else { return }
         let now = Date()
         let cutoff = now.addingTimeInterval(-86400)  // 24 hours
-        var loaded = 0
+        var entries: [NodeEntry] = []
         for var entry in nodes {
             guard entry.lastSeen > cutoff else { continue }
             if entry.lastSeen.timeIntervalSince(now) < -900 {
                 entry.failureCount = 0
             }
-            loaded += 1
-            Task {
-                let inserted = await self.insert(nodeID: entry.nodeID, ip: entry.ip, port: entry.port)
-                if inserted { await self.markSeen(nodeID: entry.nodeID) }
+            entries.append(entry)
+        }
+        guard !entries.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for entry in entries {
+                group.addTask {
+                    let inserted = await self.insert(nodeID: entry.nodeID, ip: entry.ip, port: entry.port)
+                    if inserted { await self.markSeenAsync(nodeID: entry.nodeID) }
+                }
             }
         }
-        print("[Routing] Queued \(loaded) nodes from disk for loading")
+        Log.dht.info("Loaded \(entries.count) nodes from disk")
+    }
+
+    private func markSeenAsync(nodeID: NodeID) {
+        markSeen(nodeID: nodeID)
     }
 }

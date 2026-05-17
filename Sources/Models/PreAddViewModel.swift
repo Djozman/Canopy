@@ -7,6 +7,9 @@ import CanopyEngine
 @MainActor
 public final class PreAddViewModel: ObservableObject {
     @Published public var pending: PendingTorrent
+    @Published public var progressMessage: String = "Searching for peers\u{2026}"
+    @Published public var elapsedSeconds: Int = 0
+    private var elapsedTimer: Timer?
 
     // Flat-to-tree conversion. Rebuilt when pending.files changes.
     @Published public private(set) var tree: [FileNode] = []
@@ -18,6 +21,27 @@ public final class PreAddViewModel: ObservableObject {
     public init(pending: PendingTorrent) {
         self.pending = pending
         rebuildTree()
+        if pending.isMagnet && pending.files.isEmpty {
+            startElapsedTimer()
+        }
+    }
+
+    private func startElapsedTimer() {
+        let start = Date()
+        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.elapsedSeconds = Int(Date().timeIntervalSince(start))
+            }
+        }
+    }
+
+    public func stopElapsedTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+    }
+
+    deinit {
+        elapsedTimer?.invalidate()
     }
 
     // MARK: - Tree building

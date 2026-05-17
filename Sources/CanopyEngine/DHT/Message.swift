@@ -18,9 +18,11 @@ public struct CompactNode {
 
 // MARK: - Transaction ID
 
-/// Encode a monotonic UInt16 counter as a 2-byte big-endian Data for bencode string use.
+/// Encode a random UInt16 as a 2-byte big-endian Data for bencode string use.
+/// libtorrent: `std::uint16_t(random(0xffff))`
 public func makeTransactionID(_ counter: UInt16) -> Data {
-    Data([UInt8(counter >> 8), UInt8(counter & 0xFF)])
+    var randomID = UInt16.random(in: 0...UInt16.max).bigEndian
+    return Data(bytes: &randomID, count: 2)
 }
 
 // MARK: - Compact node encoding (26 bytes)
@@ -85,13 +87,17 @@ public func buildGetPeers(txID: Data, ourID: NodeID, infoHash: Data) -> Data {
     ])
 }
 
-public func buildAnnouncePeer(txID: Data, ourID: NodeID, infoHash: Data, port: UInt16, token: Data) -> Data {
-    buildQuery(txID: txID, queryType: "announce_peer", args: [
+public func buildAnnouncePeer(txID: Data, ourID: NodeID, infoHash: Data, port: UInt16, token: Data, impliedPort: Bool = false) -> Data {
+    var args: [(String, BencodeValue)] = [
         ("id", .string(ourID.bytes)),
         ("info_hash", .string(infoHash)),
         ("port", .integer(Int64(port))),
         ("token", .string(token)),
-    ])
+    ]
+    if impliedPort {
+        args.append(("implied_port", .integer(1)))
+    }
+    return buildQuery(txID: txID, queryType: "announce_peer", args: args)
 }
 
 // MARK: - Response builder (outgoing)

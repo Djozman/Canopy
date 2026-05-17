@@ -150,4 +150,6 @@ struct CanopyApp: App {
 extension Notification.Name {
     static let openAddTorrent = Notification.Name("OpenAddTorrent")
     static let showPreAdd = Notification.Name("ShowPreAdd")
+    static let magnetMetadataFailed = Notification.Name("MagnetMetadataFailed")
+    static let magnetMetadataProgress = Notification.Name("MagnetMetadataProgress")
 }

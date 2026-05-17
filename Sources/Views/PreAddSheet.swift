@@ -70,9 +70,14 @@ struct PreAddSheet: View {
             if pending.isMagnet && pending.files.isEmpty {
                 VStack(spacing: 12) {
                     ProgressView()
-                    Text("Fetching metadata\u{2026}")
+                    Text(model.progressMessage)
                         .font(.caption)
-                        .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                        .foregroundColor(Color(nsColor: .labelColor))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    Text("\(model.elapsedSeconds)s elapsed (will time out at 30s)")
+                        .font(.caption2)
+                        .foregroundColor(Color(nsColor: .tertiaryLabelColor))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

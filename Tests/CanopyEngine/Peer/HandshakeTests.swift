@@ -36,80 +36,92 @@ final class PeerMessageTests: XCTestCase {
         let msg = PeerMessage.keepAlive
         let encoded = msg.encode()
         XCTAssertEqual(encoded, Data([0, 0, 0, 0]))
-        var data = encoded
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(encoded)
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .keepAlive)
+        XCTAssertEqual(offset, 4)
     }
 
     func testChokeRoundTrip() {
         let encoded = PeerMessage.choke.encode()
-        var data = encoded
-        XCTAssertEqual(PeerMessage.decode(from: &data), .choke)
+        let bytes = Array(encoded)
+        var offset = 0
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .choke)
     }
 
     func testUnchokeRoundTrip() {
         let encoded = PeerMessage.unchoke.encode()
-        var data = encoded
-        XCTAssertEqual(PeerMessage.decode(from: &data), .unchoke)
+        let bytes = Array(encoded)
+        var offset = 0
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .unchoke)
     }
 
     func testInterestedRoundTrip() {
         let encoded = PeerMessage.interested.encode()
-        var data = encoded
-        XCTAssertEqual(PeerMessage.decode(from: &data), .interested)
+        let bytes = Array(encoded)
+        var offset = 0
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .interested)
     }
 
     func testHaveRoundTrip() {
         let msg = PeerMessage.have(piece: 42)
-        var data = msg.encode()
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(msg.encode())
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .have(piece: 42))
     }
 
     func testBitfieldRoundTrip() {
         let bits = Data([0b10101010])
         let msg = PeerMessage.bitfield(bits)
-        var data = msg.encode()
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(msg.encode())
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .bitfield(bits))
     }
 
     func testRequestRoundTrip() {
         let msg = PeerMessage.request(piece: 5, begin: 16384, length: 16384)
-        var data = msg.encode()
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(msg.encode())
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .request(piece: 5, begin: 16384, length: 16384))
     }
 
     func testPieceRoundTrip() {
         let block = Data(repeating: 0xFF, count: 16384)
         let msg = PeerMessage.piece(piece: 3, begin: 0, data: block)
-        var data = msg.encode()
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(msg.encode())
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .piece(piece: 3, begin: 0, data: block))
-        XCTAssertEqual(data.count, 0)
+        XCTAssertEqual(offset, bytes.count) // all bytes consumed
     }
 
     func testCancelRoundTrip() {
         let msg = PeerMessage.cancel(piece: 7, begin: 32768, length: 16384)
-        var data = msg.encode()
-        let decoded = PeerMessage.decode(from: &data)
+        let bytes = Array(msg.encode())
+        var offset = 0
+        let decoded = PeerMessage.decode(from: bytes, readOffset: &offset)
         XCTAssertEqual(decoded, .cancel(piece: 7, begin: 32768, length: 16384))
     }
 
     func testMultipleMessages() {
-        var data = PeerMessage.unchoke.encode() + PeerMessage.interested.encode() + PeerMessage.choke.encode()
-        XCTAssertEqual(PeerMessage.decode(from: &data), .unchoke)
-        XCTAssertEqual(PeerMessage.decode(from: &data), .interested)
-        XCTAssertEqual(PeerMessage.decode(from: &data), .choke)
-        XCTAssertEqual(data.count, 0)
+        let bytes = Array(PeerMessage.unchoke.encode() + PeerMessage.interested.encode() + PeerMessage.choke.encode())
+        var offset = 0
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .unchoke)
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .interested)
+        XCTAssertEqual(PeerMessage.decode(from: bytes, readOffset: &offset), .choke)
+        XCTAssertEqual(offset, bytes.count)
     }
 
     func testDecodeNeedsMoreData() {
         // Incomplete message header (only 2 bytes of 4-byte length)
-        var data = Data([0, 0])
-        XCTAssertNil(PeerMessage.decode(from: &data))
-        XCTAssertEqual(data.count, 2) // data untouched
+        let bytes: [UInt8] = [0, 0]
+        var offset = 0
+        XCTAssertNil(PeerMessage.decode(from: bytes, readOffset: &offset))
+        XCTAssertEqual(offset, 0) // offset untouched since not enough data
     }
 
     func testFuzzRandomBytes() {
@@ -117,11 +129,47 @@ final class PeerMessageTests: XCTestCase {
         for _ in 0..<10_000 {
             let length = Int.random(in: 0...512)
             let bytes = (0..<length).map { _ in UInt8.random(in: 0...255) }
-            var data = Data(bytes)
+            var offset = 0
             // Drain all parsable messages — decode returns nil when it can't parse
-            while PeerMessage.decode(from: &data) != nil {}
+            while PeerMessage.decode(from: bytes, readOffset: &offset) != nil {}
             // Remaining data might be a partial message — that's fine
         }
         // If we got here without crashing, the test passes
+    }
+
+    func testOversizedMessageSkipped() {
+        var bytes = [UInt8]()
+        bytes.append(0x00)
+        bytes.append(0x20)
+        bytes.append(0x00)
+        bytes.append(0x00)
+        bytes.append(0x00)
+        for _ in 0..<(2 * 1024 * 1024) { bytes.append(0x00) }
+        var offset = 0
+        let result = PeerMessage.decode(from: bytes, readOffset: &offset)
+        XCTAssertNil(result)
+        XCTAssertEqual(offset, bytes.count)
+    }
+
+    func testEmptyBitfield() {
+        let msg = PeerMessage.bitfield(Data())
+        let encoded = msg.encode()
+        var offset = 0
+        let decoded = PeerMessage.decode(from: Array(encoded), readOffset: &offset)
+        XCTAssertEqual(decoded, .bitfield(Data()))
+    }
+
+    func testEmptyExtended() {
+        let msg = PeerMessage.extended(id: 5, data: Data())
+        let encoded = msg.encode()
+        var offset = 0
+        let decoded = PeerMessage.decode(from: Array(encoded), readOffset: &offset)
+        XCTAssertEqual(decoded, .extended(id: 5, data: Data()))
+    }
+
+    func testZeroLengthMessageNotKeepAlive() {
+        var offset = 0
+        let result = PeerMessage.decode(from: [0, 0, 0, 0, 0], readOffset: &offset)
+        XCTAssertEqual(result, .keepAlive)
     }
 }
