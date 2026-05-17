@@ -33,7 +33,7 @@ struct AddTorrentSheet: View {
 
                 if tab == 0 {
                     Section("Magnet URL") {
-                        TextEditor(text: $magnetURI)
+                        MagnetTextEditor(text: $magnetURI)
                             .font(.system(.caption, design: .monospaced))
                             .frame(minHeight: 60)
                     }
@@ -73,11 +73,11 @@ struct AddTorrentSheet: View {
                         if tab == 0 { handleMagnet() }
                         else        { handleTorrentFile() }
                     }
-                    .disabled(tab == 0 ? magnetURI.isEmpty : torrentPath.isEmpty)
+                    .disabled(tab == 0 ? magnetURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : torrentPath.isEmpty)
                 }
             }
         }
-        .frame(minWidth: 440, minHeight: 300)
+        .frame(minWidth: 500, minHeight: 300)
         .alert("Error", isPresented: .constant(parseError != nil)) {
             Button("OK") { parseError = nil }
         } message: {
@@ -87,58 +87,72 @@ struct AddTorrentSheet: View {
     }
 
     private func checkClipboard() {
-        guard magnetURI.isEmpty else { return }
+        let firstLine = magnetURI.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
+        guard firstLine.isEmpty else { return }
         guard let str = NSPasteboard.general.string(forType: .string),
               str.hasPrefix("magnet:?") else { return }
-        magnetURI = str
+        var parts = magnetURI.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        magnetURI = ([str] + parts).joined(separator: "\n")
     }
-
-    // MARK: - Magnet: open window immediately, fetch metadata in background
 
     @MainActor private func handleMagnet() {
-        let uri  = magnetURI
-        let save = saveDir
+        let lines = magnetURI
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("magnet:?") }
 
-        var displayName = "Fetching metadata\u{2026}"
-        if let comps = URLComponents(string: uri),
-           let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
-            displayName = dn
+        guard let firstURI = lines.first else {
+            parseError = "No valid magnet links found."
+            return
         }
 
-        let stub = PendingTorrent(
-            source:    .magnet(uri: uri),
-            name:      displayName,
-            totalSize: 0,
-            savePath:  save,
-            files:     []
-        )
+        let save = saveDir
 
-        var magnetHandle: LTTorrentHandle?
-        magnetHandle = engine.fetchMetadata(
-            uri: uri,
-            onFiles: { files in
-                let updated = PendingTorrent(
-                    source:    .magnet(uri: uri),
-                    name:      displayName,
-                    totalSize: files.reduce(0) { $0 + $1.size },
-                    savePath:  save,
-                    files:     files
-                )
-                NotificationCenter.default.post(
-                    name: .showPreAdd, object: nil,
-                    userInfo: ["pending": updated, "handle": magnetHandle as Any]
-                )
-            },
-            onError: {
-                parseError = "Could not fetch magnet metadata."
+        for (i, uri) in lines.enumerated() {
+            var displayName = "Fetching metadata\u{2026}"
+            if let comps = URLComponents(string: uri),
+               let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+                displayName = dn
             }
-        )
 
-        onNext(stub, magnetHandle)
+            let stub = PendingTorrent(
+                source: .magnet(uri: uri), name: displayName,
+                totalSize: 0, savePath: save, files: []
+            )
+
+            var magnetHandle: LTTorrentHandle?
+            magnetHandle = engine.fetchMetadata(
+                uri: uri,
+                onFiles: { files in
+                    let updated = PendingTorrent(
+                        source: .magnet(uri: uri), name: displayName,
+                        totalSize: files.reduce(0) { $0 + $1.size },
+                        savePath: save, files: files
+                    )
+                    // Update the existing window for this magnet index
+                    PreAddCoordinator.shared.updateWindow(at: i, pending: updated, handle: magnetHandle)
+                },
+                onError: {}
+            )
+
+            if i == 0 {
+                onNext(stub, magnetHandle)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.1) {
+                    NotificationCenter.default.post(
+                        name: .showPreAdd, object: nil,
+                        userInfo: [
+                            "pending": stub,
+                            "handle": magnetHandle as Any,
+                            "magnetIndex": i
+                        ]
+                    )
+                }
+            }
+        }
+
         dismiss()
     }
-
-    // MARK: - .torrent file: parse locally, open window with full file list
 
     @MainActor private func handleTorrentFile() {
         guard var pending = engine.parse(torrentPath: torrentPath) else {
@@ -148,5 +162,46 @@ struct AddTorrentSheet: View {
         pending.savePath = saveDir
         onNext(pending, nil)
         dismiss()
+    }
+}
+
+// MARK: - No-wrap text editor
+
+private struct MagnetTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    var font: NSFont?
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.font = font ?? NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = false
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width]
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MagnetTextEditor
+        init(_ parent: MagnetTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
     }
 }

@@ -398,65 +398,13 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (void)removeTorrent:(LTTorrentHandle *)handle deleteFiles:(BOOL)deleteFiles {
-    // Collect file paths before removal for manual cleanup.
-    // bitfield_flag values are sequential, not bitmasks, so we can't reliably
-    // combine delete_files | delete_partfile. We delete files ourselves.
-    std::set<std::string> filePaths;
-    std::set<std::string> dirs;
-    if (deleteFiles) {
-        auto ti = [handle cppHandle].torrent_file();
-        auto status = [handle cppHandle].status();
-        std::string savePath = status.save_path;
-        if (!savePath.empty()) {
-            if (savePath.back() != '/') savePath += '/';
-            if (ti) {
-                const auto &fs = ti->files();
-                for (int i = 0; i < fs.num_files(); i++) {
-                    std::string full = savePath + fs.file_path(lt::file_index_t{i});
-                    filePaths.insert(full);
-                    size_t pos = full.rfind('/');
-                    while (pos != std::string::npos) {
-                        dirs.insert(full.substr(0, pos));
-                        pos = full.rfind('/', pos - 1);
-                    }
-                }
-            } else {
-                NSLog(@"[Canopy] removeTorrent: torrent_file() is null, cannot collect file paths for deletion");
-            }
-        } else {
-            NSLog(@"[Canopy] removeTorrent: savePath is empty");
-        }
-    } else {
-        NSLog(@"[Canopy] removeTorrent: deleteFiles is NO");
-    }
-
-    lt::remove_flags_t flags = lt::session_handle::delete_partfile;
+    NSLog(@"[Canopy-ObjC] removeTorrent called with deleteFiles=%d", deleteFiles);
+    auto flags = deleteFiles
+        ? (lt::session::delete_partfile | lt::session::delete_files)
+        : lt::remove_flags_t{lt::session::delete_partfile};
     _session->remove_torrent([handle cppHandle], flags);
     [_handles removeObject:handle];
-
-    if (deleteFiles) {
-        // Unlink files synchronously
-        for (const auto &p : filePaths) {
-            int rc = unlink(p.c_str());
-            if (rc != 0) {
-                NSLog(@"[Canopy] Failed to unlink: %s (errno=%d)", p.c_str(), errno);
-            } else {
-                NSLog(@"[Canopy] Deleted: %s", p.c_str());
-            }
-        }
-        // Clean up empty parent directories deepest-first
-        if (!dirs.empty()) {
-            std::vector<std::string> sorted(dirs.begin(), dirs.end());
-            std::sort(sorted.begin(), sorted.end(), [](const std::string &a, const std::string &b) {
-                return std::count(a.begin(), a.end(), '/') > std::count(b.begin(), b.end(), '/');
-            });
-            for (const auto &d : sorted) {
-                rmdir(d.c_str());
-            }
-        }
-    }
 }
-
 - (void)pause  { _session->pause(); }
 - (void)resume { _session->resume(); }
 

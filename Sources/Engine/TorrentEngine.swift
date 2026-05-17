@@ -112,7 +112,6 @@ public final class TorrentEngine: ObservableObject {
     /// a still-in-libtorrent handle can't reappear in the UI while removal is
     /// in flight (deleteFiles=true on big torrents takes ~1–2s of unlink calls).
     private var pendingRemovals: Set<String> = []
-    private var pendingFileDeletions: [String: String] = [:]
 
     // Multiple callbacks per info-hash: one for the PreAdd window, one for the Files tab, etc.
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
@@ -291,18 +290,15 @@ public final class TorrentEngine: ObservableObject {
     }
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
         guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
-        NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(deleteFiles))")
+        let flag = deleteFiles
+        NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(flag))")
         let id = torrent.id
-        let savePath = deleteFiles ? torrent.savePath : nil
         pendingRemovals.insert(id)
         torrents.removeAll { $0.id == id }
         let session = self.session
         queue.async {
-            session?.removeTorrent(h, deleteFiles: false)
-        }
-        // File deletion happens when torrentRemoved alert fires
-        if deleteFiles, let path = savePath {
-            pendingFileDeletions[id] = path
+            NSLog("[Canopy] removeTorrent calling ObjC with deleteFiles=\(flag)")
+            session?.removeTorrent(h, deleteFiles: flag)
         }
     }
     public func recheck(_ torrent: TorrentStatus) {
@@ -353,10 +349,6 @@ public final class TorrentEngine: ObservableObject {
                     DispatchQueue.main.async {
                         self.torrents.removeAll { $0.id == msg }
                         self.pendingRemovals.remove(msg)
-                        if let path = self.pendingFileDeletions.removeValue(forKey: msg) {
-                            let url = URL(fileURLWithPath: path)
-                            try? FileManager.default.removeItem(at: url)
-                        }
                     }
                 }
             }

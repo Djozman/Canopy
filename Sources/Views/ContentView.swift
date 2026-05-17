@@ -10,10 +10,6 @@ struct ContentView: View {
     @State private var showAddSheet  = false
     @State private var showSettings  = false
     @State private var showUpdateSheet = false
-    // Note: NOT @State. SwiftUI can re-evaluate body before a state write
-    // is observable, which would let two showPreAdd notifications both see
-    // a nil holder and each create a window. Using a process-wide singleton
-    // makes the check reliable across rapid successive calls.
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -79,7 +75,8 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showAddSheet) {
             AddTorrentSheet(engine: engine, onNext: { pending, magnetHandle in
-                showPreAddWindow(pending: pending, magnetHandle: magnetHandle)
+                showPreAddWindow(pending: pending, magnetHandle: magnetHandle,
+                                 magnetIndex: 0, isStub: true)
             })
         }
         .sheet(isPresented: $showSettings) {
@@ -94,32 +91,43 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
             guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
             let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
-            showPreAddWindow(pending: pending, magnetHandle: handle)
+            let magnetIndex = notif.userInfo?["magnetIndex"] as? Int ?? 0
+            showPreAddWindow(pending: pending, magnetHandle: handle,
+                             magnetIndex: magnetIndex, isStub: true)
         }
     }
 
-    // MARK: - Pre-add window
-
-    private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?) {
-        // If a pre-add window already exists, update it in place. This makes
-        // a second magnet click reuse the existing window instead of opening
-        // a new one. We also bring it to front in case it was hidden.
-        if let holder = PreAddCoordinator.shared.holder, let model = holder.model, let window = holder.window, window.isVisible {
+    private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?,
+                                   magnetIndex: Int, isStub: Bool) {
+        // For non-stub (metadata arrived), update the existing window
+        if !isStub, let holder = PreAddCoordinator.shared.windowForIndex(magnetIndex),
+           let model = holder.model, let window = holder.window, window.isVisible {
             model.pending = pending
             model.rebuildTree()
-            if !pending.name.isEmpty { holder.window?.title = pending.name }
+            if !pending.name.isEmpty { window.title = pending.name }
             holder.magnetHandle = magnetHandle
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        // Stale holder (window already closed) — discard so we create fresh.
-        if PreAddCoordinator.shared.holder?.window?.isVisible != true {
-            PreAddCoordinator.shared.holder = nil
+        // For index 0 stubs, reuse the existing single-holder window
+        if isStub, magnetIndex == 0,
+           let holder = PreAddCoordinator.shared.singleHolder,
+           let model = holder.model,
+           let window = holder.window,
+           window.isVisible {
+            model.pending = pending
+            model.rebuildTree()
+            if !pending.name.isEmpty { window.title = pending.name }
+            holder.magnetHandle = magnetHandle
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
         }
 
         let holder = PreAddWindowHolder()
+        holder.magnetIndex = magnetIndex
         let model  = PreAddViewModel(pending: pending)
         holder.model = model
         holder.magnetHandle = magnetHandle
@@ -135,12 +143,10 @@ struct ContentView: View {
                     engine.confirm(confirmed)
                 }
                 holder.window?.close()
-                PreAddCoordinator.shared.holder = nil
             },
             onCancel: {
                 if let handle = holder.magnetHandle { engine.cancelMagnet(handle: handle) }
                 holder.window?.close()
-                PreAddCoordinator.shared.holder = nil
             }
         )
 
@@ -153,24 +159,29 @@ struct ContentView: View {
             window.setFrame(screen.visibleFrame, display: false)
         }
 
-        // Clear the singleton if user closes via X / Cmd-W (otherwise we'd
-        // be left with a stale holder.window that was already torn down).
-        let observer = NotificationCenter.default.addObserver(
+        let idx = magnetIndex
+        let obs = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window, queue: .main
         ) { _ in
             Task { @MainActor in
-                if PreAddCoordinator.shared.holder?.window === window {
-                    PreAddCoordinator.shared.holder = nil
+                PreAddCoordinator.shared.activeWindows.removeAll { $0.window === window }
+                if PreAddCoordinator.shared.singleHolder?.window === window {
+                    PreAddCoordinator.shared.singleHolder = nil
                 }
+                PreAddCoordinator.shared.indexedWindows.removeValue(forKey: idx)
             }
         }
-        holder.closeObserver = observer
+        holder.closeObserver = obs
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
-        PreAddCoordinator.shared.holder = holder
+        PreAddCoordinator.shared.activeWindows.append(holder)
+        PreAddCoordinator.shared.indexedWindows[magnetIndex] = holder
+        if magnetIndex == 0 {
+            PreAddCoordinator.shared.singleHolder = holder
+        }
     }
 
     // MARK: - Empty state
@@ -255,18 +266,38 @@ final class PreAddWindowHolder {
     var window: NSWindow?
     var model: PreAddViewModel?
     var magnetHandle: LTTorrentHandle?
+    var magnetIndex: Int = 0
     var closeObserver: NSObjectProtocol?
+
+    deinit {
+        if let obs = closeObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+    }
 }
 
-/// Process-wide single-instance guard for the pre-add window. Plain stored
-/// var on a singleton — set/read are synchronous on the main thread, no
-/// SwiftUI re-evaluation latency, no risk of two notifications both seeing
-/// nil and each creating a window.
 @MainActor
 final class PreAddCoordinator {
     static let shared = PreAddCoordinator()
-    var holder: PreAddWindowHolder?
+    var singleHolder: PreAddWindowHolder?
+    var activeWindows: [PreAddWindowHolder] = []
+    var indexedWindows: [Int: PreAddWindowHolder] = [:]
     private init() {}
+
+    func windowForIndex(_ index: Int) -> PreAddWindowHolder? {
+        indexedWindows[index]
+    }
+
+    func updateWindow(at index: Int, pending: PendingTorrent, handle: LTTorrentHandle?) {
+        guard let holder = indexedWindows[index],
+              let model = holder.model,
+              let window = holder.window,
+              window.isVisible else { return }
+        model.pending = pending
+        model.rebuildTree()
+        if !pending.name.isEmpty { window.title = pending.name }
+        holder.magnetHandle = handle
+    }
 }
 
 // MARK: - Update sheet
