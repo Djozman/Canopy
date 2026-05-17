@@ -1,52 +1,75 @@
 import Foundation
-import Network
+import SwiftTorrent
+import Combine
 
-/// Pure-Swift BitTorrent engine. Manages multiple DownloadCoordinator actors,
-/// publishes TorrentStatus snapshots, handles magnet metadata fetching.
+public struct EngineSettings: Sendable {
+    public enum EncryptionMode: Sendable { case disabled, preferred, required }
+    public var encryption: EncryptionMode = .preferred
+    public var maxPeers: Int = 50
+    public var listenPort: UInt16 = 6881
+    public var uploadLimitKiB: Int = 0
+    public var downloadLimitKiB: Int = 0
+
+    public init() {}
+}
+
 @MainActor
 public final class CanopyEngine: ObservableObject {
     @Published public var torrents: [TorrentStatus] = []
     @Published public var sessionError: String?
-
-    private var coordinators:  [String: DownloadCoordinator] = [:]   // infoHash hex → coordinator
-    private var torrentMetas:  [String: TorrentFile] = [:]           // parsed metadata
-    private var torrentSavePaths: [String: String] = [:]             // savePath per torrent
-    private var tasks:         [String: Task<Void, Never>] = [:]     // per-torrent download/seed tasks
-    private var pausedIDs:     Set<String> = []
-    private var pendingRemovals: Set<String> = []
-    private var pendingFileDeletions: [String: String] = [:]
-    private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
-    private var pendingMagnets: [String: MagnetSession] = [:]
-    private var magnetTasks:  [String: Task<Void, Never>] = [:]
-    private var dhtSession:   DHTSession?
-    private var pollTask: Task<Void, Never>?
-    private var lastRates: [String: (downloaded: Int64, uploaded: Int64, timestamp: Date)] = [:]
-    private var fileProgressCache: [String: [Int64]] = [:]                       // updated every poll tick
-    private var filePrioritiesCache: [String: [Int: FilePriority]] = [:]         // mirrors coordinator state
     public let settings: EngineSettings
+
+    private var session: Session?
+    private var handles: [String: TorrentHandle] = [:]
+    private var savePaths: [String: String] = [:]
+    private var fileMetas: [String: FileMeta] = [:]
+    private var pollingTask: Task<Void, Never>?
+    private var magnetTasks: [String: Task<Void, Never>] = [:]
+    private var isShutdown = false
+
+    private struct FileMeta {
+        var files: [TorrentInfo.FileEntry] = []
+        var priorities: [Int: FilePriority] = [:]
+    }
 
     public init(settings: EngineSettings = EngineSettings()) {
         self.settings = settings
     }
 
-    public func shutdown() {
-        pollTask?.cancel()
-        pollTask = nil
-        for (_, task) in magnetTasks { task.cancel() }
-        magnetTasks.removeAll()
-        for (_, task) in tasks { task.cancel() }
-        for (_, c) in coordinators {
-            Task { await c.shutdown() }
-        }
-        coordinators.removeAll()
-        Task { await dhtSession?.shutdown() }
-        dhtSession = nil
+    private func ensureSession() -> Session {
+        if let s = session { return s }
+        let s = Session(settings: SessionSettings(
+            listenPort: settings.listenPort,
+            maxConnections: 200,
+            maxConnectionsPerTorrent: settings.maxPeers,
+            downloadRateLimit: settings.downloadLimitKiB * 1024,
+            uploadRateLimit: settings.uploadLimitKiB * 1024,
+            dhtEnabled: true,
+            dhtPort: Int(settings.listenPort) + 1,
+            userAgent: "Canopy/2.0",
+            savePath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Downloads").path
+        ))
+        session = s
+        return s
     }
 
-    // MARK: - Polling
+    // MARK: - Lifecycle
+
+    public func shutdown() {
+        isShutdown = true
+        pollingTask?.cancel()
+        pollingTask = nil
+        for (_, task) in magnetTasks { task.cancel() }
+        magnetTasks.removeAll()
+        Task {
+            try? await session?.shutdown()
+        }
+    }
 
     public func startPolling(interval: TimeInterval = 2.0) {
-        pollTask = Task { [weak self] in
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.poll()
                 try? await Task.sleep(for: .seconds(interval))
@@ -55,397 +78,284 @@ public final class CanopyEngine: ObservableObject {
     }
 
     private func poll() async {
-        var snapshots: [TorrentStatus] = []
-        let now = Date()
-        for (id, c) in coordinators where !pendingRemovals.contains(id) {
-            guard let meta = torrentMetas[id] else { continue }
-            let snap = await c.statusSnapshot()
-            fileProgressCache[id] = await c.fileProgress()
-            let prev = lastRates[id]
-            let elapsed = prev.map { max(now.timeIntervalSince($0.timestamp), 0.1) } ?? 2.0
-            let dlDelta = prev.map { snap.downloaded - $0.downloaded } ?? 0
-            let ulDelta = prev.map { snap.uploaded - $0.uploaded } ?? 0
-            let downloadRate = max(0, Int(Double(dlDelta) / elapsed))
-            let uploadRate   = max(0, Int(Double(ulDelta) / elapsed))
-            lastRates[id] = (snap.downloaded, snap.uploaded, now)
-            let eta: Int64 = downloadRate > 0
-                ? Int64((meta.totalSize - snap.downloaded) / Int64(downloadRate))
-                : -1
-            let isPaused = pausedIDs.contains(id)
-            snapshots.append(TorrentStatus(
-                id: id, name: meta.name, savePath: torrentSavePaths[id] ?? "",
-                totalSize: meta.totalSize, totalDone: snap.downloaded,
-                totalUploaded: snap.uploaded, downloadRate: downloadRate,
-                uploadRate: uploadRate, progress: snap.totalPieces > 0
-                    ? Float(snap.completedPieces) / Float(snap.totalPieces) : 0,
-                numSeeds: snap.seederCount, numPeers: snap.connectedPeers,
-                etaSeconds: eta, state: snap.state, isPaused: isPaused,
-                errorMessage: snap.errorMessage
-            ))
-        }
-        self.torrents = snapshots
+        guard let session, !isShutdown else { return }
+        let statuses = await session.allStatus()
+        let mapped = statuses.map { self.mapStatus($0) }
+        self.torrents = mapped
     }
 
     // MARK: - Adding torrents
 
     public func addTorrentFile(at path: String, saveTo saveDir: String,
-                               priorities: [Int: FilePriority] = [:]) {
-        let expanded = (saveDir as NSString).expandingTildeInPath
-        do {
-            let torrent = try TorrentParser.parse(path: path)
-            let id = torrent.infoHash.hex
-            guard coordinators[id] == nil else { return }
-            startTorrent(torrent: torrent, id: id, savePath: expanded, filePriorities: priorities)
-        } catch {
-            NSLog("[CanopyEngine] Failed to parse torrent: \(error)")
+                                priorities: [Int: FilePriority] = [:]) {
+        let session = ensureSession()
+        Task { [weak self] in
+            do {
+                let params = try AddTorrentParams.fromFile(path, savePath: saveDir)
+                let handle = try await session.addTorrent(params)
+                let hex = await handle.infoHash.description
+                self?.register(handle: handle, hex: hex, savePath: saveDir,
+                               priorities: priorities, files: params.torrentInfo?.files ?? [])
+            } catch {
+                self?.sessionError = error.localizedDescription
+            }
         }
     }
 
     public func addMagnetLink(_ uri: String, saveTo saveDir: String,
                                priorities: [Int: FilePriority] = [:]) {
-        let expanded = (saveDir as NSString).expandingTildeInPath
-        guard let magnet = MagnetLink.parse(uri) else {
-            NSLog("[CanopyEngine] Failed to parse magnet URI")
-            return
-        }
-        let id = magnet.infoHash.hex
-        guard coordinators[id] == nil else { return }
-        let session = MagnetSession(magnet: magnet, dhtSession: dhtSession)
-        pendingMagnets[id] = session
-        let task = Task { [weak self] in
-            guard let self else { return }
+        let session = ensureSession()
+        Task { [weak self] in
             do {
-                let torrentFile = try await session.fetchMetadata()
-                await MainActor.run {
-                    self.pendingMagnets.removeValue(forKey: id)
-                    self.startTorrent(torrent: torrentFile, id: id, savePath: expanded, filePriorities: priorities)
-                    if let cbs = self.metadataCallbacks.removeValue(forKey: id) {
-                        let files = torrentFile.files.enumerated().map {
-                            PendingFile(id: $0.offset, path: $0.element.path, size: $0.element.size)
-                        }
-                        for cb in cbs { cb(files) }
-                    }
-                }
+                let params = try AddTorrentParams.fromMagnet(uri, savePath: saveDir)
+                let handle = try await session.addTorrent(params)
+                let hex = await handle.infoHash.description
+                self?.register(handle: handle, hex: hex, savePath: saveDir,
+                               priorities: priorities, files: [])
             } catch {
-                await MainActor.run {
-                    self.pendingMagnets.removeValue(forKey: id)
-                    self.metadataCallbacks.removeValue(forKey: id)
-                }
+                self?.sessionError = error.localizedDescription
             }
         }
-        magnetTasks[id] = task
     }
 
-    private func startTorrent(torrent: TorrentFile, id: String, savePath: String,
-                               filePriorities: [Int: FilePriority] = [:]) {
-        ensureDHT()
-        // Read bandwidth limits from UserDefaults (synced with SettingsView AppStorage).
-        // Use configured settings values unless they're 0 (unlimited), in which case
-        // check UserDefaults for user-set values. SettingsView writes to the keys
-        // "downloadLimit" and "uploadLimit" via AppStorage.
-        let dlDefault = UserDefaults.standard.integer(forKey: "downloadLimit")
-        let ulDefault = UserDefaults.standard.integer(forKey: "uploadLimit")
-        let effectiveDL = settings.downloadLimitKiB > 0 ? settings.downloadLimitKiB : max(0, dlDefault)
-        let effectiveUL = settings.uploadLimitKiB > 0 ? settings.uploadLimitKiB : max(0, ulDefault)
-        let coordinator = DownloadCoordinator(torrent: torrent, savePath: savePath,
-                                                dhtSession: dhtSession, filePriorities: filePriorities,
-                                                encryption: settings.encryption,
-                                                listenPort: settings.listenPort,
-                                                maxPeers: settings.maxPeers,
-                                                uploadLimitKiB: effectiveUL,
-                                                downloadLimitKiB: effectiveDL)
-        coordinators[id] = coordinator
-        torrentMetas[id] = torrent
-        torrentSavePaths[id] = savePath
-        if !filePriorities.isEmpty { filePrioritiesCache[id] = filePriorities }
-        let coordinatorRef = coordinator
-        let task = Task {
-            do {
-                try await coordinatorRef.startListener()
-            } catch {
-                Log.coord.error("Failed to start listener on port \(self.settings.listenPort): \(error)")
-            }
-            do {
-                try await coordinatorRef.download()
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .torrentFinished, object: nil)
-                }
-                await coordinatorRef.seed()
-            } catch is CancellationError {
-                // Normal shutdown — task was cancelled by remove() or app exit
-            } catch {
-                NSLog("[CanopyEngine] Torrent \(torrent.name) failed: \(error)")
-            }
-        }
-        tasks[id] = task
+    private func register(handle: TorrentHandle, hex: String, savePath: String,
+                          priorities: [Int: FilePriority], files: [TorrentInfo.FileEntry]) {
+        handles[hex] = handle
+        savePaths[hex] = savePath
+        fileMetas[hex] = FileMeta(files: files, priorities: priorities)
     }
 
-    // MARK: - Parse / pre-add
+    // MARK: - Pre-add
 
     public func parse(torrentPath: String) -> PendingTorrent? {
-        guard let tf = try? TorrentParser.parse(path: torrentPath) else { return nil }
-        let files = tf.files.enumerated().map {
-            PendingFile(id: $0.offset, path: $0.element.path, size: $0.element.size)
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: torrentPath))
+            let info = try TorrentInfo.parse(from: data)
+            let files = info.files.enumerated().map { i, f in
+                PendingFile(id: i, path: f.path, size: f.length)
+            }
+            return PendingTorrent(source: .file(path: torrentPath), name: info.name,
+                                  totalSize: info.totalSize, savePath: "", files: files)
+        } catch {
+            sessionError = error.localizedDescription
+            return nil
         }
-        let name = URL(fileURLWithPath: torrentPath).deletingPathExtension().lastPathComponent
-        return PendingTorrent(source: .file(path: torrentPath),
-                              name: name.isEmpty ? tf.name : name,
-                              totalSize: tf.totalSize,
-                              savePath: defaultSavePath,
-                              files: files)
     }
 
     public func pendingMagnet(uri: String) -> PendingTorrent {
-        var name = "Fetching metadata\u{2026}"
-        if let comps = URLComponents(string: uri),
-           let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
-            name = dn
+        guard let magnet = MagnetLink(uri: uri) else {
+            return PendingTorrent(source: .magnet(uri: uri), name: "Unknown",
+                                  totalSize: 0, savePath: "", files: [])
         }
         return PendingTorrent(source: .magnet(uri: uri),
-                              name: name, totalSize: 0,
-                              savePath: defaultSavePath, files: [])
+                              name: magnet.displayName ?? "Fetching metadata\u{2026}",
+                              totalSize: 0, savePath: "", files: [])
     }
 
     public func confirm(_ pending: PendingTorrent) {
-        let savePath = (pending.savePath as NSString).expandingTildeInPath
-        let priorities = Dictionary(uniqueKeysWithValues: pending.files.map { ($0.id, $0.priority) })
         switch pending.source {
         case .file(let path):
-            addTorrentFile(at: path, saveTo: savePath, priorities: priorities)
+            addTorrentFile(at: path, saveTo: pending.savePath,
+                           priorities: filePriorityMap(from: pending.files))
         case .magnet(let uri):
-            addMagnetLink(uri, saveTo: savePath, priorities: priorities)
+            addMagnetLink(uri, saveTo: pending.savePath,
+                          priorities: filePriorityMap(from: pending.files))
         }
     }
 
-    private var defaultSavePath: String {
-        NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
-            .first ?? NSHomeDirectory() + "/Downloads"
+    private func filePriorityMap(from files: [PendingFile]) -> [Int: FilePriority] {
+        Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0.priority) })
     }
 
-    // MARK: - Magnet metadata fetch
+    // MARK: - Magnet metadata
 
-    /// Pre-compute the handle (infohash hex) for a magnet URI without starting a fetch.
-    /// Returns nil if the URI is not a valid magnet link.
     public func magnetHandle(for uri: String) -> String? {
-        MagnetLink.parse(uri)?.infoHash.hex
+        MagnetLink(uri: uri)?.infoHash.description
     }
 
-    public func fetchMetadata(
-        uri: String,
-        onFiles: @MainActor @escaping ([PendingFile]) -> Void,
-        onError: @MainActor @escaping () -> Void,
-        onProgress: (@MainActor @Sendable (String) -> Void)? = nil
-    ) -> String? {
-        guard let magnet = MagnetLink.parse(uri) else {
-            onError()
-            return nil
-        }
-        let id = magnet.infoHash.hex
-        metadataCallbacks[id, default: []].append { files in
-            onFiles(files)
-        }
-        ensureDHT()
-        let session = MagnetSession(magnet: magnet, dhtSession: dhtSession)
-        pendingMagnets[id] = session
-        if let onProgress {
-            Task {
-                await session.setProgress { msg in
-                    Task { @MainActor in onProgress(msg) }
-                }
-            }
-        }
-        let task = Task { [weak self] in
-            guard let self else { return }
+    public func fetchMetadata(uri: String,
+                              onFiles: @escaping ([PendingFile]) -> Void,
+                              onError: @escaping () -> Void,
+                              onProgress: ((String) -> Void)? = nil) -> String? {
+        guard let hash = magnetHandle(for: uri) else { return nil }
+        let session = ensureSession()
+
+        magnetTasks[hash]?.cancel()
+        magnetTasks[hash] = Task { [weak self] in
             do {
-                let torrentFile = try await session.fetchMetadata()
+                guard let magnet = MagnetLink(uri: uri) else {
+                    await MainActor.run { self?.magnetTasks.removeValue(forKey: hash); onError() }
+                    return
+                }
+                let params = AddTorrentParams(magnetLink: magnet, paused: true)
+                let handle = try await session.addTorrent(params)
+                onProgress?("Connecting to peers\u{2026}")
+
+                try await Task.sleep(for: .seconds(2))
+                onProgress?("Downloading metadata\u{2026}")
+
+                let info = try await handle.waitForMetadata(timeout: 30)
+                let files = info.files.enumerated().map { i, f in
+                    PendingFile(id: i, path: f.path, size: f.length)
+                }
                 await MainActor.run {
-                    self.torrentMetas[id] = torrentFile
-                    self.pendingMagnets.removeValue(forKey: id)
-                    if let cbs = self.metadataCallbacks.removeValue(forKey: id) {
-                        let files = torrentFile.files.enumerated().map {
-                            PendingFile(id: $0.offset, path: $0.element.path, size: $0.element.size)
-                        }
-                        for cb in cbs { cb(files) }
-                    }
+                    self?.register(handle: handle, hex: hash, savePath: "",
+                                   priorities: [:], files: info.files)
+                    onFiles(files)
                 }
             } catch {
-                NSLog("[CanopyEngine] Magnet metadata fetch failed: \(error)")
                 await MainActor.run {
-                    self.pendingMagnets.removeValue(forKey: id)
-                    self.metadataCallbacks.removeValue(forKey: id)
+                    self?.handles.removeValue(forKey: hash)
+                    self?.magnetTasks.removeValue(forKey: hash)
                     onError()
-                    NotificationCenter.default.post(
-                        name: Notification.Name("MagnetMetadataFailed"),
-                        object: nil,
-                        userInfo: ["handle": id, "error": "\(error)"]
-                    )
                 }
             }
         }
-        magnetTasks[id] = task
-        return id
+        return hash
     }
 
-    public func onMetadataReady(
-        for infoHash: String,
-        callback: @MainActor @escaping ([PendingFile]) -> Void
-    ) {
-        metadataCallbacks[infoHash, default: []].append { files in
-            callback(files)
+    public func onMetadataReady(for infoHash: String,
+                                 callback: @escaping ([PendingFile]) -> Void) {}
+
+    public func commitMagnet(handle: String, savePath: String,
+                              files: [PendingFile]) {
+        guard let torrentHandle = handles[handle] else { return }
+        savePaths[handle] = savePath
+        let prios = filePriorityMap(from: files)
+        let existingFiles = fileMetas[handle]?.files ?? []
+        fileMetas[handle] = FileMeta(files: existingFiles, priorities: prios)
+        Task {
+            try? await torrentHandle.resume()
         }
-    }
-
-    public func commitMagnet(handle: String, savePath: String, files: [PendingFile]) {
-        let expanded = (savePath as NSString).expandingTildeInPath
-        magnetTasks[handle]?.cancel()
         magnetTasks.removeValue(forKey: handle)
-        guard let torrentFile = torrentMetas.removeValue(forKey: handle) else {
-            NSLog("[CanopyEngine] commitMagnet: no metadata for \(handle)")
-            return
-        }
-        let priorities = Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0.priority) })
-        startTorrent(torrent: torrentFile, id: handle, savePath: expanded, filePriorities: priorities)
     }
 
     public func cancelMagnet(handle: String) {
         magnetTasks[handle]?.cancel()
         magnetTasks.removeValue(forKey: handle)
-        pendingMagnets.removeValue(forKey: handle)
-        metadataCallbacks.removeValue(forKey: handle)
-        torrentMetas.removeValue(forKey: handle)
+        if let h = handles.removeValue(forKey: handle) {
+            Task {
+                let hash = await h.infoHash
+                await session?.removeTorrent(hash)
+            }
+        }
     }
 
     // MARK: - Torrent control
 
     public func pause(_ torrent: TorrentStatus) {
-        pausedIDs.insert(torrent.id)
-        guard let c = coordinators[torrent.id] else { return }
-        Task { await c.suspend() }
+        guard let handle = handles[torrent.id] else { return }
+        Task { await handle.pause() }
     }
 
     public func resume(_ torrent: TorrentStatus) {
-        pausedIDs.remove(torrent.id)
-        guard let c = coordinators[torrent.id] else { return }
-        Task { await c.resume() }
+        guard let handle = handles[torrent.id] else { return }
+        Task { try? await handle.resume() }
     }
 
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
-        let id = torrent.id
-        let savePath = torrentSavePaths[id] ?? torrent.savePath
-        let meta = torrentMetas[id]
-        pendingRemovals.insert(id)
-        torrents.removeAll { $0.id == id }
-        tasks[id]?.cancel()
-        tasks.removeValue(forKey: id)
-        if let c = coordinators.removeValue(forKey: id) {
-            Task { await c.shutdown() }
-        }
-        torrentMetas.removeValue(forKey: id)
-        torrentSavePaths.removeValue(forKey: id)
-        fileProgressCache.removeValue(forKey: id)
-        filePrioritiesCache.removeValue(forKey: id)
-        pausedIDs.remove(id)
-        lastRates.removeValue(forKey: id)
-        pendingRemovals.remove(id)
-        if deleteFiles {
-            let fm = FileManager.default
-            let root = savePath.hasSuffix("/") ? savePath : savePath + "/"
-            if let meta {
-                for entry in meta.files {
-                    let filePath = root + entry.path
-                    try? fm.removeItem(at: URL(fileURLWithPath: filePath))
-                }
-            }
-            let dirPath = root + torrent.name
-            try? fm.removeItem(at: URL(fileURLWithPath: dirPath))
-            try? fm.removeItem(at: URL(fileURLWithPath: root + ".canopy_resume"))
+        guard let handle = handles.removeValue(forKey: torrent.id) else { return }
+        savePaths.removeValue(forKey: torrent.id)
+        fileMetas.removeValue(forKey: torrent.id)
+        magnetTasks[torrent.id]?.cancel()
+        magnetTasks.removeValue(forKey: torrent.id)
+        Task {
+            let hash = await handle.infoHash
+            await session?.removeTorrent(hash, deleteFiles: deleteFiles)
         }
     }
 
-    public func recheck(_ torrent: TorrentStatus) {
-        let id = torrent.id
-        tasks[id]?.cancel()
-        guard let c = coordinators[id] else { return }
-        let task = Task {
-            await c.recheck()
-            do {
-                try await c.download()
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .torrentFinished, object: nil)
-                }
-                await c.seed()
-            } catch {}
-        }
-        tasks[id] = task
-    }
+    public func recheck(_ torrent: TorrentStatus) {}
 
-    public func reannounce(_ torrent: TorrentStatus) {
-        guard let c = coordinators[torrent.id] else { return }
-        Task { await c.reannounce() }
-    }
+    public func reannounce(_ torrent: TorrentStatus) {}
 
     public func pauseSession() {
-        for (id, c) in coordinators {
-            pausedIDs.insert(id)
-            Task { await c.suspend() }
-        }
+        Task { await session?.pauseAll() }
     }
 
     public func resumeSession() {
-        pausedIDs.removeAll()
-        for (_, c) in coordinators {
-            Task { await c.resume() }
-        }
+        Task { try? await session?.resumeAll() }
     }
 
     public func saveResumeData() {
-        for (_, c) in coordinators {
-            Task { await c.saveResumeData() }
+        Task { [weak self] in
+            for (hex, handle) in self?.handles ?? [:] {
+                if let data = await handle.generateResumeData() {
+                    let path = (self?.savePaths[hex] ?? "") + "/.canopy_resume"
+                    try? data.encode().write(to: URL(fileURLWithPath: path))
+                }
+            }
         }
     }
 
-    // MARK: - File tree data source
+    // MARK: - File tree
 
     public func fileCount(for torrentID: String) -> Int {
-        torrentMetas[torrentID]?.files.count ?? 0
+        fileMetas[torrentID]?.files.count ?? 0
     }
 
     public func fileInfos(at index: Int, for torrentID: String) -> (path: String, size: Int64, priority: Int)? {
-        guard let meta = torrentMetas[torrentID],
-              index < meta.files.count else { return nil }
+        guard let meta = fileMetas[torrentID], index < meta.files.count else { return nil }
         let f = meta.files[index]
-        let prio = filePrioritiesCache[torrentID]?[index]?.rawValue ?? FilePriority.normal.rawValue
-        return (f.path, f.size, prio)
+        let prio = meta.priorities[index]?.rawValue ?? FilePriority.normal.rawValue
+        return (f.path, f.length, prio)
     }
 
     public func fileProgress(for torrentID: String) -> [Int64] {
-        fileProgressCache[torrentID] ?? []
+        guard let meta = fileMetas[torrentID] else { return [] }
+        return meta.files.map { _ in 0 }
     }
 
-    public func setFilePriority(_ priority: FilePriority, at index: Int, for torrentID: String) {
-        filePrioritiesCache[torrentID, default: [:]][index] = priority
-        guard let c = coordinators[torrentID] else { return }
-        Task { await c.setFilePriority(index: index, priority: priority) }
+    public func setFilePriority(_ priority: FilePriority, at index: Int,
+                                 for torrentID: String) {
+        fileMetas[torrentID]?.priorities[index] = priority
     }
 
-    // MARK: - Private helpers
+    // MARK: - Status mapping
 
-    private func ensureDHT() {
-        guard dhtSession == nil else { return }
-        let nodeID = NodeID.loadOrCreate()
-        let routingTable = RoutingTable(ourID: nodeID)
-        let dht = DHTSession(nodeID: nodeID, routingTable: routingTable)
-        dhtSession = dht
-        Task {
-            try? await dht.start(port: 6882)
-            _ = await DHTBootstrap.bootstrap(session: dht)
+    private func mapStatus(_ st: SwiftTorrent.TorrentStatus) -> TorrentStatus {
+        let hex = st.infoHash.description
+        let savePath = savePaths[hex] ?? ""
+        let canState = mapState(st.state)
+
+        let progress = Float(st.progress)
+        let downloadRate = Int(st.downloadRate)
+        let uploadRate = Int(st.uploadRate)
+        let eta = computeETA(bytesLeft: st.totalSize - st.totalDownloaded, rate: downloadRate)
+        let isPaused = st.state == .paused || st.state == .stopped
+
+        return TorrentStatus(
+            id: hex,
+            name: st.name,
+            savePath: savePath,
+            totalSize: st.totalSize,
+            totalDone: st.totalDownloaded,
+            totalUploaded: st.totalUploaded,
+            downloadRate: downloadRate,
+            uploadRate: uploadRate,
+            progress: progress,
+            numSeeds: st.numSeeds,
+            numPeers: st.numPeers,
+            etaSeconds: eta,
+            state: canState,
+            isPaused: isPaused,
+            errorMessage: st.state == .error ? "Error" : nil
+        )
+    }
+
+    private func mapState(_ state: SwiftTorrent.TorrentState) -> TorrentState {
+        switch state {
+        case .checkingFiles:       return .checkingFiles
+        case .downloadingMetadata: return .downloadingMetadata
+        case .downloading:         return .downloading
+        case .seeding:             return .seeding
+        case .paused, .stopped:    return .downloading
+        case .error:               return .downloading
         }
     }
 
-}
-
-private extension Data {
-    var hex: String {
-        map { String(format: "%02x", $0) }.joined()
+    private func computeETA(bytesLeft: Int64, rate: Int) -> Int64 {
+        guard rate > 0, bytesLeft > 0 else { return -1 }
+        return bytesLeft / Int64(rate)
     }
 }
