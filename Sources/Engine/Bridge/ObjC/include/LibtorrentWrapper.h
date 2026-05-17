@@ -63,6 +63,12 @@ typedef NS_ENUM(int, LTAlertType) {
 - (nullable NSDictionary *)trackerInfoAtIndex:(int)index;
 @property (readonly) int peerCount;
 - (nullable NSDictionary *)peerInfoAtIndex:(int)index;
+
+// Piece map support
+@property (readonly) int pieceCount;
+@property (readonly) int64_t pieceSize;
+/// Returns NSData of length pieceCount where each byte is 0 or 1.
+- (NSData *)pieceDownloadedBits;
 @end
 
 @interface LTFileEntry : NSObject

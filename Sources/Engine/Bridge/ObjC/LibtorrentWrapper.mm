@@ -259,6 +259,30 @@ static int mapState(lt::torrent_status::state_t s) {
     } catch (...) { return nil; }
 }
 
+// ─── Piece map ────────────────────────────────────────────────────────────
+
+- (int)pieceCount {
+    if (!_cached) [self refresh];
+    return _cachedStatus.pieces.size();
+}
+
+- (int64_t)pieceSize {
+    auto ti = _handle.torrent_file();
+    return ti ? ti->piece_length() : 0;
+}
+
+- (NSData *)pieceDownloadedBits {
+    if (!_cached) [self refresh];
+    int count = _cachedStatus.pieces.size();
+    if (count <= 0) return [NSData data];
+    NSMutableData *data = [NSMutableData dataWithLength:count];
+    uint8_t *bytes = (uint8_t *)data.mutableBytes;
+    for (int i = 0; i < count; i++) {
+        bytes[i] = _cachedStatus.pieces.get_bit(i) ? 1 : 0;
+    }
+    return data;
+}
+
 @end
 
 // ─── LibtorrentSession ─────────────────────────────────────────────────────
