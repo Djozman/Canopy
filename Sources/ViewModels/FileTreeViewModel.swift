@@ -1,7 +1,7 @@
 // FileTreeViewModel.swift — builds/sorts the file tree from bridge data
 
-import Foundation
 import ClibtorrentBridge
+import Foundation
 
 public enum FileSortOrder {
     case nameAsc, nameDesc, sizeAsc, sizeDesc
@@ -25,11 +25,7 @@ public final class FileTreeViewModel: ObservableObject {
 
     public func refresh(torrent: TorrentStatus) {
         self.torrent = torrent
-        if roots.isEmpty {
-            refreshFiles()
-        } else {
-            refreshProgress()
-        }
+        refreshFiles()
     }
 
     public func setSort(_ order: FileSortOrder) {
@@ -61,7 +57,8 @@ public final class FileTreeViewModel: ObservableObject {
         for i in 0..<count {
             var outSize: Int64 = 0
             var outPriority: Int32 = 0
-            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority) else { continue }
+            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority)
+            else { continue }
             let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
             infos.append((i, path, outSize, down, Int(outPriority)))
         }
@@ -83,13 +80,13 @@ public final class FileTreeViewModel: ObservableObject {
     }
 
     /// Walk the existing tree and update mutable data (progress, priority).
-    /// Nodes are matched by fileIndex for leaves and by name for folders.
-    /// We never replace a node object — only mutate its properties.
+    /// Nodes are matched by fileIndex for leaves. We never replace a node
+    /// object — only mutate its properties — so isExpanded survives polls.
     private func patchTree(
         _ nodes: inout [FileNode],
         infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
     ) {
-        // Build a flat index -> info map for O(1) lookup
+        // Build a flat index → info map for O(1) lookup
         var byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)] = [:]
         for info in infos {
             byIndex[info.index] = (info.size, info.downloaded, info.priority)
@@ -97,6 +94,9 @@ public final class FileTreeViewModel: ObservableObject {
         patchNodes(&nodes, byIndex: byIndex)
     }
 
+    /// Recurse into the tree, patching leaves that match the byIndex map.
+    /// Folder nodes are never replaced — their children array is mutated in
+    /// place so SwiftUI diffing sees identity stability.
     private func patchNodes(
         _ nodes: inout [FileNode],
         byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)]
@@ -117,30 +117,6 @@ public final class FileTreeViewModel: ObservableObject {
         }
     }
 
-    private func refreshProgress() {
-        guard let handle = torrent.handle else { return }
-        let count = Int(handle.fileCount)
-        guard count > 0 else { return }
-        let progress = handle.fileProgressAll() as [AnyObject]
-
-        for i in 0..<count {
-            let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
-            patchProgress(nodes: roots, fileIndex: i, downloaded: down)
-        }
-        for node in roots { computeFolderSize(node) }
-    }
-
-    private func patchProgress(nodes: [FileNode], fileIndex: Int, downloaded: Int64) {
-        for n in nodes {
-            if let children = n.children {
-                patchProgress(nodes: children, fileIndex: fileIndex, downloaded: downloaded)
-            } else if n.fileIndex == fileIndex {
-                n.downloaded = downloaded
-                return
-            }
-        }
-    }
-
     private func applyPriority(_ priority: FilePriority, to node: FileNode) {
         if let children = node.children {
             for child in children { applyPriority(priority, to: child) }
@@ -156,20 +132,23 @@ public final class FileTreeViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Tree construction (first build only)
+
     private func buildTree(
         _ infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
     ) -> [FileNode] {
-        var rootDict:  [String: FileNode] = [:]
+        var rootDict: [String: FileNode] = [:]
         var rootOrder: [String] = []
 
         for info in infos {
             var comps = info.path.split(separator: "/").map(String.init)
             let fileName = comps.removeLast()
 
-            let leaf = FileNode(name: fileName, size: info.size,
-                                downloaded: info.downloaded, fileIndex: info.index,
-                                priority: FilePriority(rawValue: info.priority) ?? .normal,
-                                children: nil)
+            let leaf = FileNode(
+                name: fileName, size: info.size,
+                downloaded: info.downloaded, fileIndex: info.index,
+                priority: FilePriority(rawValue: info.priority) ?? .normal,
+                children: nil)
 
             if comps.isEmpty {
                 let key = fileName
@@ -215,18 +194,20 @@ public final class FileTreeViewModel: ObservableObject {
             totalSize += s.0
             totalDone += s.1
         }
-        node.size       = totalSize
+        node.size = totalSize
         node.downloaded = totalDone
         return (totalSize, totalDone)
     }
+
+    // MARK: - Sorting
 
     private func applySort(_ nodes: inout [FileNode], order: FileSortOrder) {
         nodes.sort { a, b in
             if a.isFolder != b.isFolder { return a.isFolder }
             switch order {
-            case .nameAsc:  return a.name.localizedCompare(b.name) == .orderedAscending
+            case .nameAsc: return a.name.localizedCompare(b.name) == .orderedAscending
             case .nameDesc: return a.name.localizedCompare(b.name) == .orderedDescending
-            case .sizeAsc:  return a.size < b.size
+            case .sizeAsc: return a.size < b.size
             case .sizeDesc: return a.size > b.size
             }
         }
