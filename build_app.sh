@@ -11,8 +11,8 @@ plutil -replace CFBundleExecutable -string Canopy Canopy.app/Contents/Info.plist
 plutil -replace CFBundleIdentifier -string com.canopy.client Canopy.app/Contents/Info.plist
 plutil -replace CFBundleName -string Canopy Canopy.app/Contents/Info.plist
 plutil -replace CFBundlePackageType -string APPL Canopy.app/Contents/Info.plist
-plutil -replace CFBundleVersion -string 2.3.1 Canopy.app/Contents/Info.plist
-plutil -replace CFBundleShortVersionString -string 2.3.1 Canopy.app/Contents/Info.plist
+plutil -replace CFBundleVersion -string 2.3.2 Canopy.app/Contents/Info.plist
+plutil -replace CFBundleShortVersionString -string 2.3.2 Canopy.app/Contents/Info.plist
 plutil -replace CFBundleIconFile -string AppIcon Canopy.app/Contents/Info.plist
 chmod +x Canopy.app/Contents/MacOS/Canopy
 touch Canopy.app

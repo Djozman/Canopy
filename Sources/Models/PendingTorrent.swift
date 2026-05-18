@@ -3,7 +3,7 @@
 import Foundation
 
 public struct PendingTorrent {
-    public enum Source {
+    public enum Source: Sendable {
         case file(path: String)
         case magnet(uri: String)
     }

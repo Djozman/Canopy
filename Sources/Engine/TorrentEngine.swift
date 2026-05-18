@@ -2,14 +2,14 @@
 // Swift wrapper around the ObjC++ bridge.
 // Owns the LibtorrentSession lifecycle, polls for status, handles alerts.
 
-import Foundation
-import Combine
 import ClibtorrentBridge
+import Combine
+import Foundation
 
 // MARK: - Sendable conformance for ObjC bridge types
 
-extension LTTorrentHandle: @unchecked Sendable {}
-extension LibtorrentSession: @unchecked Sendable {}
+extension LTTorrentHandle: @retroactive @unchecked Sendable {}
+extension LibtorrentSession: @retroactive @unchecked Sendable {}
 
 // MARK: - Swift mirror of LTTorrentHandle
 
@@ -32,10 +32,12 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
 
     internal let handle: LTTorrentHandle?
 
-    init(id: String, name: String, savePath: String, totalSize: Int64, totalDone: Int64,
-         totalUploaded: Int64, downloadRate: Int, uploadRate: Int, progress: Float,
-         numSeeds: Int, numPeers: Int, etaSeconds: Int64, state: TorrentState,
-         isPaused: Bool, errorMessage: String?, handle: LTTorrentHandle?) {
+    init(
+        id: String, name: String, savePath: String, totalSize: Int64, totalDone: Int64,
+        totalUploaded: Int64, downloadRate: Int, uploadRate: Int, progress: Float,
+        numSeeds: Int, numPeers: Int, etaSeconds: Int64, state: TorrentState,
+        isPaused: Bool, errorMessage: String?, handle: LTTorrentHandle?
+    ) {
         self.id = id
         self.name = name
         self.savePath = savePath
@@ -55,43 +57,43 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
     }
 
     init(from h: LTTorrentHandle) {
-        self.id            = h.infoHash
-        self.name          = h.name
-        self.savePath      = h.savePath
-        self.totalSize     = h.totalSize
-        self.totalDone     = h.totalDone
+        self.id = h.infoHash
+        self.name = h.name
+        self.savePath = h.savePath
+        self.totalSize = h.totalSize
+        self.totalDone = h.totalDone
         self.totalUploaded = h.totalUploaded
-        self.downloadRate  = Int(h.downloadRate)
-        self.uploadRate    = Int(h.uploadRate)
-        self.progress      = h.progress
-        self.numSeeds      = Int(h.numSeeds)
-        self.numPeers      = Int(h.numPeers)
-        self.etaSeconds    = h.etaSeconds
-        self.state         = TorrentState(rawValue: Int(h.state.rawValue)) ?? .downloading
-        self.isPaused      = h.paused
-        self.errorMessage  = h.errorMessage
-        self.handle        = h
+        self.downloadRate = Int(h.downloadRate)
+        self.uploadRate = Int(h.uploadRate)
+        self.progress = h.progress
+        self.numSeeds = Int(h.numSeeds)
+        self.numPeers = Int(h.numPeers)
+        self.etaSeconds = h.etaSeconds
+        self.state = TorrentState(rawValue: Int(h.state.rawValue)) ?? .downloading
+        self.isPaused = h.paused
+        self.errorMessage = h.errorMessage
+        self.handle = h
     }
 }
 
 public enum TorrentState: Int {
-    case checkingFiles       = 0
+    case checkingFiles = 0
     case downloadingMetadata = 1
-    case downloading         = 2
-    case finished            = 3
-    case seeding             = 4
-    case allocating          = 5
-    case checkingResumeData  = 6
+    case downloading = 2
+    case finished = 3
+    case seeding = 4
+    case allocating = 5
+    case checkingResumeData = 6
 
     public var label: String {
         switch self {
-        case .checkingFiles:       return "Checking"
+        case .checkingFiles: return "Checking"
         case .downloadingMetadata: return "Metadata"
-        case .downloading:         return "Downloading"
-        case .finished:            return "Finished"
-        case .seeding:             return "Seeding"
-        case .allocating:          return "Allocating"
-        case .checkingResumeData:  return "Resuming"
+        case .downloading: return "Downloading"
+        case .finished: return "Finished"
+        case .seeding: return "Seeding"
+        case .allocating: return "Allocating"
+        case .checkingResumeData: return "Resuming"
         }
     }
 }
@@ -134,7 +136,8 @@ public final class TorrentEngine: ObservableObject {
     deinit {}
 
     public func startPolling(interval: TimeInterval = 2.0) {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
+            [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.poll() }
         }
@@ -165,20 +168,23 @@ public final class TorrentEngine: ObservableObject {
         }
         let total = files.reduce(0) { $0 + $1.size }
         let name = URL(fileURLWithPath: torrentPath).deletingPathExtension().lastPathComponent
-        return PendingTorrent(source: .file(path: torrentPath),
-                              name: name, totalSize: total,
-                              savePath: defaultSavePath, files: files)
+        return PendingTorrent(
+            source: .file(path: torrentPath),
+            name: name, totalSize: total,
+            savePath: defaultSavePath, files: files)
     }
 
     public func pendingMagnet(uri: String) -> PendingTorrent {
         var name = "Fetching metadata\u{2026}"
         if let comps = URLComponents(string: uri),
-           let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+            let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value
+        {
             name = dn
         }
-        return PendingTorrent(source: .magnet(uri: uri),
-                              name: name, totalSize: 0,
-                              savePath: defaultSavePath, files: [])
+        return PendingTorrent(
+            source: .magnet(uri: uri),
+            name: name, totalSize: 0,
+            savePath: defaultSavePath, files: [])
     }
 
     public func confirm(_ pending: PendingTorrent) {
@@ -192,12 +198,17 @@ public final class TorrentEngine: ObservableObject {
         queue.async {
             switch source {
             case .file(let path):
-                let result = session?.addTorrentFile(path, savePath: savePath,
-                                                    priorities: priorities.isEmpty ? nil : priorities)
-                NSLog("[Canopy] confirm: addTorrentFile(\(path)) -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")")
+                let result = session?.addTorrentFile(
+                    path, savePath: savePath,
+                    priorities: priorities.isEmpty ? nil : priorities)
+                NSLog(
+                    "[Canopy] confirm: addTorrentFile(\(path)) -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")"
+                )
             case .magnet(let uri):
                 let result = session?.addMagnetURI(uri, savePath: savePath)
-                NSLog("[Canopy] confirm: addMagnetURI -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")")
+                NSLog(
+                    "[Canopy] confirm: addMagnetURI -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")"
+                )
             }
         }
     }
@@ -250,7 +261,8 @@ public final class TorrentEngine: ObservableObject {
         let expanded = (savePath as NSString).expandingTildeInPath
         let session = self.session
         queue.async {
-            session?.commitMagnet(handle, savePath: expanded, priorities: priorities.isEmpty ? nil : priorities)
+            session?.commitMagnet(
+                handle, savePath: expanded, priorities: priorities.isEmpty ? nil : priorities)
         }
     }
 
@@ -279,17 +291,26 @@ public final class TorrentEngine: ObservableObject {
     }
 
     public func pause(_ torrent: TorrentStatus) {
-        guard let h = torrent.handle else { NSLog("[Canopy] pause: no handle for \(torrent.name)"); return }
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] pause: no handle for \(torrent.name)")
+            return
+        }
         NSLog("[Canopy] pause(\(torrent.name))")
         queue.async { h.pause() }
     }
     public func resume(_ torrent: TorrentStatus) {
-        guard let h = torrent.handle else { NSLog("[Canopy] resume: no handle for \(torrent.name)"); return }
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] resume: no handle for \(torrent.name)")
+            return
+        }
         NSLog("[Canopy] resume(\(torrent.name))")
         queue.async { h.resume() }
     }
     public func remove(_ torrent: TorrentStatus, deleteFiles: Bool = false) {
-        guard let h = torrent.handle else { NSLog("[Canopy] remove: no handle for \(torrent.name)"); return }
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] remove: no handle for \(torrent.name)")
+            return
+        }
         let flag = deleteFiles
         NSLog("[Canopy] remove(\(torrent.name), deleteFiles=\(flag))")
         let id = torrent.id
@@ -302,18 +323,33 @@ public final class TorrentEngine: ObservableObject {
         }
     }
     public func recheck(_ torrent: TorrentStatus) {
-        guard let h = torrent.handle else { NSLog("[Canopy] recheck: no handle for \(torrent.name)"); return }
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] recheck: no handle for \(torrent.name)")
+            return
+        }
         NSLog("[Canopy] recheck(\(torrent.name))")
         queue.async { h.recheck() }
     }
     public func reannounce(_ torrent: TorrentStatus) {
-        guard let h = torrent.handle else { NSLog("[Canopy] reannounce: no handle for \(torrent.name)"); return }
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] reannounce: no handle for \(torrent.name)")
+            return
+        }
         NSLog("[Canopy] reannounce(\(torrent.name))")
         queue.async { h.reannounce() }
     }
-    public func pauseSession()  { let s = session; queue.async { s?.pause() } }
-    public func resumeSession() { let s = session; queue.async { s?.resume() } }
-    public func saveResumeData() { let s = session; queue.async { s?.saveResumeDataAll() } }
+    public func pauseSession() {
+        let s = session
+        queue.async { s?.pause() }
+    }
+    public func resumeSession() {
+        let s = session
+        queue.async { s?.resume() }
+    }
+    public func saveResumeData() {
+        let s = session
+        queue.async { s?.saveResumeDataAll() }
+    }
 
     private func poll() {
         let session = self.session
