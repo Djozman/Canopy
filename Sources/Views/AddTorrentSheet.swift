@@ -1,18 +1,18 @@
 // AddTorrentSheet.swift
 
-import SwiftUI
-import UniformTypeIdentifiers
 import AppKit
 import ClibtorrentBridge
+import SwiftUI
+import UniformTypeIdentifiers
 
 struct AddTorrentSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var magnetURI    = ""
-    @State private var torrentPath  = ""
-    @State private var saveDir      = FileManager.default.homeDirectoryForCurrentUser
-                                        .appendingPathComponent("Downloads").path
+    @State private var magnetURI = ""
+    @State private var torrentPath = ""
+    @State private var saveDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Downloads").path
     @State private var showFilePicker = false
-    @State private var tab            = 0
+    @State private var tab = 0
     @State private var parseError: String?
 
     let engine: TorrentEngine
@@ -70,10 +70,12 @@ struct AddTorrentSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Next\u{2026}") {
-                        if tab == 0 { handleMagnet() }
-                        else        { handleTorrentFile() }
+                        if tab == 0 { handleMagnet() } else { handleTorrentFile() }
                     }
-                    .disabled(tab == 0 ? magnetURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty : torrentPath.isEmpty)
+                    .disabled(
+                        tab == 0
+                            ? magnetURI.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            : torrentPath.isEmpty)
                 }
             }
         }
@@ -87,21 +89,27 @@ struct AddTorrentSheet: View {
     }
 
     private func checkClipboard() {
-        let firstLine = magnetURI.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
+        let firstLine =
+            magnetURI.components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces)
+            ?? ""
         guard firstLine.isEmpty else { return }
         guard let str = NSPasteboard.general.string(forType: .string),
-              str.hasPrefix("magnet:?") else { return }
-        var parts = magnetURI.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            str.hasPrefix("magnet:?")
+        else { return }
+        let parts = magnetURI.components(separatedBy: "\n").filter {
+            !$0.trimmingCharacters(in: .whitespaces).isEmpty
+        }
         magnetURI = ([str] + parts).joined(separator: "\n")
     }
 
     @MainActor private func handleMagnet() {
-        let lines = magnetURI
+        let lines =
+            magnetURI
             .components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.hasPrefix("magnet:?") }
 
-        guard let firstURI = lines.first else {
+        guard !lines.isEmpty else {
             parseError = "No valid magnet links found."
             return
         }
@@ -111,7 +119,8 @@ struct AddTorrentSheet: View {
         for (i, uri) in lines.enumerated() {
             var displayName = "Fetching metadata\u{2026}"
             if let comps = URLComponents(string: uri),
-               let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value {
+                let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value
+            {
                 displayName = dn
             }
 
@@ -130,7 +139,8 @@ struct AddTorrentSheet: View {
                         savePath: save, files: files
                     )
                     // Update the existing window for this magnet index
-                    PreAddCoordinator.shared.updateWindow(at: i, pending: updated, handle: magnetHandle)
+                    PreAddCoordinator.shared.updateWindow(
+                        at: i, pending: updated, handle: magnetHandle)
                 },
                 onError: {}
             )
@@ -144,7 +154,7 @@ struct AddTorrentSheet: View {
                         userInfo: [
                             "pending": stub,
                             "handle": magnetHandle as Any,
-                            "magnetIndex": i
+                            "magnetIndex": i,
                         ]
                     )
                 }
@@ -176,8 +186,11 @@ private struct MagnetTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
         textView.delegate = context.coordinator
         textView.isRichText = false
-        textView.font = font ?? NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.font =
+            font
+            ?? NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = false
         textView.isHorizontallyResizable = true
         textView.autoresizingMask = [.width]
