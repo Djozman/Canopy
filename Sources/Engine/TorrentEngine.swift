@@ -104,8 +104,6 @@ public enum TorrentState: Int {
 public final class TorrentEngine: ObservableObject {
 
     @Published public private(set) var torrents: [TorrentStatus] = []
-    @Published public private(set) var sessionError: String?
-
     private var session: LibtorrentSession?
     private nonisolated(unsafe) var pollTimer: Timer?
     private let queue = DispatchQueue(label: "com.qbt.libtorrent", qos: .utility)
@@ -115,14 +113,12 @@ public final class TorrentEngine: ObservableObject {
     /// in flight (deleteFiles=true on big torrents takes ~1–2s of unlink calls).
     private var pendingRemovals: Set<String> = []
 
-    // Multiple callbacks per info-hash: one for the PreAdd window, one for the Files tab, etc.
+    /// Callbacks per info-hash for metadata arrival.
+    /// One from fetchMetadata, potentially additional from AddTorrentSheet for multi-magnet.
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
 
     public init() {
         session = LibtorrentSession()
-        if session == nil {
-            sessionError = "Failed to create libtorrent session."
-        }
         session?.setAlertNotify { [weak self] in
             self?.drainAlerts()
         }
@@ -133,29 +129,12 @@ public final class TorrentEngine: ObservableObject {
         pollTimer = nil
     }
 
-    deinit {}
-
     public func startPolling(interval: TimeInterval = 2.0) {
+        guard pollTimer == nil else { return }
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
             [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.poll() }
-        }
-    }
-
-    public func addTorrentFile(at path: String, saveTo saveDir: String) {
-        let expanded = (saveDir as NSString).expandingTildeInPath
-        let session = self.session
-        queue.async {
-            _ = session?.addTorrentFile(path, savePath: expanded)
-        }
-    }
-
-    public func addMagnetLink(_ uri: String, saveTo saveDir: String) {
-        let expanded = (saveDir as NSString).expandingTildeInPath
-        let session = self.session
-        queue.async {
-            _ = session?.addMagnetURI(uri, savePath: expanded)
         }
     }
 
@@ -172,19 +151,6 @@ public final class TorrentEngine: ObservableObject {
             source: .file(path: torrentPath),
             name: name, totalSize: total,
             savePath: defaultSavePath, files: files)
-    }
-
-    public func pendingMagnet(uri: String) -> PendingTorrent {
-        var name = "Fetching metadata\u{2026}"
-        if let comps = URLComponents(string: uri),
-            let dn = comps.queryItems?.first(where: { $0.name == "dn" })?.value
-        {
-            name = dn
-        }
-        return PendingTorrent(
-            source: .magnet(uri: uri),
-            name: name, totalSize: 0,
-            savePath: defaultSavePath, files: [])
     }
 
     public func confirm(_ pending: PendingTorrent) {
@@ -220,8 +186,6 @@ public final class TorrentEngine: ObservableObject {
 
     // MARK: - Magnet metadata fetch
 
-    /// Add magnet in paused/metadata-only mode. Returns handle immediately.
-    /// Register callbacks via `onMetadataReady(for:callback:)` before metadata arrives.
     public func fetchMetadata(
         uri: String,
         onFiles: @MainActor @escaping ([PendingFile]) -> Void,
@@ -236,24 +200,11 @@ public final class TorrentEngine: ObservableObject {
             DispatchQueue.main.async { onError() }
             return nil
         }
-        // Register the caller's callback
         let hash = h.infoHash
         metadataCallbacks[hash, default: []].append { files in
             DispatchQueue.main.async { onFiles(files) }
         }
         return h
-    }
-
-    /// Register an additional callback to be fired when metadata arrives for a given handle.
-    /// Safe to call multiple times — each callback is appended and all fire once.
-    public func onMetadataReady(
-        for handle: LTTorrentHandle,
-        callback: @escaping ([PendingFile]) -> Void
-    ) {
-        let hash = handle.infoHash
-        metadataCallbacks[hash, default: []].append { files in
-            DispatchQueue.main.async { callback(files) }
-        }
     }
 
     public func commitMagnet(handle: LTTorrentHandle, savePath: String, files: [PendingFile]) {
@@ -286,7 +237,6 @@ public final class TorrentEngine: ObservableObject {
             else { continue }
             files.append(PendingFile(id: i, path: path, size: outSize))
         }
-        // Fire every registered callback with the same file list
         for cb in callbacks { cb(files) }
     }
 
@@ -346,10 +296,6 @@ public final class TorrentEngine: ObservableObject {
         let s = session
         queue.async { s?.resume() }
     }
-    public func saveResumeData() {
-        let s = session
-        queue.async { s?.saveResumeDataAll() }
-    }
 
     private func poll() {
         let session = self.session
@@ -358,8 +304,6 @@ public final class TorrentEngine: ObservableObject {
             let handles = session.allTorrents()
             let results = handles.map { TorrentStatus(from: $0) }
             DispatchQueue.main.async {
-                // Don't resurrect rows the user has asked to remove while
-                // libtorrent is still finishing the removal.
                 self.torrents = results.filter { !self.pendingRemovals.contains($0.id) }
             }
         }
@@ -370,11 +314,6 @@ public final class TorrentEngine: ObservableObject {
         queue.async { [weak self] in
             guard let self, let session else { return }
             session.popAlerts { type, h, msg, _ in
-                if type == LTAlertType.torrentFinished {
-                    DispatchQueue.main.async {
-                        NotificationCenter.default.post(name: .torrentFinished, object: nil)
-                    }
-                }
                 if type == LTAlertType.metadataReceived, let h {
                     let hash = h.infoHash
                     DispatchQueue.main.async {
@@ -390,8 +329,4 @@ public final class TorrentEngine: ObservableObject {
             }
         }
     }
-}
-
-extension Notification.Name {
-    public static let torrentFinished = Notification.Name("TorrentFinished")
 }

@@ -12,19 +12,11 @@
 #include <libtorrent/peer_info.hpp>
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/announce_entry.hpp>
-#include <libtorrent/bencode.hpp>
-#include <libtorrent/read_resume_data.hpp>
-#include <libtorrent/write_resume_data.hpp>
 
 #include <vector>
 #include <string>
-#include <cstring>
 #include <sstream>
-#include <fstream>
-#include <memory>
-#include <set>
 #include <algorithm>
-#include <unistd.h>
 
 namespace lt = libtorrent;
 
@@ -103,7 +95,8 @@ static int mapState(lt::torrent_status::state_t s) {
 - (int64_t)totalSize {
     if (!_cached) [self refresh];
     auto tf = _cachedStatus.torrent_file.lock();
-    return tf ? tf->total_size() : 0;
+    if (tf) return tf->total_size();
+    return _cachedStatus.total_wanted;
 }
 
 - (int64_t)totalUploaded {
@@ -290,6 +283,7 @@ static int mapState(lt::torrent_status::state_t s) {
 @interface LibtorrentSession () {
     lt::session *_session;
     NSMutableArray<LTTorrentHandle *> *_handles;
+    int _listenPort;
 }
 @end
 
@@ -308,6 +302,7 @@ static int mapState(lt::torrent_status::state_t s) {
                    lt::alert_category::error    |
                    lt::alert_category::storage  |
                    lt::alert_category::tracker);
+        _listenPort = 6881;
         _session = new lt::session(std::move(sp));
         _handles = [NSMutableArray new];
     }
@@ -316,27 +311,6 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (void)dealloc {
     delete _session;
-}
-
-- (nullable LTTorrentHandle *)addTorrentFile:(NSString *)filePath
-                                    savePath:(NSString *)savePath {
-    try {
-        lt::error_code ec;
-        auto ti = std::make_shared<lt::torrent_info>(
-            std::string(filePath.UTF8String), ec);
-        if (ec) return nil;
-
-        lt::add_torrent_params p;
-        p.ti = ti;
-        p.save_path = std::string(savePath.UTF8String);
-
-        lt::torrent_handle h = _session->add_torrent(p);
-        if (!h.is_valid()) return nil;
-
-        auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
-        [_handles addObject:wrapper];
-        return wrapper;
-    } catch (...) { return nil; }
 }
 
 - (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
@@ -568,7 +542,7 @@ static int mapState(lt::torrent_status::state_t s) {
     if (enableUPnP)       *enableUPnP       = sp.get_bool(lt::settings_pack::enable_upnp);
     if (enableNatPMP)     *enableNatPMP     = sp.get_bool(lt::settings_pack::enable_natpmp);
     if (anonymousMode)    *anonymousMode    = sp.get_bool(lt::settings_pack::anonymous_mode);
-    if (listenPort)       *listenPort       = 6881;
+    if (listenPort)       *listenPort       = _listenPort;
 }
 
 - (void)applySettingsWithDownloadRate:(int)downloadRate
@@ -595,6 +569,7 @@ static int mapState(lt::torrent_status::state_t s) {
     sp.set_bool(lt::settings_pack::anonymous_mode,     anonymousMode);
     sp.set_str(lt::settings_pack::listen_interfaces,
                std::string("0.0.0.0:") + std::to_string(listenPort));
+    _listenPort = listenPort;
     _session->apply_settings(sp);
 }
 

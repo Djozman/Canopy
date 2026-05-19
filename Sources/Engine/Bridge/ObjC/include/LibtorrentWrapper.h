@@ -21,8 +21,6 @@ typedef NS_ENUM(int, LTAlertType) {
     LTAlertTypeSaveResumeData   = 5,
     LTAlertTypeStateChanged     = 6,
     LTAlertTypeMetadataReceived = 7,
-    LTAlertTypeHashFailed       = 8,
-    LTAlertTypeStorageMoved     = 9,
     LTAlertTypeUnknown          = 99,
 };
 
@@ -79,8 +77,6 @@ typedef NS_ENUM(int, LTAlertType) {
 
 @interface LibtorrentSession : NSObject
 - (instancetype)init;
-- (nullable LTTorrentHandle *)addTorrentFile:(NSString *)filePath
-                                    savePath:(NSString *)savePath;
 - (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
                                     savePath:(NSString *)savePath
                                   priorities:(nullable NSArray<NSNumber *> *)priorities;

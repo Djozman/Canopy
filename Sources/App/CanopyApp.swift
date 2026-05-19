@@ -72,11 +72,8 @@ struct CanopyApp: App {
                         )
                     }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
-                    // handled by ContentView's own onReceive
                 }
-        }
-        .windowStyle(.titleBar)
+                .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
