@@ -8,8 +8,8 @@ import Foundation
 
 // MARK: - Sendable conformance for ObjC bridge types
 
-extension LTTorrentHandle: @unchecked Sendable {}
-extension LibtorrentSession: @unchecked Sendable {}
+extension LTTorrentHandle: @unchecked @retroactive Sendable {}
+extension LibtorrentSession: @unchecked @retroactive Sendable {}
 
 // MARK: - Swift mirror of LTTorrentHandle
 
@@ -130,12 +130,13 @@ public final class TorrentEngine: ObservableObject {
     }
 
     public func startPolling(interval: TimeInterval = 2.0) {
-        guard pollTimer == nil else { return }
-        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
-            [weak self] _ in
+        pollTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.poll() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
     }
 
     // MARK: - Pre-add parsing

@@ -379,7 +379,12 @@ static int mapState(lt::torrent_status::state_t s) {
             savePath:(NSString *)savePath
           priorities:(nullable NSArray<NSNumber *> *)priorities {
     auto h = [handle cppHandle];
-    if (!h.is_valid()) return;
+    if (!h.is_valid()) {
+        NSLog(@"[Canopy-ObjC] commitMagnet: handle invalid");
+        return;
+    }
+    NSLog(@"[Canopy-ObjC] commitMagnet: savePath=%s handles_before=%lu",
+          savePath.UTF8String, (unsigned long)_handles.count);
 
     h.move_storage(std::string(savePath.UTF8String));
 
@@ -398,6 +403,10 @@ static int mapState(lt::torrent_status::state_t s) {
 
     if (![_handles containsObject:handle]) {
         [_handles addObject:handle];
+        NSLog(@"[Canopy-ObjC] commitMagnet: added to _handles (now %lu)",
+              (unsigned long)_handles.count);
+    } else {
+        NSLog(@"[Canopy-ObjC] commitMagnet: handle already in _handles");
     }
 }
 

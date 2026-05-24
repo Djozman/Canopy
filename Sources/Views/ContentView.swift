@@ -1,14 +1,14 @@
 // ContentView.swift — root NavigationSplitView
 
-import SwiftUI
 import AppKit
 import ClibtorrentBridge
+import SwiftUI
 
 struct ContentView: View {
     @StateObject private var vm: TorrentListViewModel
     @StateObject private var updater = UpdateChecker(owner: "Djozman", repo: "Canopy")
-    @State private var showAddSheet  = false
-    @State private var showSettings  = false
+    @State private var showAddSheet = false
+    @State private var showSettings = false
     @State private var showUpdateSheet = false
     let engine: TorrentEngine
 
@@ -16,6 +16,11 @@ struct ContentView: View {
         self.engine = engine
         _vm = StateObject(wrappedValue: TorrentListViewModel(engine: engine))
     }
+
+    // Suppress Ctrl+Click from triggering the context menu so that
+    // keyboard shortcuts using the Ctrl modifier don't accidentally
+    // show the menu when the user presses Ctrl before the second key.
+    @State private var ctrlClickMonitor: Any?
 
     var body: some View {
         NavigationSplitView {
@@ -40,18 +45,21 @@ struct ContentView: View {
                     emptyState
                 } else {
                     List(vm.filtered, selection: $vm.selectedTorrentID) { torrent in
-                        TorrentRowView(torrent: torrent,
-                                       isSelected: vm.selectedTorrentID == torrent.id)
-                            .tag(torrent.id)
-                            .contextMenu { contextMenu(for: torrent) }
+                        TorrentRowView(
+                            torrent: torrent,
+                            isSelected: vm.selectedTorrentID == torrent.id
+                        )
+                        .tag(torrent.id)
+                        .contextMenu { contextMenu(for: torrent) }
                     }
                     .listStyle(.inset)
                 }
 
                 Divider()
-                StatusBarView(downloadRate: vm.totalDownloadRate,
-                              uploadRate:   vm.totalUploadRate,
-                              torrentCount: vm.torrents.count)
+                StatusBarView(
+                    downloadRate: vm.totalDownloadRate,
+                    uploadRate: vm.totalUploadRate,
+                    torrentCount: vm.torrents.count)
             }
             .navigationTitle(vm.selectedFilter.rawValue)
             .toolbar { listToolbar }
@@ -74,10 +82,13 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showAddSheet) {
-            AddTorrentSheet(engine: engine, onNext: { pending, magnetHandle in
-                showPreAddWindow(pending: pending, magnetHandle: magnetHandle,
-                                 magnetIndex: 0, isStub: true)
-            })
+            AddTorrentSheet(
+                engine: engine,
+                onNext: { pending, magnetHandle in
+                    showPreAddWindow(
+                        pending: pending, magnetHandle: magnetHandle,
+                        magnetIndex: 0, isStub: true)
+                })
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -87,21 +98,41 @@ struct ContentView: View {
         }
         .onAppear {
             Task { await updater.checkForUpdate() }
+            // Install monitor to suppress Ctrl+Click context menu
+            ctrlClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) {
+                event in
+                if event.modifierFlags.contains(.control) {
+                    // Ctrl+Click — suppress the context menu so keyboard shortcuts
+                    // using Ctrl don't accidentally trigger it
+                    return nil
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = ctrlClickMonitor as? AnyObject {
+                NSEvent.removeMonitor(monitor)
+                ctrlClickMonitor = nil
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
             guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
             let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
             let magnetIndex = notif.userInfo?["magnetIndex"] as? Int ?? 0
-            showPreAddWindow(pending: pending, magnetHandle: handle,
-                             magnetIndex: magnetIndex, isStub: true)
+            showPreAddWindow(
+                pending: pending, magnetHandle: handle,
+                magnetIndex: magnetIndex, isStub: true)
         }
     }
 
-    private func showPreAddWindow(pending: PendingTorrent, magnetHandle: LTTorrentHandle?,
-                                   magnetIndex: Int, isStub: Bool) {
+    private func showPreAddWindow(
+        pending: PendingTorrent, magnetHandle: LTTorrentHandle?,
+        magnetIndex: Int, isStub: Bool
+    ) {
         // For non-stub (metadata arrived), update the existing window
         if !isStub, let holder = PreAddCoordinator.shared.windowForIndex(magnetIndex),
-           let model = holder.model, let window = holder.window, window.isVisible {
+            let model = holder.model, let window = holder.window, window.isVisible
+        {
             model.pending = pending
             model.rebuildTree()
             if !pending.name.isEmpty { window.title = pending.name }
@@ -113,10 +144,11 @@ struct ContentView: View {
 
         // For index 0 stubs, reuse the existing single-holder window
         if isStub, magnetIndex == 0,
-           let holder = PreAddCoordinator.shared.singleHolder,
-           let model = holder.model,
-           let window = holder.window,
-           window.isVisible {
+            let holder = PreAddCoordinator.shared.singleHolder,
+            let model = holder.model,
+            let window = holder.window,
+            window.isVisible
+        {
             model.pending = pending
             model.rebuildTree()
             if !pending.name.isEmpty { window.title = pending.name }
@@ -128,7 +160,7 @@ struct ContentView: View {
 
         let holder = PreAddWindowHolder()
         holder.magnetIndex = magnetIndex
-        let model  = PreAddViewModel(pending: pending)
+        let model = PreAddViewModel(pending: pending)
         holder.model = model
         holder.magnetHandle = magnetHandle
 
@@ -136,9 +168,10 @@ struct ContentView: View {
             model: model,
             onConfirm: { confirmed in
                 if let handle = holder.magnetHandle {
-                    engine.commitMagnet(handle: handle,
-                                        savePath: confirmed.savePath,
-                                        files: confirmed.files)
+                    engine.commitMagnet(
+                        handle: handle,
+                        savePath: confirmed.savePath,
+                        files: confirmed.files)
                 } else {
                     engine.confirm(confirmed)
                 }
@@ -151,7 +184,7 @@ struct ContentView: View {
         )
 
         let hosting = NSHostingController(rootView: rootView)
-        let window  = NSWindow(contentViewController: hosting)
+        let window = NSWindow(contentViewController: hosting)
         window.title = pending.name
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
 
@@ -193,10 +226,12 @@ struct ContentView: View {
                 .foregroundStyle(.tertiary)
             Text(vm.searchText.isEmpty ? "No torrents" : "No results")
                 .font(.title2)
-            Text(vm.searchText.isEmpty
-                 ? "Add a torrent or magnet link to get started."
-                 : "Try a different search term.")
-                .foregroundStyle(.secondary)
+            Text(
+                vm.searchText.isEmpty
+                    ? "Add a torrent or magnet link to get started."
+                    : "Try a different search term."
+            )
+            .foregroundStyle(.secondary)
             if vm.searchText.isEmpty {
                 Button("Add Torrent") { showAddSheet = true }
                     .buttonStyle(.borderedProminent)
@@ -211,23 +246,29 @@ struct ContentView: View {
     private var listToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
             if updater.updateAvailable {
-                Button { showUpdateSheet = true } label: {
+                Button {
+                    showUpdateSheet = true
+                } label: {
                     Label("Update", systemImage: "arrow.down.circle.fill")
                 }
                 .foregroundStyle(.blue)
             }
-            Button { showAddSheet = true } label: {
+            Button {
+                showAddSheet = true
+            } label: {
                 Label("Add Torrent", systemImage: "plus")
             }
             .keyboardShortcut("n", modifiers: .command)
 
-            Button { showSettings = true } label: {
+            Button {
+                showSettings = true
+            } label: {
                 Label("Settings", systemImage: "gear")
             }
         }
 
         ToolbarItemGroup(placement: .secondaryAction) {
-            Button("Pause All")  { engine.pauseSession() }
+            Button("Pause All") { engine.pauseSession() }
             Button("Resume All") { engine.resumeSession() }
         }
     }
@@ -239,15 +280,17 @@ struct ContentView: View {
         if t.isPaused {
             Button("Resume") { engine.resume(t) }
         } else {
-            Button("Pause")  { engine.pause(t) }
+            Button("Pause") { engine.pause(t) }
         }
         Divider()
-        Button("Force Re-check")    { engine.recheck(t) }
+        Button("Force Re-check") { engine.recheck(t) }
         Button("Force Re-announce") { engine.reannounce(t) }
         Divider()
         Menu("Remove") {
-            Button("Remove torrent only")                       { engine.remove(t) }
-            Button("Remove torrent + data", role: .destructive) { engine.remove(t, deleteFiles: true) }
+            Button("Remove torrent only") { engine.remove(t) }
+            Button("Remove torrent + data", role: .destructive) {
+                engine.remove(t, deleteFiles: true)
+            }
         }
         Divider()
         Button("Copy Hash") {
@@ -290,9 +333,10 @@ final class PreAddCoordinator {
 
     func updateWindow(at index: Int, pending: PendingTorrent, handle: LTTorrentHandle?) {
         guard let holder = indexedWindows[index],
-              let model = holder.model,
-              let window = holder.window,
-              window.isVisible else { return }
+            let model = holder.model,
+            let window = holder.window,
+            window.isVisible
+        else { return }
         model.pending = pending
         model.rebuildTree()
         if !pending.name.isEmpty { window.title = pending.name }
@@ -334,7 +378,9 @@ private struct UpdateSheet: View {
                     .font(.body).foregroundStyle(.secondary)
                 HStack(spacing: 12) {
                     Button("Later") { dismiss() }.keyboardShortcut(.escape)
-                    Button { updater.downloadAndInstall() } label: {
+                    Button {
+                        updater.downloadAndInstall()
+                    } label: {
                         Text("Update Now")
                     }
                     .buttonStyle(.borderedProminent)
@@ -347,12 +393,12 @@ private struct UpdateSheet: View {
 
     private func stateLabel(_ state: UpdateChecker.InstallState) -> String {
         switch state {
-        case .idle:        return ""
+        case .idle: return ""
         case .downloading: return "Downloading\u{2026}"
-        case .mounting:    return "Mounting DMG\u{2026}"
-        case .copying:     return "Installing\u{2026}"
+        case .mounting: return "Mounting DMG\u{2026}"
+        case .copying: return "Installing\u{2026}"
         case .relaunching: return "Relaunching\u{2026}"
-        case .error:       return ""
+        case .error: return ""
         }
     }
 }

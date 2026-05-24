@@ -1,4 +1,4 @@
-// Helpers.swift — shared formatting utilities
+// Helpers.swift — shared formatting utilities and helpers
 
 import Foundation
 import SwiftUI
@@ -37,6 +37,20 @@ func formatRatio(uploaded: Int64, downloaded: Int64) -> String {
     return String(format: "%.3f", Double(uploaded) / Double(downloaded))
 }
 
+// MARK: - File icon helper
+
+func fileIcon(_ name: String) -> String {
+    switch (name as NSString).pathExtension.lowercased() {
+    case "mkv","mp4","avi","mov","webm": return "film"
+    case "mp3","flac","wav","m4a":       return "music.note"
+    case "iso","img","dmg":              return "opticaldisc"
+    case "zip","rar","7z","tar","gz":   return "doc.zipper"
+    case "txt","md","nfo":              return "doc.text"
+    case "jpg","png","gif","webp":      return "photo"
+    default:                              return "doc"
+    }
+}
+
 // MARK: - State color
 
 extension TorrentState {
@@ -63,4 +77,34 @@ extension TorrentStatus {
         if isPaused               { return "Paused" }
         return state.label
     }
+}
+
+// MARK: - Sort button builder
+
+@ViewBuilder
+func sortButton(
+    _ title: String,
+    asc: FileSortOrder,
+    desc: FileSortOrder,
+    sortOrder: Binding<FileSortOrder>,
+    onSort: @escaping (FileSortOrder) -> Void,
+    minWidth: CGFloat
+) -> some View {
+    Button {
+        let newOrder = sortOrder.wrappedValue == asc ? desc : asc
+        sortOrder.wrappedValue = newOrder
+        onSort(newOrder)
+    } label: {
+        HStack(spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            if sortOrder.wrappedValue == asc {
+                Image(systemName: "chevron.up").font(.system(size: 8))
+            } else if sortOrder.wrappedValue == desc {
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }
+        }
+        .frame(minWidth: minWidth, alignment: .leading)
+        .padding(.horizontal, 4)
+    }
+    .buttonStyle(.plain)
 }

@@ -80,9 +80,11 @@ struct PreAddSheet: View {
                     NativeCheckbox(state: allState) { model.toggleAll() }
                         .padding(.horizontal, 8)
 
-                    sortButton("File", asc: .nameAsc, desc: .nameDesc, minWidth: 240)
+                    sortButton("File", asc: .nameAsc, desc: .nameDesc,
+                               sortOrder: $sortOrder, onSort: { model.sort(by: $0) }, minWidth: 240)
                     Divider().frame(height: 20)
-                    sortButton("Size", asc: .sizeAsc, desc: .sizeDesc, minWidth: 80)
+                    sortButton("Size", asc: .sizeAsc, desc: .sizeDesc,
+                               sortOrder: $sortOrder, onSort: { model.sort(by: $0) }, minWidth: 80)
                     Divider().frame(height: 20)
                     Text("Priority")
                         .font(.caption)
@@ -130,24 +132,6 @@ struct PreAddSheet: View {
             }
             .padding()
         }
-    }
-
-    @ViewBuilder
-    private func sortButton(_ title: String, asc: FileSortOrder,
-                             desc: FileSortOrder, minWidth: CGFloat) -> some View {
-        Button {
-            sortOrder = sortOrder == asc ? desc : asc
-            model.sort(by: sortOrder)
-        } label: {
-            HStack(spacing: 4) {
-                Text(title).font(.caption).foregroundColor(Color(nsColor: .secondaryLabelColor))
-                if sortOrder == asc        { Image(systemName: "chevron.up").font(.system(size: 8)) }
-                else if sortOrder == desc  { Image(systemName: "chevron.down").font(.system(size: 8)) }
-            }
-            .frame(minWidth: minWidth, alignment: .leading)
-            .padding(.horizontal, 4)
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -271,17 +255,5 @@ private struct PreAddTreeRow: View {
 
     private var indentSpacer: some View {
         Color.clear.frame(width: CGFloat(depth) * 16 + 4)
-    }
-
-    private func fileIcon(_ name: String) -> String {
-        switch (name as NSString).pathExtension.lowercased() {
-        case "mkv","mp4","avi","mov","webm": return "film"
-        case "mp3","flac","wav","m4a":       return "music.note"
-        case "iso","img","dmg":              return "opticaldisc"
-        case "zip","rar","7z","tar","gz":   return "doc.zipper"
-        case "txt","md","nfo":              return "doc.text"
-        case "jpg","png","gif","webp":      return "photo"
-        default:                              return "doc"
-        }
     }
 }
