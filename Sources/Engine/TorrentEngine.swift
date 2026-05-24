@@ -8,8 +8,8 @@ import Foundation
 
 // MARK: - Sendable conformance for ObjC bridge types
 
-extension LTTorrentHandle: @unchecked @retroactive Sendable {}
-extension LibtorrentSession: @unchecked @retroactive Sendable {}
+extension LTTorrentHandle: @unchecked Sendable {}
+extension LibtorrentSession: @unchecked Sendable {}
 
 // MARK: - Swift mirror of LTTorrentHandle
 
