@@ -12,11 +12,16 @@
 #include <libtorrent/peer_info.hpp>
 #include <libtorrent/file_storage.hpp>
 #include <libtorrent/announce_entry.hpp>
+#include <libtorrent/bencode.hpp>
+#include <libtorrent/write_resume_data.hpp>
+#include <libtorrent/read_resume_data.hpp>
 
 #include <vector>
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 
 namespace lt = libtorrent;
 
@@ -283,11 +288,14 @@ static int mapState(lt::torrent_status::state_t s) {
 @interface LibtorrentSession () {
     lt::session *_session;
     NSMutableArray<LTTorrentHandle *> *_handles;
+    NSString *_resumeDataDir;
     int _listenPort;
 }
 @end
 
 @implementation LibtorrentSession
+
+@synthesize resumeDataDir = _resumeDataDir;
 
 - (instancetype)init {
     if (self = [super init]) {
@@ -468,6 +476,68 @@ static int mapState(lt::torrent_status::state_t s) {
             st.handle.save_resume_data(lt::torrent_handle::save_info_dict);
         }
     }
+}
+
+- (void)saveResumeDataAllAndWait {
+    [self saveResumeDataAll];
+    // libtorrent generates resume data asynchronously; poll alerts until
+    // all save_resume_data_alerts arrive, then write each to disk.
+    NSString *dir = _resumeDataDir;
+    if (!dir || dir.length == 0) return;
+    try {
+        std::filesystem::create_directories(std::string(dir.UTF8String));
+    } catch (...) { return; }
+
+    int remaining = (int)_handles.count;
+    while (remaining > 0) {
+        std::vector<lt::alert *> alerts;
+        _session->wait_for_alert(lt::seconds(3));
+        _session->pop_alerts(&alerts);
+        bool any = false;
+        for (auto *a : alerts) {
+            if (auto *x = lt::alert_cast<lt::save_resume_data_alert>(a)) {
+                std::vector<char> buf = lt::write_resume_data_buf(x->params);
+                if (!buf.empty()) {
+                    auto const &hashes = x->handle.status().info_hashes;
+                    std::ostringstream hashStr;
+                    if (hashes.has_v1()) hashStr << hashes.v1;
+                    else if (hashes.has_v2()) hashStr << hashes.v2;
+                    std::string path = std::string(dir.UTF8String) + "/" + hashStr.str() + ".resume";
+                    std::ofstream out(path, std::ios::binary);
+                    out.write(buf.data(), buf.size());
+                }
+                remaining--;
+                any = true;
+            }
+        }
+        if (!any) break;
+    }
+}
+
+- (void)loadResumeTorrentsFromDir:(NSString *)dir {
+    if (!dir || dir.length == 0) return;
+    std::string dirStr(dir.UTF8String);
+    try {
+        if (!std::filesystem::exists(dirStr)) return;
+        for (auto const &entry : std::filesystem::directory_iterator(dirStr)) {
+            if (!entry.is_regular_file()) continue;
+            std::string path = entry.path().string();
+            if (path.size() < 7 || path.substr(path.size() - 7) != ".resume") continue;
+            std::ifstream in(path, std::ios::binary | std::ios::ate);
+            if (!in) continue;
+            size_t size = in.tellg();
+            in.seekg(0);
+            std::vector<char> buf(size);
+            in.read(buf.data(), size);
+            lt::error_code ec;
+            lt::add_torrent_params params = lt::read_resume_data(buf, ec);
+            if (ec) continue;
+            lt::torrent_handle h = _session->add_torrent(params);
+            if (!h.is_valid()) continue;
+            auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
+            [_handles addObject:wrapper];
+        }
+    } catch (...) {}
 }
 
 - (void)popAlerts:(void (^)(LTAlertType type, LTTorrentHandle * _Nullable handle, NSString *message, int errorCode))callback {

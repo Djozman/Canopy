@@ -119,6 +119,10 @@ public final class TorrentEngine: ObservableObject {
 
     public init() {
         session = LibtorrentSession()
+        let resumeDir = Self.resumeDataDirectory()
+        session?.resumeDataDir = resumeDir
+        // Load previously saved torrents before starting the session
+        session?.loadResumeTorrents(fromDir: resumeDir)
         session?.setAlertNotify { [weak self] in
             self?.drainAlerts()
         }
@@ -127,6 +131,11 @@ public final class TorrentEngine: ObservableObject {
     public func shutdown() {
         pollTimer?.invalidate()
         pollTimer = nil
+        // Save resume data synchronously so it completes before process exit
+        let s = session
+        queue.sync {
+            s?.saveResumeDataAllAndWait()
+        }
     }
 
     public func startPolling(interval: TimeInterval = 2.0) {
@@ -183,6 +192,17 @@ public final class TorrentEngine: ObservableObject {
     private var defaultSavePath: String {
         NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
             .first ?? NSHomeDirectory() + "/Downloads"
+    }
+
+    private static func resumeDataDirectory() -> String {
+        let appSupport =
+            NSSearchPathForDirectoriesInDomains(
+                .applicationSupportDirectory, .userDomainMask, true
+            ).first ?? NSHomeDirectory() + "/Library/Application Support"
+        let dir = appSupport + "/Canopy/Resume"
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     // MARK: - Magnet metadata fetch
@@ -272,6 +292,9 @@ public final class TorrentEngine: ObservableObject {
             NSLog("[Canopy] removeTorrent calling ObjC with deleteFiles=\(flag)")
             session?.removeTorrent(h, deleteFiles: flag)
         }
+        // Delete the resume file so it doesn't resurrect on next launch
+        let resumePath = Self.resumeDataDirectory() + "/" + id + ".resume"
+        try? FileManager.default.removeItem(atPath: resumePath)
     }
     public func recheck(_ torrent: TorrentStatus) {
         guard let h = torrent.handle else {

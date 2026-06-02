@@ -98,6 +98,11 @@ typedef NS_ENUM(int, LTAlertType) {
 - (void)pause;
 - (void)resume;
 - (void)saveResumeDataAll;
+- (void)saveResumeDataAllAndWait;
+/// Directory where .resume files are stored. Must be set before loading.
+@property (nonatomic, copy) NSString *resumeDataDir;
+/// Load previously saved torrents from the resume data directory.
+- (void)loadResumeTorrentsFromDir:(NSString *)dir;
 - (void)popAlerts:(void (^)(LTAlertType type, LTTorrentHandle * _Nullable handle, NSString *message, int errorCode))callback;
 - (void)getSettingsWithDownloadRate:(int *)downloadRate
                          uploadRate:(int *)uploadRate
