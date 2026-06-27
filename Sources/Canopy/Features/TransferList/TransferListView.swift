@@ -93,6 +93,26 @@ struct TransferListView: View {
         .contextMenu(forSelectionType: String.self) { ids in
             contextMenu(for: ids)
         }
+        .onDeleteCommand {
+            guard !selection.isEmpty else { return }
+            engine.remove(Array(selection), deleteFiles: false)
+        }
+        .dropDestination(for: URL.self) { urls, _ in handleDrop(urls) }
+    }
+
+    /// Handles .torrent files and magnet links dropped onto the list.
+    private func handleDrop(_ urls: [URL]) -> Bool {
+        var handled = false
+        for url in urls {
+            if url.isFileURL, url.pathExtension.lowercased() == "torrent" {
+                _ = engine.addTorrentFile(url.path)
+                handled = true
+            } else if url.scheme == "magnet" {
+                _ = engine.addMagnet(url.absoluteString)
+                handled = true
+            }
+        }
+        return handled
     }
 
     // MARK: - Columns (each broken out so the type-checker stays fast)
@@ -186,6 +206,23 @@ struct TransferListView: View {
     // MARK: - Context menu
 
     @ViewBuilder
+    private func bittorrentMenu(for h: [String]) -> some View {
+        let ts = engine.torrents.filter { h.contains($0.infoHash) }
+        Menu("BitTorrent") {
+            Toggle("Sequential Download", isOn: Binding(
+                get: { ts.contains { $0.sequentialDownload } },
+                set: { engine.setSequential($0, for: h) }))
+            Toggle("Download First/Last Pieces First", isOn: Binding(
+                get: { ts.contains { $0.firstLastPiece } },
+                set: { engine.setFirstLastPiece($0, for: h) }))
+            Toggle("Super Seeding", isOn: Binding(
+                get: { ts.contains { $0.superSeeding } },
+                set: { engine.setSuperSeeding($0, for: h) }))
+        }
+    }
+
+
+    @ViewBuilder
     private func contextMenu(for ids: Set<String>) -> some View {
         let h = Array(ids)
         Group {
@@ -208,6 +245,7 @@ struct TransferListView: View {
                 Button("Move Down") { engine.queueDown(h) }
                 Button("Move to Bottom") { engine.queueBottom(h) }
             }
+            bittorrentMenu(for: h)
             Divider()
             Button("Remove", role: .destructive) { engine.remove(h, deleteFiles: false) }
             Button("Remove + delete files", role: .destructive) { engine.remove(h, deleteFiles: true) }
@@ -343,11 +381,19 @@ struct TransferListView: View {
             Button { showAddSheet = true } label: {
                 Label("Add", systemImage: "plus")
             }
+            .keyboardShortcut("o", modifiers: .command)
+            Button { openWindow(id: "search") } label: {
+                Label("Search", systemImage: "magnifyingglass")
+            }
+            .keyboardShortcut("f", modifiers: .command)
             Button { openWindow(id: "rss") } label: {
                 Label("RSS", systemImage: "dot.radiowaves.left.and.right")
             }
-            Button { openWindow(id: "search") } label: {
-                Label("Search", systemImage: "magnifyingglass")
+            Button { openWindow(id: "stats") } label: {
+                Label("Statistics", systemImage: "chart.bar")
+            }
+            Button { openWindow(id: "log") } label: {
+                Label("Log", systemImage: "list.bullet.rectangle")
             }
             Button { engine.resume(Array(selection)) } label: {
                 Label("Resume", systemImage: "play.fill")

@@ -14,6 +14,8 @@ struct PreferencesView: View {
                 .tabItem { Label("Speed", systemImage: "speedometer") }
             BitTorrentPrefs().environmentObject(engine)
                 .tabItem { Label("BitTorrent", systemImage: "dot.radiowaves.left.and.right") }
+            SchedulerPrefs().environmentObject(engine)
+                .tabItem { Label("Scheduler", systemImage: "clock") }
         }
         .frame(width: 520, height: 380)
     }
@@ -144,6 +146,46 @@ private struct BitTorrentPrefs: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Scheduler
+
+private struct SchedulerPrefs: View {
+    @EnvironmentObject var engine: EngineSession
+
+    var body: some View {
+        Form {
+            Section("Alternative Speed Limits") {
+                Toggle("Schedule alternative rate limits", isOn: engine.bind(\.scheduleEnabled))
+                Group {
+                    KiBField(label: "Alt download (KiB/s, 0 = \u{221E}):", bytes: engine.bind(\.altDownloadLimit))
+                    KiBField(label: "Alt upload (KiB/s, 0 = \u{221E}):", bytes: engine.bind(\.altUploadLimit))
+                    HourField(label: "From (hour):", value: engine.bind(\.scheduleFromHour))
+                    HourField(label: "To (hour):", value: engine.bind(\.scheduleToHour))
+                }
+                .disabled(!engine.settings.scheduleEnabled)
+                Text("During this window the alternative limits apply; the normal limits apply the rest of the day. Overnight windows (e.g. 22 to 6) are supported.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+private struct HourField: View {
+    let label: String
+    @Binding var value: Int
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            TextField("", value: $value, format: .number)
+                .frame(width: 60)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+            Stepper("", value: $value, in: 0...23).labelsHidden()
+        }
     }
 }
 

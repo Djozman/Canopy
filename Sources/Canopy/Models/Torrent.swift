@@ -29,9 +29,13 @@ struct Torrent: Identifiable, Hashable {
     var savePath: String
     var errorMessage: String?
 
+    var sequentialDownload: Bool = false
+    var superSeeding: Bool = false
+
     // Canopy-managed metadata (not from libtorrent)
     var category: String = ""
     var tags: [String] = []
+    var firstLastPiece: Bool = false
 
     init(_ s: LTTorrentStats) {
         infoHash = s.infoHash
@@ -57,5 +61,7 @@ struct Torrent: Identifiable, Hashable {
         paused = s.paused
         savePath = s.savePath
         errorMessage = s.errorMessage
+        sequentialDownload = s.sequentialDownload
+        superSeeding = s.superSeeding
     }
 }

@@ -40,6 +40,8 @@ typedef NS_ENUM(NSInteger, LTTorrentState) {
 @property (nonatomic) LTTorrentState state;
 @property (nonatomic) BOOL paused;
 @property (nonatomic) BOOL hasMetadata;
+@property (nonatomic) BOOL sequentialDownload;
+@property (nonatomic) BOOL superSeeding;
 @property (nonatomic, copy, nullable) NSString *errorMessage;
 @end
 

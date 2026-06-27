@@ -12,6 +12,7 @@ struct CategoryDef: Identifiable, Hashable, Codable {
 struct TorrentMeta: Codable, Hashable {
     var category: String = ""
     var tags: [String] = []
+    var firstLastPiece: Bool = false
 }
 
 /// The full library of categories, tags, and per-torrent assignments.

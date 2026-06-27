@@ -81,6 +81,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// Torrent queueing limits. Pass -1 for unlimited.
 - (void)setQueueLimitsDownloads:(int)maxDownloads seeds:(int)maxSeeds total:(int)maxTotal;
 
+/// Per-torrent BitTorrent toggles.
+- (void)setSequentialDownload:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes;
+- (void)setSuperSeeding:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes;
+- (void)setFirstLastPiecePriority:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes;
+
 /// Requests a resume-data save for any torrent that needs it. Resulting
 /// .fastresume files are written asynchronously to the config path.
 - (void)saveResumeData;

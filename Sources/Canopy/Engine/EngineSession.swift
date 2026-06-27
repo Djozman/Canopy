@@ -22,6 +22,7 @@ final class EngineSession: ObservableObject {
     private let session: LTSession
     private var timer: Timer?
     private var tick = 0
+    private var altLimitsActive = false
     private let libraryURL: URL
 
     init(settings: AppSettings) {
@@ -64,6 +65,7 @@ final class EngineSession: ObservableObject {
             if let m = library.assignments[t.infoHash] {
                 t.category = m.category
                 t.tags = m.tags
+                t.firstLastPiece = m.firstLastPiece
             }
             return t
         }
@@ -74,6 +76,8 @@ final class EngineSession: ObservableObject {
                       totalUpload: s.totalUpload,
                       dhtNodes: Int(s.dhtNodes),
                       isListening: s.isListening)
+
+        applyScheduleIfNeeded()
 
         // Enforce the global share-ratio limit by pausing finished torrents.
         if settings.shareRatioLimit > 0 {
@@ -98,6 +102,7 @@ final class EngineSession: ObservableObject {
             let savePath = library.savePath(forCategory: category) ?? settings.defaultSavePath
             let hash = try session.addMagnet(trimmed, savePath: savePath, paused: paused)
             assignOnAdd(hash: hash, category: category)
+            AppLog.shared.log("Added magnet torrent")
             poll()
             return hash
         } catch {
@@ -112,6 +117,7 @@ final class EngineSession: ObservableObject {
             let savePath = library.savePath(forCategory: category) ?? settings.defaultSavePath
             let hash = try session.addTorrentFile(atPath: path, savePath: savePath, paused: paused)
             assignOnAdd(hash: hash, category: category)
+            AppLog.shared.log("Added torrent file")
             poll()
             return hash
         } catch {
@@ -167,6 +173,7 @@ final class EngineSession: ObservableObject {
     func recheck(_ hashes: [String]) { session.forceRecheck(hashes); poll() }
     func remove(_ hashes: [String], deleteFiles: Bool) {
         session.remove(hashes, deleteFiles: deleteFiles)
+        AppLog.shared.log("Removed \(hashes.count) torrent(s)\(deleteFiles ? " + files" : "")")
         for h in hashes { library.assignments[h] = nil }
         saveLibrary()
         poll()
@@ -175,6 +182,63 @@ final class EngineSession: ObservableObject {
     func queueUp(_ hashes: [String])     { session.queueUp(hashes); poll() }
     func queueDown(_ hashes: [String])   { session.queueDown(hashes); poll() }
     func queueBottom(_ hashes: [String]) { session.queueBottom(hashes); poll() }
+
+    // MARK: - BitTorrent toggles
+
+    func setSequential(_ on: Bool, for hashes: [String]) {
+        session.setSequentialDownload(on, for: hashes)
+        AppLog.shared.log("Sequential download \(on ? "on" : "off") for \(hashes.count) torrent(s)")
+        poll()
+    }
+
+    func setSuperSeeding(_ on: Bool, for hashes: [String]) {
+        session.setSuperSeeding(on, for: hashes)
+        AppLog.shared.log("Super seeding \(on ? "on" : "off") for \(hashes.count) torrent(s)")
+        poll()
+    }
+
+    func setFirstLastPiece(_ on: Bool, for hashes: [String]) {
+        session.setFirstLastPiecePriority(on, for: hashes)
+        for h in hashes {
+            var m = library.assignments[h] ?? TorrentMeta()
+            m.firstLastPiece = on
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    // MARK: - Scheduler
+
+    private func isWithinSchedule() -> Bool {
+        let h = Calendar.current.component(.hour, from: Date())
+        let f = settings.scheduleFromHour, t = settings.scheduleToHour
+        if f == t { return false }
+        return f < t ? (h >= f && h < t) : (h >= f || h < t)
+    }
+
+    private func applyScheduleIfNeeded() {
+        guard settings.scheduleEnabled else {
+            if altLimitsActive {
+                session.setDownloadRateLimit(Int32(settings.downloadLimit))
+                session.setUploadRateLimit(Int32(settings.uploadLimit))
+                altLimitsActive = false
+            }
+            return
+        }
+        let want = isWithinSchedule()
+        guard want != altLimitsActive else { return }
+        if want {
+            session.setDownloadRateLimit(Int32(settings.altDownloadLimit))
+            session.setUploadRateLimit(Int32(settings.altUploadLimit))
+            AppLog.shared.log("Scheduler: alternative speed limits active")
+        } else {
+            session.setDownloadRateLimit(Int32(settings.downloadLimit))
+            session.setUploadRateLimit(Int32(settings.uploadLimit))
+            AppLog.shared.log("Scheduler: normal speed limits restored")
+        }
+        altLimitsActive = want
+    }
 
     // MARK: - Files
 
@@ -325,6 +389,7 @@ final class EngineSession: ObservableObject {
         } else {
             session.setQueueLimitsDownloads(-1, seeds: -1, total: -1)
         }
+        altLimitsActive = false
         settings.save()
     }
 }

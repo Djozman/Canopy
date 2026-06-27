@@ -48,6 +48,15 @@ struct CanopyApp: App {
                 .frame(minWidth: 760, minHeight: 480)
         }
 
+        Window("Statistics", id: "stats") {
+            StatisticsView()
+                .environmentObject(engine)
+        }
+
+        Window("Log", id: "log") {
+            LogView()
+        }
+
         Settings {
             PreferencesView()
                 .environmentObject(engine)

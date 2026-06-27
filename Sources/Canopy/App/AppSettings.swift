@@ -30,6 +30,13 @@ struct AppSettings: Codable, Equatable {
     // Seeding limit (share ratio). 0 = unlimited; torrent pauses when reached.
     var shareRatioLimit: Double = 0
 
+    // Scheduler: alternative speed limits active during a daily time window.
+    var scheduleEnabled: Bool = false
+    var altDownloadLimit: Int = 0      // bytes/sec
+    var altUploadLimit: Int = 0        // bytes/sec
+    var scheduleFromHour: Int = 1      // 0..23
+    var scheduleToHour: Int = 8        // 0..23
+
     private static let key = "canopy.settings"
 
     static func load() -> AppSettings {

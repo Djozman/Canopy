@@ -351,6 +351,8 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
         s.completedTime = st.completed_time;
         s.paused = bool(st.flags & lt::torrent_flags::paused);
         s.hasMetadata = st.has_metadata;
+        s.sequentialDownload = bool(st.flags & lt::torrent_flags::sequential_download);
+        s.superSeeding = bool(st.flags & lt::torrent_flags::super_seeding);
         s.state = MapState(st);
         if (st.errc) s.errorMessage = NSFromStd(st.errc.message());
 
@@ -509,6 +511,38 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
     p.set_int(lt::settings_pack::active_seeds, maxSeeds);
     p.set_int(lt::settings_pack::active_limit, maxTotal);
     _session->apply_settings(p);
+}
+
+- (void)setSequentialDownload:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes {
+    for (NSString *hh in infoHashes) {
+        lt::torrent_handle h = [self handleFor:hh];
+        if (!h.is_valid()) continue;
+        if (enabled) h.set_flags(lt::torrent_flags::sequential_download);
+        else         h.unset_flags(lt::torrent_flags::sequential_download);
+    }
+}
+
+- (void)setSuperSeeding:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes {
+    for (NSString *hh in infoHashes) {
+        lt::torrent_handle h = [self handleFor:hh];
+        if (!h.is_valid()) continue;
+        if (enabled) h.set_flags(lt::torrent_flags::super_seeding);
+        else         h.unset_flags(lt::torrent_flags::super_seeding);
+    }
+}
+
+- (void)setFirstLastPiecePriority:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes {
+    for (NSString *hh in infoHashes) {
+        lt::torrent_handle h = [self handleFor:hh];
+        if (!h.is_valid()) continue;
+        std::shared_ptr<const lt::torrent_info> ti = h.torrent_file();
+        if (!ti) continue;
+        int n = ti->num_pieces();
+        if (n <= 0) continue;
+        lt::download_priority_t pr = enabled ? lt::top_priority : lt::default_priority;
+        h.piece_priority(lt::piece_index_t{0}, pr);
+        h.piece_priority(lt::piece_index_t{n - 1}, pr);
+    }
 }
 
 - (void)saveResumeData {
