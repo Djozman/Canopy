@@ -1,16 +1,26 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct TransferListView: View {
     @EnvironmentObject var engine: EngineSession
 
     @State private var selection: Set<String> = []
-    @State private var filter: StatusFilter = .all
+    @State private var filter: TransferFilter = .status(.all)
     @State private var search: String = ""
     @State private var sortOrder: [KeyPathComparator<Torrent>] = [
         .init(\Torrent.queuePosition, order: .forward)
     ]
     @State private var showAddSheet = false
     @State private var filesTarget: FilesTarget?
+
+    // Category / tag creation
+    @State private var pendingHashes: [String] = []
+    @State private var showNewCategory = false
+    @State private var newCatName = ""
+    @State private var newCatPath = ""
+    @State private var showCatImporter = false
+    @State private var showNewTag = false
+    @State private var newTagName = ""
 
     private var filtered: [Torrent] {
         var rows = engine.torrents.filter { filter.matches($0) }
@@ -29,16 +39,17 @@ struct TransferListView: View {
 
     var body: some View {
         NavigationSplitView {
-            FilterSidebar(statusFilter: $filter)
+            FilterSidebar(filter: $filter)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 280)
         } detail: {
             VStack(spacing: 0) {
                 VSplitView {
                     table
+                        .frame(minHeight: 240, idealHeight: 520)
                     if let sel = singleSelection {
                         DetailPanel(hash: sel)
                             .environmentObject(engine)
-                            .frame(minHeight: 180, idealHeight: 240)
+                            .frame(minHeight: 140, idealHeight: 190, maxHeight: 360)
                     }
                 }
                 Divider()
@@ -54,6 +65,8 @@ struct TransferListView: View {
         .sheet(item: $filesTarget) { target in
             FilesSheet(target: target).environmentObject(engine)
         }
+        .sheet(isPresented: $showNewCategory) { newCategorySheet }
+        .sheet(isPresented: $showNewTag) { newTagSheet }
     }
 
     private var table: some View {
@@ -73,6 +86,7 @@ struct TransferListView: View {
                 upColumn
                 ratioColumn
                 etaColumn
+                categoryColumn
             }
         }
         .contextMenu(forSelectionType: String.self) { ids in
@@ -160,6 +174,14 @@ struct TransferListView: View {
         .width(80)
     }
 
+    private var categoryColumn: some TableColumnContent<Torrent, KeyPathComparator<Torrent>> {
+        TableColumn("Category", value: \Torrent.category) { (t: Torrent) in
+            Text(t.category.isEmpty ? "\u{2014}" : t.category)
+                .foregroundStyle(.secondary)
+        }
+        .width(120)
+    }
+
     // MARK: - Context menu
 
     @ViewBuilder
@@ -177,6 +199,8 @@ struct TransferListView: View {
             }
         }
         Group {
+            categoryMenu(for: h)
+            tagsMenu(for: h)
             Menu("Queue") {
                 Button("Move to Top") { engine.queueTop(h) }
                 Button("Move Up") { engine.queueUp(h) }
@@ -187,6 +211,127 @@ struct TransferListView: View {
             Button("Remove", role: .destructive) { engine.remove(h, deleteFiles: false) }
             Button("Remove + delete files", role: .destructive) { engine.remove(h, deleteFiles: true) }
         }
+    }
+
+    @ViewBuilder
+    private func categoryMenu(for h: [String]) -> some View {
+        Menu("Category") {
+            Button("None") { engine.clearCategory(for: h) }
+            if !engine.library.categories.isEmpty { Divider() }
+            ForEach(engine.library.categories) { c in
+                Button {
+                    engine.setCategory(c.name, for: h)
+                } label: {
+                    if allInCategory(c.name, h) {
+                        Label(c.name, systemImage: "checkmark")
+                    } else {
+                        Text(c.name)
+                    }
+                }
+            }
+            Divider()
+            Button("New Category\u{2026}") {
+                pendingHashes = h
+                newCatName = ""; newCatPath = ""
+                showNewCategory = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tagsMenu(for h: [String]) -> some View {
+        Menu("Tags") {
+            ForEach(engine.library.tags, id: \.self) { tag in
+                Button {
+                    engine.toggleTag(tag, for: h)
+                } label: {
+                    if allHaveTag(tag, h) {
+                        Label(tag, systemImage: "checkmark")
+                    } else {
+                        Text(tag)
+                    }
+                }
+            }
+            if !engine.library.tags.isEmpty { Divider() }
+            Button("New Tag\u{2026}") {
+                pendingHashes = h
+                newTagName = ""
+                showNewTag = true
+            }
+        }
+    }
+
+    private func allInCategory(_ name: String, _ h: [String]) -> Bool {
+        !h.isEmpty && h.allSatisfy { hash in
+            engine.torrents.first { $0.infoHash == hash }?.category == name
+        }
+    }
+
+    private func allHaveTag(_ tag: String, _ h: [String]) -> Bool {
+        !h.isEmpty && h.allSatisfy { hash in
+            engine.torrents.first { $0.infoHash == hash }?.tags.contains(tag) ?? false
+        }
+    }
+
+    // MARK: - New category / tag sheets
+
+    private var newCategorySheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New Category").font(.title2.bold())
+            TextField("Name", text: $newCatName).textFieldStyle(.roundedBorder)
+            HStack {
+                Text("Save path:").foregroundStyle(.secondary)
+                Text(newCatPath.isEmpty ? "Default" : newCatPath)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button("Choose\u{2026}") { showCatImporter = true }
+                if !newCatPath.isEmpty {
+                    Button("Clear") { newCatPath = "" }
+                }
+            }
+            .font(.callout)
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showNewCategory = false }.keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    let name = newCatName.trimmingCharacters(in: .whitespaces)
+                    engine.createCategory(name, savePath: newCatPath.isEmpty ? nil : newCatPath)
+                    if !pendingHashes.isEmpty { engine.setCategory(name, for: pendingHashes) }
+                    showNewCategory = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newCatName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460, height: 200)
+        .fileImporter(isPresented: $showCatImporter,
+                      allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { newCatPath = url.path }
+        }
+    }
+
+    private var newTagSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New Tag").font(.title2.bold())
+            TextField("Name", text: $newTagName).textFieldStyle(.roundedBorder)
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showNewTag = false }.keyboardShortcut(.cancelAction)
+                Button("Create") {
+                    let name = newTagName.trimmingCharacters(in: .whitespaces)
+                    engine.createTag(name)
+                    if !pendingHashes.isEmpty { engine.addTag(name, for: pendingHashes) }
+                    showNewTag = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newTagName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 420, height: 150)
     }
 
     // MARK: - Toolbar

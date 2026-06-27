@@ -16,6 +16,7 @@ struct AddTorrentSheet: View {
     @State private var filePath: String?
     @State private var startPaused = false
     @State private var showImporter = false
+    @State private var category = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -42,9 +43,14 @@ struct AddTorrentSheet: View {
 
             Divider()
 
+            Picker("Category:", selection: $category) {
+                Text("None").tag("")
+                ForEach(engine.library.categories) { Text($0.name).tag($0.name) }
+            }
+
             HStack {
                 Text("Save to:").foregroundStyle(.secondary)
-                Text(engine.settings.defaultSavePath).lineLimit(1).truncationMode(.middle)
+                Text(saveLocation).lineLimit(1).truncationMode(.middle)
             }
             .font(.callout)
 
@@ -62,11 +68,15 @@ struct AddTorrentSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 520, height: 320)
+        .frame(width: 520, height: 360)
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]) { result in
             if case .success(let url) = result { filePath = url.path }
         }
+    }
+
+    private var saveLocation: String {
+        engine.library.savePath(forCategory: category) ?? engine.settings.defaultSavePath
     }
 
     private var canAdd: Bool {
@@ -76,9 +86,9 @@ struct AddTorrentSheet: View {
     private func add() {
         switch source {
         case .magnet:
-            engine.addMagnet(magnet, paused: startPaused)
+            engine.addMagnet(magnet, paused: startPaused, category: category)
         case .file:
-            if let p = filePath { engine.addTorrentFile(p, paused: startPaused) }
+            if let p = filePath { engine.addTorrentFile(p, paused: startPaused, category: category) }
         }
         dismiss()
     }

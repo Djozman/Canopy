@@ -455,6 +455,11 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
     _session->apply_settings(p);
 }
 
+- (void)moveStorage:(NSString *)infoHash to:(NSString *)path {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (h.is_valid()) h.move_storage(StdFromNS(path));
+}
+
 - (void)saveResumeData {
     if (!_session) return;
     for (auto const &kv : _handles) {

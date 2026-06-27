@@ -16,11 +16,13 @@ final class EngineSession: ObservableObject {
 
     @Published private(set) var torrents: [Torrent] = []
     @Published private(set) var stats = Stats()
+    @Published private(set) var library = LibraryData()
     @Published var settings: AppSettings
 
     private let session: LTSession
     private var timer: Timer?
     private var tick = 0
+    private let libraryURL: URL
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -30,7 +32,9 @@ final class EngineSession: ObservableObject {
             .appendingPathComponent("Canopy", isDirectory: true)
         try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: settings.defaultSavePath, withIntermediateDirectories: true)
+        libraryURL = configDir.appendingPathComponent("library.json")
         session = LTSession(savePath: settings.defaultSavePath, configPath: configDir.path)
+        loadLibrary()
     }
 
     func start() {
@@ -53,10 +57,18 @@ final class EngineSession: ObservableObject {
     /// Persist resume data immediately (e.g. on app quit).
     func saveAll() {
         session.saveResumeData()
+        saveLibrary()
     }
 
     private func poll() {
-        torrents = session.torrents().map(Torrent.init)
+        torrents = session.torrents().map { s in
+            var t = Torrent(s)
+            if let m = library.assignments[t.infoHash] {
+                t.category = m.category
+                t.tags = m.tags
+            }
+            return t
+        }
         let s = session.sessionStats()
         stats = Stats(downloadRate: s.downloadRate,
                       uploadRate: s.uploadRate,
@@ -73,11 +85,13 @@ final class EngineSession: ObservableObject {
     // MARK: - Adding
 
     @discardableResult
-    func addMagnet(_ uri: String, paused: Bool = false) -> String? {
+    func addMagnet(_ uri: String, paused: Bool = false, category: String = "") -> String? {
         let trimmed = uri.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         do {
-            let hash = try session.addMagnet(trimmed, savePath: settings.defaultSavePath, paused: paused)
+            let savePath = library.savePath(forCategory: category) ?? settings.defaultSavePath
+            let hash = try session.addMagnet(trimmed, savePath: savePath, paused: paused)
+            assignOnAdd(hash: hash, category: category)
             poll()
             return hash
         } catch {
@@ -87,9 +101,11 @@ final class EngineSession: ObservableObject {
     }
 
     @discardableResult
-    func addTorrentFile(_ path: String, paused: Bool = false) -> String? {
+    func addTorrentFile(_ path: String, paused: Bool = false, category: String = "") -> String? {
         do {
-            let hash = try session.addTorrentFile(atPath: path, savePath: settings.defaultSavePath, paused: paused)
+            let savePath = library.savePath(forCategory: category) ?? settings.defaultSavePath
+            let hash = try session.addTorrentFile(atPath: path, savePath: savePath, paused: paused)
+            assignOnAdd(hash: hash, category: category)
             poll()
             return hash
         } catch {
@@ -98,13 +114,24 @@ final class EngineSession: ObservableObject {
         }
     }
 
+    private func assignOnAdd(hash: String?, category: String) {
+        guard let hash, !category.isEmpty else { return }
+        var m = library.assignments[hash] ?? TorrentMeta()
+        m.category = category
+        library.assignments[hash] = m
+        saveLibrary()
+    }
+
     // MARK: - Actions
 
     func pause(_ hashes: [String])   { session.pause(hashes); poll() }
     func resume(_ hashes: [String])  { session.resume(hashes); poll() }
     func recheck(_ hashes: [String]) { session.forceRecheck(hashes); poll() }
     func remove(_ hashes: [String], deleteFiles: Bool) {
-        session.remove(hashes, deleteFiles: deleteFiles); poll()
+        session.remove(hashes, deleteFiles: deleteFiles)
+        for h in hashes { library.assignments[h] = nil }
+        saveLibrary()
+        poll()
     }
     func queueTop(_ hashes: [String])    { session.queueTop(hashes); poll() }
     func queueUp(_ hashes: [String])     { session.queueUp(hashes); poll() }
@@ -134,6 +161,112 @@ final class EngineSession: ObservableObject {
     func detail(for hash: String) -> TorrentDetail? {
         session.detail(for: hash).map(TorrentDetail.init)
     }
+
+    // MARK: - Categories & Tags
+
+    func createCategory(_ name: String, savePath: String?) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        if !library.categories.contains(where: { $0.name == trimmed }) {
+            library.categories.append(CategoryDef(name: trimmed, savePath: savePath))
+            library.categories.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            saveLibrary()
+        }
+    }
+
+    func removeCategory(_ name: String) {
+        library.categories.removeAll { $0.name == name }
+        for (h, var m) in library.assignments where m.category == name {
+            m.category = ""
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func setCategory(_ name: String, for hashes: [String]) {
+        for h in hashes {
+            var m = library.assignments[h] ?? TorrentMeta()
+            m.category = name
+            library.assignments[h] = m
+        }
+        // If the category defines a save path, relocate the torrents' storage.
+        if let sp = library.savePath(forCategory: name) {
+            for h in hashes { session.moveStorage(h, to: sp) }
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func clearCategory(for hashes: [String]) {
+        for h in hashes {
+            var m = library.assignments[h] ?? TorrentMeta()
+            m.category = ""
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func createTag(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !library.tags.contains(trimmed) else { return }
+        library.tags.append(trimmed)
+        library.tags.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        saveLibrary()
+    }
+
+    func deleteTag(_ name: String) {
+        library.tags.removeAll { $0 == name }
+        for (h, var m) in library.assignments where m.tags.contains(name) {
+            m.tags.removeAll { $0 == name }
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func addTag(_ tag: String, for hashes: [String]) {
+        createTag(tag)
+        for h in hashes {
+            var m = library.assignments[h] ?? TorrentMeta()
+            if !m.tags.contains(tag) { m.tags.append(tag) }
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func removeTag(_ tag: String, for hashes: [String]) {
+        for h in hashes {
+            guard var m = library.assignments[h] else { continue }
+            m.tags.removeAll { $0 == tag }
+            library.assignments[h] = m
+        }
+        saveLibrary()
+        poll()
+    }
+
+    func toggleTag(_ tag: String, for hashes: [String]) {
+        let allHave = hashes.allSatisfy { (library.assignments[$0]?.tags ?? []).contains(tag) }
+        if allHave { removeTag(tag, for: hashes) } else { addTag(tag, for: hashes) }
+    }
+
+    // MARK: - Persistence
+
+    private func loadLibrary() {
+        guard let data = try? Data(contentsOf: libraryURL),
+              let decoded = try? JSONDecoder().decode(LibraryData.self, from: data) else { return }
+        library = decoded
+    }
+
+    private func saveLibrary() {
+        if let data = try? JSONEncoder().encode(library) {
+            try? data.write(to: libraryURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Settings
 
     func applyRateLimits() {
         session.setDownloadRateLimit(Int32(settings.downloadLimit))

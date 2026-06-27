@@ -59,6 +59,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Extended detail for a torrent (General tab). nil if not found.
 - (nullable LTTorrentDetail *)detailFor:(NSString *)infoHash;
 
+/// Moves a torrent's storage to a new save path.
+- (void)moveStorage:(NSString *)infoHash to:(NSString *)path;
+
 /// Global rate limits (bytes/sec, 0 = unlimited).
 - (void)setDownloadRateLimit:(int)bytesPerSecond;
 - (void)setUploadRateLimit:(int)bytesPerSecond;

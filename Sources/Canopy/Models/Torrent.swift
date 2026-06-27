@@ -29,6 +29,10 @@ struct Torrent: Identifiable, Hashable {
     var savePath: String
     var errorMessage: String?
 
+    // Canopy-managed metadata (not from libtorrent)
+    var category: String = ""
+    var tags: [String] = []
+
     init(_ s: LTTorrentStats) {
         infoHash = s.infoHash
         name = s.name.isEmpty ? s.infoHash : s.name
