@@ -128,6 +128,38 @@ final class EngineSession: ObservableObject {
         saveLibrary()
     }
 
+    /// Adds a torrent from a remote magnet or .torrent URL (used by RSS).
+    func addFromRemote(_ urlString: String, category: String = "",
+                       savePath: String? = nil, paused: Bool = false) {
+        let resolved = savePath ?? library.savePath(forCategory: category) ?? settings.defaultSavePath
+        if urlString.hasPrefix("magnet:") {
+            do {
+                let hash = try session.addMagnet(urlString, savePath: resolved, paused: paused)
+                assignOnAdd(hash: hash, category: category)
+                poll()
+            } catch { NSLog("RSS magnet add failed: \(error.localizedDescription)") }
+            return
+        }
+        guard let url = URL(string: urlString) else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self, let data else { return }
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString + ".torrent")
+            try? data.write(to: tmp)
+            Task { @MainActor in
+                do {
+                    let hash = try self.sessionAddFile(tmp.path, savePath: resolved, paused: paused)
+                    self.assignOnAdd(hash: hash, category: category)
+                    self.poll()
+                } catch { NSLog("RSS file add failed: \(error.localizedDescription)") }
+            }
+        }.resume()
+    }
+
+    private func sessionAddFile(_ path: String, savePath: String, paused: Bool) throws -> String? {
+        try session.addTorrentFile(atPath: path, savePath: savePath, paused: paused)
+    }
+
     // MARK: - Actions
 
     func pause(_ hashes: [String])   { session.pause(hashes); poll() }

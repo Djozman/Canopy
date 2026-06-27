@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct TransferListView: View {
     @EnvironmentObject var engine: EngineSession
+    @Environment(\.openWindow) private var openWindow
 
     @State private var selection: Set<String> = []
     @State private var filter: TransferFilter = .status(.all)
@@ -341,6 +342,12 @@ struct TransferListView: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { showAddSheet = true } label: {
                 Label("Add", systemImage: "plus")
+            }
+            Button { openWindow(id: "rss") } label: {
+                Label("RSS", systemImage: "dot.radiowaves.left.and.right")
+            }
+            Button { openWindow(id: "search") } label: {
+                Label("Search", systemImage: "magnifyingglass")
             }
             Button { engine.resume(Array(selection)) } label: {
                 Label("Resume", systemImage: "play.fill")
