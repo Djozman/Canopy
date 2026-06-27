@@ -39,9 +39,7 @@ final class EngineSession: ObservableObject {
 
     func start() {
         session.start()
-        session.setListenPort(Int32(settings.listenPort))
-        session.setDownloadRateLimit(Int32(settings.downloadLimit))
-        session.setUploadRateLimit(Int32(settings.uploadLimit))
+        applyAllSettings()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -76,6 +74,14 @@ final class EngineSession: ObservableObject {
                       totalUpload: s.totalUpload,
                       dhtNodes: Int(s.dhtNodes),
                       isListening: s.isListening)
+
+        // Enforce the global share-ratio limit by pausing finished torrents.
+        if settings.shareRatioLimit > 0 {
+            let over = torrents.filter {
+                !$0.paused && $0.progress >= 1.0 && $0.ratio >= settings.shareRatioLimit
+            }
+            if !over.isEmpty { session.pause(over.map { $0.infoHash }) }
+        }
 
         // Periodically flush resume data so torrents survive a crash/restart.
         tick += 1
@@ -268,9 +274,25 @@ final class EngineSession: ObservableObject {
 
     // MARK: - Settings
 
-    func applyRateLimits() {
+    /// Pushes every preference value into the libtorrent session and persists.
+    func applyAllSettings() {
+        session.setListenPort(Int32(settings.listenPort))
         session.setDownloadRateLimit(Int32(settings.downloadLimit))
         session.setUploadRateLimit(Int32(settings.uploadLimit))
+        session.setMaxConnections(Int32(settings.maxConnections))
+        session.setMaxUploads(Int32(settings.maxUploads))
+        session.setDHTEnabled(settings.enableDHT,
+                              lsd: settings.enableLSD,
+                              upnp: settings.enableUPnP,
+                              natpmp: settings.enableNATPMP)
+        session.setEncryptionPolicy(Int32(settings.encryption))
+        if settings.queueingEnabled {
+            session.setQueueLimitsDownloads(Int32(settings.maxActiveDownloads),
+                                            seeds: Int32(settings.maxActiveUploads),
+                                            total: Int32(settings.maxActiveTotal))
+        } else {
+            session.setQueueLimitsDownloads(-1, seeds: -1, total: -1)
+        }
         settings.save()
     }
 }

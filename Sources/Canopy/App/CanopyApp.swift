@@ -19,5 +19,10 @@ struct CanopyApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
+
+        Settings {
+            PreferencesView()
+                .environmentObject(engine)
+        }
     }
 }

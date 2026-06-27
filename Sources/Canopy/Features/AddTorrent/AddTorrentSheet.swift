@@ -14,7 +14,7 @@ struct AddTorrentSheet: View {
     @State private var source: Source = .magnet
     @State private var magnet = ""
     @State private var filePath: String?
-    @State private var startPaused = false
+    @State private var startPaused = false  // initialized from settings onAppear
     @State private var showImporter = false
     @State private var category = ""
 
@@ -73,6 +73,7 @@ struct AddTorrentSheet: View {
                       allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data]) { result in
             if case .success(let url) = result { filePath = url.path }
         }
+        .onAppear { startPaused = engine.settings.startPaused }
     }
 
     private var saveLocation: String {

@@ -460,6 +460,57 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
     if (h.is_valid()) h.move_storage(StdFromNS(path));
 }
 
+- (void)setMaxConnections:(int)maxConnections {
+    if (!_session) return;
+    lt::settings_pack p;
+    p.set_int(lt::settings_pack::connections_limit, maxConnections <= 0 ? 200 : maxConnections);
+    _session->apply_settings(p);
+}
+
+- (void)setMaxUploads:(int)maxUploads {
+    if (!_session) return;
+    lt::settings_pack p;
+    p.set_int(lt::settings_pack::unchoke_slots_limit, maxUploads <= 0 ? -1 : maxUploads);
+    _session->apply_settings(p);
+}
+
+- (void)setDHTEnabled:(BOOL)dht lsd:(BOOL)lsd upnp:(BOOL)upnp natpmp:(BOOL)natpmp {
+    if (!_session) return;
+    lt::settings_pack p;
+    p.set_bool(lt::settings_pack::enable_dht, dht);
+    p.set_bool(lt::settings_pack::enable_lsd, lsd);
+    p.set_bool(lt::settings_pack::enable_upnp, upnp);
+    p.set_bool(lt::settings_pack::enable_natpmp, natpmp);
+    _session->apply_settings(p);
+}
+
+- (void)setEncryptionPolicy:(int)policy {
+    if (!_session) return;
+    lt::settings_pack p;
+    int enc, level;
+    switch (policy) {
+        case 1: // forced
+            enc = lt::settings_pack::pe_forced; level = lt::settings_pack::pe_rc4; break;
+        case 2: // disabled
+            enc = lt::settings_pack::pe_disabled; level = lt::settings_pack::pe_both; break;
+        default: // enabled / prefer
+            enc = lt::settings_pack::pe_enabled; level = lt::settings_pack::pe_both; break;
+    }
+    p.set_int(lt::settings_pack::out_enc_policy, enc);
+    p.set_int(lt::settings_pack::in_enc_policy, enc);
+    p.set_int(lt::settings_pack::allowed_enc_level, level);
+    _session->apply_settings(p);
+}
+
+- (void)setQueueLimitsDownloads:(int)maxDownloads seeds:(int)maxSeeds total:(int)maxTotal {
+    if (!_session) return;
+    lt::settings_pack p;
+    p.set_int(lt::settings_pack::active_downloads, maxDownloads);
+    p.set_int(lt::settings_pack::active_seeds, maxSeeds);
+    p.set_int(lt::settings_pack::active_limit, maxTotal);
+    _session->apply_settings(p);
+}
+
 - (void)saveResumeData {
     if (!_session) return;
     for (auto const &kv : _handles) {

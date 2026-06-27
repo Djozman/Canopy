@@ -68,6 +68,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// Listen port for incoming connections.
 - (void)setListenPort:(int)port;
 
+/// Global connection / upload-slot limits (-1 or 0 = unlimited where noted).
+- (void)setMaxConnections:(int)maxConnections;
+- (void)setMaxUploads:(int)maxUploads;
+
+/// Network feature toggles.
+- (void)setDHTEnabled:(BOOL)dht lsd:(BOOL)lsd upnp:(BOOL)upnp natpmp:(BOOL)natpmp;
+
+/// Encryption policy: 0 = enabled/prefer, 1 = forced, 2 = disabled.
+- (void)setEncryptionPolicy:(int)policy;
+
+/// Torrent queueing limits. Pass -1 for unlimited.
+- (void)setQueueLimitsDownloads:(int)maxDownloads seeds:(int)maxSeeds total:(int)maxTotal;
+
 /// Requests a resume-data save for any torrent that needs it. Resulting
 /// .fastresume files are written asynchronously to the config path.
 - (void)saveResumeData;
