@@ -32,6 +32,9 @@ struct CanopyApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandMenu("Tools") {
+                ToolsMenu()
+            }
         }
 
         Window("RSS", id: "rss") {
@@ -57,9 +60,28 @@ struct CanopyApp: App {
             LogView()
         }
 
+        Window("Create Torrent", id: "create") {
+            TorrentCreatorView()
+                .environmentObject(engine)
+        }
+
         Settings {
             PreferencesView()
                 .environmentObject(engine)
         }
+    }
+}
+
+/// Application "Tools" menu.
+private struct ToolsMenu: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Create Torrent\u{2026}") { openWindow(id: "create") }
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+        Divider()
+        Button("RSS") { openWindow(id: "rss") }
+        Button("Search") { openWindow(id: "search") }
+        Button("Statistics") { openWindow(id: "stats") }
+        Button("Log") { openWindow(id: "log") }
     }
 }

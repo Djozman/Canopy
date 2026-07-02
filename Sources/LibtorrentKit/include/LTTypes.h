@@ -42,6 +42,8 @@ typedef NS_ENUM(NSInteger, LTTorrentState) {
 @property (nonatomic) BOOL hasMetadata;
 @property (nonatomic) BOOL sequentialDownload;
 @property (nonatomic) BOOL superSeeding;
+@property (nonatomic) int downloadLimit;          // per-torrent bytes/sec (0 = unlimited)
+@property (nonatomic) int uploadLimit;            // per-torrent bytes/sec (0 = unlimited)
 @property (nonatomic, copy, nullable) NSString *errorMessage;
 @end
 

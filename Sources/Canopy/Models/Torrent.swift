@@ -31,6 +31,8 @@ struct Torrent: Identifiable, Hashable {
 
     var sequentialDownload: Bool = false
     var superSeeding: Bool = false
+    var downloadLimit: Int = 0   // per-torrent bytes/sec (0 = unlimited)
+    var uploadLimit: Int = 0     // per-torrent bytes/sec (0 = unlimited)
 
     // Canopy-managed metadata (not from libtorrent)
     var category: String = ""
@@ -63,5 +65,7 @@ struct Torrent: Identifiable, Hashable {
         errorMessage = s.errorMessage
         sequentialDownload = s.sequentialDownload
         superSeeding = s.superSeeding
+        downloadLimit = Int(s.downloadLimit)
+        uploadLimit = Int(s.uploadLimit)
     }
 }

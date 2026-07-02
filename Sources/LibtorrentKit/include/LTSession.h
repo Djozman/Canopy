@@ -86,6 +86,38 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setSuperSeeding:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes;
 - (void)setFirstLastPiecePriority:(BOOL)enabled for:(NSArray<NSString *> *)infoHashes;
 
+/// Per-torrent rate limits (bytes/sec, 0 = unlimited).
+- (void)setTorrentDownloadLimit:(int)bytesPerSecond for:(NSString *)infoHash;
+- (void)setTorrentUploadLimit:(int)bytesPerSecond for:(NSString *)infoHash;
+
+/// Force a tracker + DHT reannounce now.
+- (void)forceReannounce:(NSArray<NSString *> *)infoHashes;
+/// Force-resume, bypassing the queue (disables auto-management).
+- (void)forceResume:(NSArray<NSString *> *)infoHashes;
+
+/// Magnet URI for a torrent (nil if unavailable).
+- (nullable NSString *)magnetURIFor:(NSString *)infoHash;
+
+/// Renames a single file within a torrent.
+- (void)renameFile:(NSInteger)fileIndex to:(NSString *)newRelativePath for:(NSString *)infoHash;
+
+/// Tracker editing.
+- (void)addTracker:(NSString *)url for:(NSString *)infoHash;
+- (void)removeTracker:(NSString *)url for:(NSString *)infoHash;
+
+/// Adds a peer manually. `ipPort` is "host:port" (IPv6 as "[::1]:port").
+- (BOOL)addPeer:(NSString *)ipPort for:(NSString *)infoHash;
+
+/// Creates a .torrent file from a file or folder. Returns the output path or
+/// nil on failure. `pieceSize` in bytes (0 = auto).
+- (nullable NSString *)createTorrentAtPath:(NSString *)sourcePath
+                                    output:(NSString *)outputPath
+                                  trackers:(NSArray<NSString *> *)trackers
+                                   comment:(NSString *)comment
+                                 isPrivate:(BOOL)isPrivate
+                                 pieceSize:(int)pieceSize
+                                     error:(NSError **)error;
+
 /// Requests a resume-data save for any torrent that needs it. Resulting
 /// .fastresume files are written asynchronously to the config path.
 - (void)saveResumeData;

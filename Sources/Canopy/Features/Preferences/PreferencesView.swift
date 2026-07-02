@@ -163,6 +163,11 @@ private struct SchedulerPrefs: View {
                     KiBField(label: "Alt upload (KiB/s, 0 = \u{221E}):", bytes: engine.bind(\.altUploadLimit))
                     HourField(label: "From (hour):", value: engine.bind(\.scheduleFromHour))
                     HourField(label: "To (hour):", value: engine.bind(\.scheduleToHour))
+                    Picker("Days:", selection: engine.bind(\.scheduleDays)) {
+                        Text("Every day").tag(0)
+                        Text("Weekdays (Mon\u{2013}Fri)").tag(1)
+                        Text("Weekends (Sat\u{2013}Sun)").tag(2)
+                    }
                 }
                 .disabled(!engine.settings.scheduleEnabled)
                 Text("During this window the alternative limits apply; the normal limits apply the rest of the day. Overnight windows (e.g. 22 to 6) are supported.")

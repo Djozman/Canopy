@@ -12,6 +12,9 @@ struct FilesSheet: View {
     let target: FilesTarget
 
     @State private var files: [TorrentFile] = []
+    @State private var sortOrder: [KeyPathComparator<TorrentFile>] = [
+        .init(\TorrentFile.name, order: .forward)
+    ]
 
     private let options: [(label: String, value: Int)] = [
         ("Do not download", 0),
@@ -19,6 +22,8 @@ struct FilesSheet: View {
         ("High", 6),
         ("Maximum", 7),
     ]
+
+    private var sortedFiles: [TorrentFile] { files.sorted(using: sortOrder) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -32,15 +37,29 @@ struct FilesSheet: View {
                     description: Text("Metadata is still downloading for this torrent."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(files) { file in
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(file.name).lineLimit(1)
-                            Text("\(Formatters.bytes(file.size)) \u{2022} \(Int(file.progress * 100))%")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                Table(sortedFiles, sortOrder: $sortOrder) {
+                    TableColumn("Name", value: \TorrentFile.name) { file in
+                        Text(file.name).lineLimit(1).help(file.path)
+                    }
+                    .width(min: 200, ideal: 340)
+
+                    TableColumn("Size", value: \TorrentFile.size) { file in
+                        Text(Formatters.bytes(file.size)).monospacedDigit()
+                    }
+                    .width(min: 70, ideal: 90)
+
+                    TableColumn("Progress", value: \TorrentFile.progress) { file in
+                        HStack(spacing: 6) {
+                            ProgressView(value: min(max(file.progress, 0), 1))
+                                .frame(width: 90)
+                            Text("\(Int((file.progress * 100).rounded()))%")
+                                .monospacedDigit()
+                                .frame(width: 42, alignment: .trailing)
                         }
-                        Spacer()
+                    }
+                    .width(min: 150, ideal: 160)
+
+                    TableColumn("Priority") { file in
                         Picker("", selection: Binding(
                             get: { displayValue(file.priority) },
                             set: { setPriority($0, for: file) }
@@ -48,19 +67,23 @@ struct FilesSheet: View {
                             ForEach(options, id: \.value) { Text($0.label).tag($0.value) }
                         }
                         .labelsHidden()
-                        .frame(width: 160)
                     }
+                    .width(min: 150, ideal: 160)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             HStack {
                 Button("Refresh") { reload() }
                 Spacer()
+                Text("\(files.count) files").font(.caption).foregroundStyle(.secondary)
+                Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(18)
-        .frame(width: 640, height: 470)
+        .frame(minWidth: 560, idealWidth: 780, maxWidth: .infinity,
+               minHeight: 420, idealHeight: 620, maxHeight: .infinity)
         .onAppear { reload() }
     }
 
@@ -82,6 +105,7 @@ struct FilesSheet: View {
         if let i = files.firstIndex(where: { $0.id == file.id }) {
             files[i].priority = value
         }
+        // Engine expects priorities ordered by file index.
         let ordered = files.sorted { $0.id < $1.id }.map { $0.priority }
         engine.setFilePriorities(ordered, for: target.hash)
     }

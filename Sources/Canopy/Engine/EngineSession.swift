@@ -22,7 +22,9 @@ final class EngineSession: ObservableObject {
     private let session: LTSession
     private var timer: Timer?
     private var tick = 0
-    private var altLimitsActive = false
+    @Published private(set) var altLimitsActive = false
+    private var completedHashes: Set<String> = []
+    private var completionInitialized = false
     private let libraryURL: URL
 
     init(settings: AppSettings) {
@@ -40,6 +42,7 @@ final class EngineSession: ObservableObject {
 
     func start() {
         session.start()
+        Notifier.requestAuthorization()
         applyAllSettings()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -66,6 +69,7 @@ final class EngineSession: ObservableObject {
                 t.category = m.category
                 t.tags = m.tags
                 t.firstLastPiece = m.firstLastPiece
+                if let dn = m.displayName, !dn.isEmpty { t.name = dn }
             }
             return t
         }
@@ -77,6 +81,19 @@ final class EngineSession: ObservableObject {
                       dhtNodes: Int(s.dhtNodes),
                       isListening: s.isListening)
 
+        // Completion notifications (skip the first poll to avoid re-notifying).
+        let doneNow = Set(torrents.filter { $0.progress >= 1.0 }.map { $0.infoHash })
+        if completionInitialized {
+            for h in doneNow.subtracting(completedHashes) {
+                if let t = torrents.first(where: { $0.infoHash == h }) {
+                    AppLog.shared.log("Completed: \(t.name)")
+                    Notifier.notify(title: "Download complete", body: t.name)
+                }
+            }
+        }
+        completedHashes = doneNow
+        completionInitialized = true
+
         applyScheduleIfNeeded()
 
         // Enforce the global share-ratio limit by pausing finished torrents.
@@ -85,6 +102,21 @@ final class EngineSession: ObservableObject {
                 !$0.paused && $0.progress >= 1.0 && $0.ratio >= settings.shareRatioLimit
             }
             if !over.isEmpty { session.pause(over.map { $0.infoHash }) }
+        }
+
+        // Enforce per-torrent share-ratio / seeding-time limits.
+        for t in torrents where !t.paused && t.progress >= 1.0 {
+            guard let m = library.assignments[t.infoHash] else { continue }
+            var stop = false
+            if m.ratioLimit > 0 && t.ratio >= m.ratioLimit { stop = true }
+            if m.seedingTimeLimit > 0 && t.completedTime > 0 {
+                let minutes = (Int(Date().timeIntervalSince1970) - Int(t.completedTime)) / 60
+                if minutes >= m.seedingTimeLimit { stop = true }
+            }
+            if stop {
+                session.pause([t.infoHash])
+                AppLog.shared.log("Seeding limit reached: \(t.name)")
+            }
         }
 
         // Periodically flush resume data so torrents survive a crash/restart.
@@ -183,6 +215,111 @@ final class EngineSession: ObservableObject {
     func queueDown(_ hashes: [String])   { session.queueDown(hashes); poll() }
     func queueBottom(_ hashes: [String]) { session.queueBottom(hashes); poll() }
 
+    // MARK: - Force actions, per-torrent limits, rename, trackers
+
+    func forceResume(_ hashes: [String]) {
+        session.forceResume(hashes)
+        AppLog.shared.log("Force resumed \(hashes.count) torrent(s)")
+        poll()
+    }
+
+    func forceReannounce(_ hashes: [String]) {
+        session.forceReannounce(hashes)
+        AppLog.shared.log("Reannounced \(hashes.count) torrent(s)")
+        poll()
+    }
+
+    func setTorrentDownloadLimit(_ bytesPerSecond: Int, for hash: String) {
+        session.setTorrentDownloadLimit(Int32(bytesPerSecond), for: hash)
+        poll()
+    }
+
+    func setTorrentUploadLimit(_ bytesPerSecond: Int, for hash: String) {
+        session.setTorrentUploadLimit(Int32(bytesPerSecond), for: hash)
+        poll()
+    }
+
+    func magnetURI(for hash: String) -> String? {
+        session.magnetURI(for: hash)
+    }
+
+    func renameTorrent(_ name: String, for hash: String) {
+        var m = library.assignments[hash] ?? TorrentMeta()
+        m.displayName = name.isEmpty ? nil : name
+        library.assignments[hash] = m
+        saveLibrary()
+        AppLog.shared.log("Renamed torrent")
+        poll()
+    }
+
+    func renameFile(_ index: Int, to name: String, for hash: String) {
+        session.renameFile(index, to: name, for: hash)
+        poll()
+    }
+
+    func addTracker(_ url: String, for hash: String) {
+        session.addTracker(url, for: hash)
+        AppLog.shared.log("Added tracker")
+        poll()
+    }
+
+    func removeTracker(_ url: String, for hash: String) {
+        session.removeTracker(url, for: hash)
+        poll()
+    }
+
+    @discardableResult
+    func addPeer(_ ipPort: String, for hash: String) -> Bool {
+        let ok = session.addPeer(ipPort, for: hash)
+        AppLog.shared.log(ok ? "Added peer \(ipPort)" : "Rejected invalid peer \(ipPort)")
+        poll()
+        return ok
+    }
+
+    func seedingLimits(for hash: String) -> (ratio: Double, minutes: Int) {
+        let m = library.assignments[hash]
+        return (m?.ratioLimit ?? -1, m?.seedingTimeLimit ?? -1)
+    }
+
+    func setSeedingLimits(ratio: Double, minutes: Int, for hash: String) {
+        var m = library.assignments[hash] ?? TorrentMeta()
+        m.ratioLimit = ratio
+        m.seedingTimeLimit = minutes
+        library.assignments[hash] = m
+        saveLibrary()
+        AppLog.shared.log("Updated seeding limits")
+        poll()
+    }
+
+    @discardableResult
+    func createTorrent(sourcePath: String, output: String, trackers: [String],
+                       comment: String, isPrivate: Bool, pieceSize: Int) -> String? {
+        do {
+            let out = try session.createTorrent(atPath: sourcePath, output: output,
+                                                trackers: trackers, comment: comment,
+                                                isPrivate: isPrivate, pieceSize: Int32(pieceSize))
+            AppLog.shared.log("Created torrent: \(output)")
+            return out
+        } catch {
+            AppLog.shared.log("Create torrent failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func toggleAltSpeedLimits() {
+        let want = !altLimitsActive
+        if want {
+            session.setDownloadRateLimit(Int32(settings.altDownloadLimit))
+            session.setUploadRateLimit(Int32(settings.altUploadLimit))
+        } else {
+            session.setDownloadRateLimit(Int32(settings.downloadLimit))
+            session.setUploadRateLimit(Int32(settings.uploadLimit))
+        }
+        altLimitsActive = want
+        AppLog.shared.log(want ? "Alternative speed limits ON" : "Alternative speed limits OFF")
+        poll()
+    }
+
     // MARK: - BitTorrent toggles
 
     func setSequential(_ on: Bool, for hashes: [String]) {
@@ -211,10 +348,19 @@ final class EngineSession: ObservableObject {
     // MARK: - Scheduler
 
     private func isWithinSchedule() -> Bool {
-        let h = Calendar.current.component(.hour, from: Date())
+        let cal = Calendar.current
+        let now = Date()
+        let h = cal.component(.hour, from: now)
         let f = settings.scheduleFromHour, t = settings.scheduleToHour
         if f == t { return false }
-        return f < t ? (h >= f && h < t) : (h >= f || h < t)
+        let inHours = f < t ? (h >= f && h < t) : (h >= f || h < t)
+        guard inHours else { return false }
+        let weekday = cal.component(.weekday, from: now) // 1 = Sunday ... 7 = Saturday
+        switch settings.scheduleDays {
+        case 1: return weekday >= 2 && weekday <= 6   // Mon-Fri
+        case 2: return weekday == 1 || weekday == 7   // Sat/Sun
+        default: return true                          // every day
+        }
     }
 
     private func applyScheduleIfNeeded() {
@@ -244,6 +390,11 @@ final class EngineSession: ObservableObject {
 
     func files(for hash: String) -> [TorrentFile] {
         session.files(for: hash).map(TorrentFile.init)
+    }
+
+    func moveStorage(_ hash: String, to path: String) {
+        session.moveStorage(hash, to: path)
+        poll()
     }
 
     func setFilePriorities(_ priorities: [Int], for hash: String) {

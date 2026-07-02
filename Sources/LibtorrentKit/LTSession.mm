@@ -27,6 +27,11 @@
 #include <libtorrent/read_resume_data.hpp>
 #include <libtorrent/peer_info.hpp>
 #include <libtorrent/announce_entry.hpp>
+#include <libtorrent/socket.hpp>
+#include <libtorrent/address.hpp>
+#include <libtorrent/create_torrent.hpp>
+#include <libtorrent/entry.hpp>
+#include <libtorrent/bencode.hpp>
 #include <chrono>
 
 namespace lt = libtorrent;
@@ -353,6 +358,8 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
         s.hasMetadata = st.has_metadata;
         s.sequentialDownload = bool(st.flags & lt::torrent_flags::sequential_download);
         s.superSeeding = bool(st.flags & lt::torrent_flags::super_seeding);
+        s.downloadLimit = h.download_limit();
+        s.uploadLimit = h.upload_limit();
         s.state = MapState(st);
         if (st.errc) s.errorMessage = NSFromStd(st.errc.message());
 
@@ -542,6 +549,139 @@ static LTTorrentState MapState(lt::torrent_status const &st) {
         lt::download_priority_t pr = enabled ? lt::top_priority : lt::default_priority;
         h.piece_priority(lt::piece_index_t{0}, pr);
         h.piece_priority(lt::piece_index_t{n - 1}, pr);
+    }
+}
+
+- (void)setTorrentDownloadLimit:(int)bytesPerSecond for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (h.is_valid()) h.set_download_limit(bytesPerSecond);
+}
+
+- (void)setTorrentUploadLimit:(int)bytesPerSecond for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (h.is_valid()) h.set_upload_limit(bytesPerSecond);
+}
+
+- (void)forceReannounce:(NSArray<NSString *> *)infoHashes {
+    for (NSString *hh in infoHashes) {
+        lt::torrent_handle h = [self handleFor:hh];
+        if (!h.is_valid()) continue;
+        h.force_reannounce();
+        h.force_dht_announce();
+    }
+}
+
+- (void)forceResume:(NSArray<NSString *> *)infoHashes {
+    for (NSString *hh in infoHashes) {
+        lt::torrent_handle h = [self handleFor:hh];
+        if (!h.is_valid()) continue;
+        h.unset_flags(lt::torrent_flags::auto_managed);
+        h.resume();
+    }
+}
+
+- (nullable NSString *)magnetURIFor:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (!h.is_valid()) return nil;
+    std::string uri = lt::make_magnet_uri(h);
+    if (uri.empty()) return nil;
+    return NSFromStd(uri);
+}
+
+- (void)renameFile:(NSInteger)fileIndex to:(NSString *)newRelativePath for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (h.is_valid()) h.rename_file(lt::file_index_t{(int)fileIndex}, StdFromNS(newRelativePath));
+}
+
+- (void)addTracker:(NSString *)url for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (!h.is_valid()) return;
+    lt::announce_entry ae(StdFromNS(url));
+    h.add_tracker(ae);
+}
+
+- (void)removeTracker:(NSString *)url for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (!h.is_valid()) return;
+    std::string target = StdFromNS(url);
+    std::vector<lt::announce_entry> current = h.trackers();
+    std::vector<lt::announce_entry> kept;
+    for (auto const &ae : current) { if (ae.url != target) kept.push_back(ae); }
+    h.replace_trackers(kept);
+}
+
+- (BOOL)addPeer:(NSString *)ipPort for:(NSString *)infoHash {
+    lt::torrent_handle h = [self handleFor:infoHash];
+    if (!h.is_valid()) return NO;
+    std::string in = StdFromNS(ipPort);
+    if (in.empty()) return NO;
+    std::string host;
+    int port = 0;
+    if (in.front() == '[') {                     // [ipv6]:port
+        auto close = in.find(']');
+        if (close == std::string::npos) return NO;
+        host = in.substr(1, close - 1);
+        auto colon = in.find(':', close);
+        if (colon == std::string::npos) return NO;
+        port = std::atoi(in.c_str() + colon + 1);
+    } else {
+        auto colon = in.rfind(':');
+        if (colon == std::string::npos) return NO;
+        host = in.substr(0, colon);
+        port = std::atoi(in.c_str() + colon + 1);
+    }
+    if (port <= 0 || port > 65535) return NO;
+    lt::error_code ec;
+    lt::address addr = lt::make_address(host, ec);
+    if (ec) return NO;
+    h.connect_peer(lt::tcp::endpoint(addr, static_cast<unsigned short>(port)));
+    return YES;
+}
+
+- (nullable NSString *)createTorrentAtPath:(NSString *)sourcePath
+                                    output:(NSString *)outputPath
+                                  trackers:(NSArray<NSString *> *)trackers
+                                   comment:(NSString *)comment
+                                 isPrivate:(BOOL)isPrivate
+                                 pieceSize:(int)pieceSize
+                                     error:(NSError **)error {
+    try {
+        std::string src = StdFromNS(sourcePath);
+        lt::file_storage fs;
+        lt::add_files(fs, src);
+        if (fs.num_files() == 0) {
+            if (error) *error = [NSError errorWithDomain:@"Canopy" code:2
+                userInfo:@{NSLocalizedDescriptionKey: @"No files found at source path"}];
+            return nil;
+        }
+        lt::create_torrent t(fs, pieceSize);
+        for (NSString *tr in trackers) {
+            std::string u = StdFromNS(tr);
+            if (!u.empty()) t.add_tracker(u);
+        }
+        if (comment.length > 0) t.set_comment(StdFromNS(comment).c_str());
+        t.set_priv(isPrivate ? true : false);
+        // Piece hashes are computed relative to the source's parent directory.
+        std::string base = ".";
+        auto slash = src.find_last_of('/');
+        if (slash != std::string::npos) base = src.substr(0, slash);
+        lt::set_piece_hashes(t, base);
+        std::vector<char> buffer;
+        lt::bencode(std::back_inserter(buffer), t.generate());
+        std::string out = StdFromNS(outputPath);
+        FILE *fp = fopen(out.c_str(), "wb");
+        if (!fp) {
+            if (error) *error = [NSError errorWithDomain:@"Canopy" code:3
+                userInfo:@{NSLocalizedDescriptionKey: @"Could not open output file for writing"}];
+            return nil;
+        }
+        fwrite(buffer.data(), 1, buffer.size(), fp);
+        fclose(fp);
+        return outputPath;
+    } catch (std::exception const &e) {
+        if (error) *error = [NSError errorWithDomain:@"Canopy" code:1
+            userInfo:@{NSLocalizedDescriptionKey: NSFromStd(std::string(e.what()))}];
+        return nil;
     }
 }
 

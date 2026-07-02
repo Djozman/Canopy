@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 struct TransferListView: View {
     @EnvironmentObject var engine: EngineSession
@@ -22,6 +23,23 @@ struct TransferListView: View {
     @State private var showCatImporter = false
     @State private var showNewTag = false
     @State private var newTagName = ""
+
+    // Set location / rename / per-torrent rate
+    @State private var showLocation = false
+    @State private var locationTarget: String?
+    @State private var locationPath = ""
+    @State private var showLocationImporter = false
+    @State private var showRename = false
+    @State private var renameTarget: String?
+    @State private var renameText = ""
+    @State private var showRate = false
+    @State private var rateTargets: [String] = []
+    @State private var rateIsDownload = true
+    @State private var rateValue = ""
+    @State private var showShare = false
+    @State private var shareTarget: String?
+    @State private var shareRatio = ""
+    @State private var shareMinutes = ""
 
     private var filtered: [Torrent] {
         var rows = engine.torrents.filter { filter.matches($0) }
@@ -50,7 +68,7 @@ struct TransferListView: View {
                     if let sel = singleSelection {
                         DetailPanel(hash: sel)
                             .environmentObject(engine)
-                            .frame(minHeight: 140, idealHeight: 190, maxHeight: 360)
+                            .frame(minHeight: 160, idealHeight: 260)
                     }
                 }
                 Divider()
@@ -68,6 +86,10 @@ struct TransferListView: View {
         }
         .sheet(isPresented: $showNewCategory) { newCategorySheet }
         .sheet(isPresented: $showNewTag) { newTagSheet }
+        .sheet(isPresented: $showLocation) { locationSheet }
+        .sheet(isPresented: $showRename) { renameSheet }
+        .sheet(isPresented: $showRate) { rateSheet }
+        .sheet(isPresented: $showShare) { shareSheet }
     }
 
     private var table: some View {
@@ -228,12 +250,21 @@ struct TransferListView: View {
         Group {
             Button("Resume") { engine.resume(h) }
             Button("Pause") { engine.pause(h) }
+            Button("Force Resume") { engine.forceResume(h) }
             Button("Force Recheck") { engine.recheck(h) }
+            Button("Force Reannounce") { engine.forceReannounce(h) }
+        }
+        Group {
+            limitRateMenu(for: h)
             if ids.count == 1, let only = h.first {
                 Button("Files\u{2026}") {
                     let name = engine.torrents.first { $0.infoHash == only }?.name ?? only
                     filesTarget = FilesTarget(hash: only, name: name)
                 }
+                Button("Set Location\u{2026}") { beginSetLocation(only) }
+                Button("Rename\u{2026}") { beginRename(only) }
+                copyMenu(for: only)
+                Button("Share Limits\u{2026}") { beginShareLimits(only) }
             }
         }
         Group {
@@ -373,6 +404,185 @@ struct TransferListView: View {
         .frame(width: 420, height: 150)
     }
 
+    // MARK: - Copy / limit-rate menus
+
+    @ViewBuilder
+    private func copyMenu(for hash: String) -> some View {
+        Menu("Copy") {
+            Button("Magnet Link") { copyMagnet(hash) }
+            Button("Name") {
+                copyToPasteboard(engine.torrents.first { $0.infoHash == hash }?.name ?? "")
+            }
+            Button("Info Hash") { copyToPasteboard(hash) }
+        }
+    }
+
+    @ViewBuilder
+    private func limitRateMenu(for h: [String]) -> some View {
+        Menu("Limit Download Rate") {
+            Button("Unlimited") { for x in h { engine.setTorrentDownloadLimit(0, for: x) } }
+            ForEach([50, 100, 250, 500, 1000, 2000, 5000], id: \.self) { kb in
+                Button("\(kb) KiB/s") { for x in h { engine.setTorrentDownloadLimit(kb * 1024, for: x) } }
+            }
+            Button("Custom\u{2026}") { beginRate(h, download: true) }
+        }
+        Menu("Limit Upload Rate") {
+            Button("Unlimited") { for x in h { engine.setTorrentUploadLimit(0, for: x) } }
+            ForEach([50, 100, 250, 500, 1000, 2000, 5000], id: \.self) { kb in
+                Button("\(kb) KiB/s") { for x in h { engine.setTorrentUploadLimit(kb * 1024, for: x) } }
+            }
+            Button("Custom\u{2026}") { beginRate(h, download: false) }
+        }
+    }
+
+    private func beginSetLocation(_ hash: String) {
+        locationTarget = hash
+        locationPath = engine.torrents.first { $0.infoHash == hash }?.savePath ?? ""
+        showLocation = true
+    }
+
+    private func beginRename(_ hash: String) {
+        renameTarget = hash
+        renameText = engine.torrents.first { $0.infoHash == hash }?.name ?? ""
+        showRename = true
+    }
+
+    private func beginRate(_ hashes: [String], download: Bool) {
+        rateTargets = hashes
+        rateIsDownload = download
+        rateValue = ""
+        showRate = true
+    }
+
+    private func copyToPasteboard(_ str: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(str, forType: .string)
+    }
+
+    private func copyMagnet(_ hash: String) {
+        if let m = engine.magnetURI(for: hash) { copyToPasteboard(m) }
+    }
+
+    // MARK: - Set location / rename / rate sheets
+
+    private var locationSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Set Location").font(.title2.bold())
+            HStack {
+                TextField("Save path", text: $locationPath).textFieldStyle(.roundedBorder)
+                Button("Choose\u{2026}") { showLocationImporter = true }
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showLocation = false }.keyboardShortcut(.cancelAction)
+                Button("Move") {
+                    if let t = locationTarget {
+                        let p = locationPath.trimmingCharacters(in: .whitespaces)
+                        if !p.isEmpty { engine.moveStorage(t, to: p) }
+                    }
+                    showLocation = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 540, height: 170)
+        .fileImporter(isPresented: $showLocationImporter, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { locationPath = url.path }
+        }
+    }
+
+    private var renameSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename Torrent").font(.title2.bold())
+            TextField("Name", text: $renameText).textFieldStyle(.roundedBorder)
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showRename = false }.keyboardShortcut(.cancelAction)
+                Button("Rename") {
+                    if let t = renameTarget {
+                        engine.renameTorrent(renameText.trimmingCharacters(in: .whitespaces), for: t)
+                    }
+                    showRename = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(renameText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 440, height: 150)
+    }
+
+    private func beginShareLimits(_ hash: String) {
+        shareTarget = hash
+        let cur = engine.seedingLimits(for: hash)
+        shareRatio = cur.ratio > 0 ? String(format: "%.2f", cur.ratio) : ""
+        shareMinutes = cur.minutes > 0 ? "\(cur.minutes)" : ""
+        showShare = true
+    }
+
+    private var shareSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Share Limits").font(.title2.bold())
+            Text("Pause this torrent once it reaches either limit. Leave blank for no limit.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Stop at ratio:")
+                Spacer()
+                TextField("\u{221E}", text: $shareRatio).frame(width: 100).textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Text("Stop after seeding (minutes):")
+                Spacer()
+                TextField("\u{221E}", text: $shareMinutes).frame(width: 100).textFieldStyle(.roundedBorder)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showShare = false }.keyboardShortcut(.cancelAction)
+                Button("Apply") {
+                    if let t = shareTarget {
+                        let r = Double(shareRatio.trimmingCharacters(in: .whitespaces)) ?? -1
+                        let m = Int(shareMinutes.trimmingCharacters(in: .whitespaces)) ?? -1
+                        engine.setSeedingLimits(ratio: r, minutes: m, for: t)
+                    }
+                    showShare = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 420, height: 220)
+    }
+
+    private var rateSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(rateIsDownload ? "Download Rate Limit" : "Upload Rate Limit").font(.title2.bold())
+            HStack {
+                TextField("0 = unlimited", text: $rateValue).textFieldStyle(.roundedBorder)
+                Text("KiB/s")
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Spacer()
+                Button("Cancel") { showRate = false }.keyboardShortcut(.cancelAction)
+                Button("Apply") {
+                    let kb = Int(rateValue.trimmingCharacters(in: .whitespaces)) ?? 0
+                    for x in rateTargets {
+                        if rateIsDownload { engine.setTorrentDownloadLimit(kb * 1024, for: x) }
+                        else { engine.setTorrentUploadLimit(kb * 1024, for: x) }
+                    }
+                    showRate = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 380, height: 160)
+    }
+
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
@@ -394,6 +604,9 @@ struct TransferListView: View {
             }
             Button { openWindow(id: "log") } label: {
                 Label("Log", systemImage: "list.bullet.rectangle")
+            }
+            Button { engine.toggleAltSpeedLimits() } label: {
+                Label("Alt Speed", systemImage: engine.altLimitsActive ? "tortoise.fill" : "hare.fill")
             }
             Button { engine.resume(Array(selection)) } label: {
                 Label("Resume", systemImage: "play.fill")

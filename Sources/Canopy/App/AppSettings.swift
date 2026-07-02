@@ -36,6 +36,7 @@ struct AppSettings: Codable, Equatable {
     var altUploadLimit: Int = 0        // bytes/sec
     var scheduleFromHour: Int = 1      // 0..23
     var scheduleToHour: Int = 8        // 0..23
+    var scheduleDays: Int = 0          // 0=Every day, 1=Weekdays, 2=Weekends
 
     private static let key = "canopy.settings"
 

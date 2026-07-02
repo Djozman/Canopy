@@ -13,6 +13,9 @@ struct TorrentMeta: Codable, Hashable {
     var category: String = ""
     var tags: [String] = []
     var firstLastPiece: Bool = false
+    var displayName: String? = nil   // user-renamed torrent name override
+    var ratioLimit: Double = -1      // -1 = use global; 0 = unlimited; >0 = stop at ratio
+    var seedingTimeLimit: Int = -1   // minutes; -1 = unlimited
 }
 
 /// The full library of categories, tags, and per-torrent assignments.
