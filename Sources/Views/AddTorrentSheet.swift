@@ -9,14 +9,19 @@ struct AddTorrentSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var magnetURI = ""
     @State private var torrentPath = ""
-    @State private var saveDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Downloads").path
+    @State private var saveDir: String
     @State private var showFilePicker = false
     @State private var tab = 0
     @State private var parseError: String?
 
     let engine: TorrentEngine
     let onNext: (PendingTorrent, LTTorrentHandle?) -> Void
+
+    init(engine: TorrentEngine, onNext: @escaping (PendingTorrent, LTTorrentHandle?) -> Void) {
+        self.engine = engine
+        self.onNext = onNext
+        _saveDir = State(initialValue: engine.defaultSavePath)
+    }
 
     var body: some View {
         NavigationStack {
@@ -80,7 +85,10 @@ struct AddTorrentSheet: View {
             }
         }
         .frame(minWidth: 500, minHeight: 300)
-        .alert("Error", isPresented: .constant(parseError != nil)) {
+        .alert("Error", isPresented: Binding(
+            get: { parseError != nil },
+            set: { if !$0 { parseError = nil } }
+        )) {
             Button("OK") { parseError = nil }
         } message: {
             Text(parseError ?? "")
@@ -142,7 +150,7 @@ struct AddTorrentSheet: View {
                     PreAddCoordinator.shared.updateWindow(
                         at: i, pending: updated, handle: magnetHandle)
                 },
-                onError: {}
+                onError: { PreAddCoordinator.shared.failWindow(at: i, message: "Could not fetch magnet metadata. Check the link and network connection.") }
             )
 
             if i == 0 {

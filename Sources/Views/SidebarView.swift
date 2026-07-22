@@ -27,7 +27,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("qBittorrent")
+        .navigationTitle("Canopy")
     }
 
     private func iconName(for cat: FilterCategory) -> String {

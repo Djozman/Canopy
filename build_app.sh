@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 cd "$(dirname "$0")"
-swift build
+swift build -c release
 rm -rf Canopy.app
 mkdir -p Canopy.app/Contents/MacOS Canopy.app/Contents/Resources
 cp .build/release/Canopy Canopy.app/Contents/MacOS/
@@ -11,8 +11,8 @@ plutil -replace CFBundleExecutable -string Canopy Canopy.app/Contents/Info.plist
 plutil -replace CFBundleIdentifier -string com.canopy.client Canopy.app/Contents/Info.plist
 plutil -replace CFBundleName -string Canopy Canopy.app/Contents/Info.plist
 plutil -replace CFBundlePackageType -string APPL Canopy.app/Contents/Info.plist
-plutil -replace CFBundleVersion -string 2.5.0 Canopy.app/Contents/Info.plist
-plutil -replace CFBundleShortVersionString -string 2.5.0 Canopy.app/Contents/Info.plist
+plutil -replace CFBundleVersion -string 3.0.0 Canopy.app/Contents/Info.plist
+plutil -replace CFBundleShortVersionString -string 3.0.0 Canopy.app/Contents/Info.plist
 plutil -replace CFBundleIconFile -string AppIcon Canopy.app/Contents/Info.plist
 chmod +x Canopy.app/Contents/MacOS/Canopy
 touch Canopy.app

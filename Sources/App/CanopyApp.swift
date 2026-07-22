@@ -88,8 +88,7 @@ struct CanopyApp: App {
     static var engine: TorrentEngine!
 
     static func handleIncomingURL(_ url: URL) {
-        let saveDir = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
-            .first ?? NSHomeDirectory() + "/Downloads"
+        let saveDir = engine.defaultSavePath
 
         if url.scheme == "magnet" {
             var name = url.absoluteString
@@ -123,7 +122,7 @@ struct CanopyApp: App {
                         userInfo: ["pending": newPending, "handle": magnetHandle as Any]
                     )
                 },
-                onError: {}
+                onError: { PreAddCoordinator.shared.failWindow(at: 0, message: "Could not fetch magnet metadata. Check the link and network connection.") }
             )
         } else if url.isFileURL, url.pathExtension.lowercased() == "torrent" {
             if let pending = engine.parse(torrentPath: url.path) {

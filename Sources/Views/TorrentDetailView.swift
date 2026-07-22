@@ -228,7 +228,6 @@ private struct ContentTab: View {
     let torrent: TorrentStatus
     let engine: TorrentEngine
 
-    private let cols = 40
     private let cellSize: CGFloat = 10
     private let spacing: CGFloat = 2
 
@@ -255,8 +254,7 @@ private struct ContentTab: View {
 
             if pieceCount > 0 {
                 LazyVGrid(
-                    columns: Array(
-                        repeating: GridItem(.fixed(cellSize), spacing: spacing), count: cols),
+                    columns: [GridItem(.adaptive(minimum: cellSize, maximum: cellSize), spacing: spacing)],
                     spacing: spacing
                 ) {
                     ForEach(0..<pieceCount, id: \.self) { i in

@@ -48,4 +48,14 @@ final class FileTreeViewModelTests: XCTestCase {
         let file = FileNode(name: "f", size: 100, downloaded: 100, children: nil)
         XCTAssertEqual(file.progress, 1.0)
     }
+
+    func testProgressIsClampedAboveOne() {
+        let file = FileNode(name: "f", size: 100, downloaded: 125, children: nil)
+        XCTAssertEqual(file.progress, 1.0)
+    }
+
+    func testProgressIsClampedBelowZero() {
+        let file = FileNode(name: "f", size: 100, downloaded: -1, children: nil)
+        XCTAssertEqual(file.progress, 0)
+    }
 }

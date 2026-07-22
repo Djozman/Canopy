@@ -9,6 +9,7 @@ public final class PreAddViewModel: ObservableObject {
 
     // Flat-to-tree conversion. Rebuilt when pending.files changes.
     @Published public private(set) var tree: [FileNode] = []
+    @Published public var errorMessage: String?
 
     // A synthetic root node whose checkState aggregates the whole tree.
     // Not displayed — used only for the select-all header checkbox.

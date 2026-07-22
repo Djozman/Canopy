@@ -91,7 +91,7 @@ struct ContentView: View {
                 })
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView()
+            SettingsView(engine: engine)
         }
         .sheet(isPresented: $showUpdateSheet) {
             UpdateSheet(updater: updater)
@@ -114,6 +114,9 @@ struct ContentView: View {
                 NSEvent.removeMonitor(monitor)
                 ctrlClickMonitor = nil
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openAddTorrent)) { _ in
+            showAddSheet = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
             guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
@@ -212,9 +215,8 @@ struct ContentView: View {
         holder.window = window
         PreAddCoordinator.shared.activeWindows.append(holder)
         PreAddCoordinator.shared.indexedWindows[magnetIndex] = holder
-        if magnetIndex == 0 {
-            PreAddCoordinator.shared.singleHolder = holder
-        }
+        if magnetIndex == 0 { PreAddCoordinator.shared.singleHolder = holder }
+        PreAddCoordinator.shared.consumeQueuedState(for: magnetIndex)
     }
 
     // MARK: - Empty state
@@ -325,6 +327,8 @@ final class PreAddCoordinator {
     var singleHolder: PreAddWindowHolder?
     var activeWindows: [PreAddWindowHolder] = []
     var indexedWindows: [Int: PreAddWindowHolder] = [:]
+    private var queuedUpdates: [Int: (PendingTorrent, LTTorrentHandle?)] = [:]
+    private var queuedErrors: [Int: String] = [:]
     private init() {}
 
     func windowForIndex(_ index: Int) -> PreAddWindowHolder? {
@@ -336,11 +340,31 @@ final class PreAddCoordinator {
             let model = holder.model,
             let window = holder.window,
             window.isVisible
-        else { return }
+        else {
+            queuedUpdates[index] = (pending, handle)
+            return
+        }
         model.pending = pending
         model.rebuildTree()
         if !pending.name.isEmpty { window.title = pending.name }
         holder.magnetHandle = handle
+    }
+
+    func failWindow(at index: Int, message: String) {
+        guard let model = indexedWindows[index]?.model else {
+            queuedErrors[index] = message
+            return
+        }
+        model.errorMessage = message
+    }
+
+    func consumeQueuedState(for index: Int) {
+        if let (pending, handle) = queuedUpdates.removeValue(forKey: index) {
+            updateWindow(at: index, pending: pending, handle: handle)
+        }
+        if let message = queuedErrors.removeValue(forKey: index) {
+            failWindow(at: index, message: message)
+        }
     }
 }
 

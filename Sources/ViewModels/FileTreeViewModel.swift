@@ -59,7 +59,7 @@ public final class FileTreeViewModel: ObservableObject {
             var outPriority: Int32 = 0
             guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority)
             else { continue }
-            let down: Int64 = i < progress.count ? (progress[i] as! NSNumber).int64Value : 0
+            let down: Int64 = i < progress.count ? (progress[i] as? NSNumber)?.int64Value ?? 0 : 0
             infos.append((i, path, outSize, down, Int(outPriority)))
         }
 

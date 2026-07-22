@@ -116,6 +116,8 @@ public final class TorrentEngine: ObservableObject {
     /// Callbacks per info-hash for metadata arrival.
     /// One from fetchMetadata, potentially additional from AddTorrentSheet for multi-magnet.
     private var metadataCallbacks: [String: [([PendingFile]) -> Void]] = [:]
+    private var metadataErrors: [String: [() -> Void]] = [:]
+    private var lastResumeSave = Date.distantPast
 
     public init() {
         session = LibtorrentSession()
@@ -126,6 +128,7 @@ public final class TorrentEngine: ObservableObject {
         session?.setAlertNotify { [weak self] in
             self?.drainAlerts()
         }
+        applyPreferences()
     }
 
     public func shutdown() {
@@ -189,9 +192,30 @@ public final class TorrentEngine: ObservableObject {
         }
     }
 
-    private var defaultSavePath: String {
-        NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
+    public var defaultSavePath: String {
+        let fallback = NSSearchPathForDirectoriesInDomains(.downloadsDirectory, .userDomainMask, true)
             .first ?? NSHomeDirectory() + "/Downloads"
+        let stored = UserDefaults.standard.string(forKey: "downloadDir") ?? fallback
+        return (stored as NSString).expandingTildeInPath
+    }
+
+    public func applyPreferences() {
+        let defaults = UserDefaults.standard
+        let settings: [String: NSNumber] = [
+            "downloadRate": NSNumber(value: max(0, defaults.integer(forKey: "downloadLimit")) * 1024),
+            "uploadRate": NSNumber(value: max(0, defaults.integer(forKey: "uploadLimit")) * 1024),
+            "activeDownloads": NSNumber(value: max(1, defaults.object(forKey: "maxActiveDown") == nil ? 3 : defaults.integer(forKey: "maxActiveDown"))),
+            "activeSeeds": NSNumber(value: max(1, defaults.object(forKey: "maxActiveSeed") == nil ? 5 : defaults.integer(forKey: "maxActiveSeed"))),
+            "activeLimit": NSNumber(value: max(2, defaults.object(forKey: "maxActiveDown") == nil ? 8 : defaults.integer(forKey: "maxActiveDown") + defaults.integer(forKey: "maxActiveSeed"))),
+            "enableDHT": NSNumber(value: defaults.object(forKey: "enableDHT") == nil ? true : defaults.bool(forKey: "enableDHT")),
+            "enableLSD": NSNumber(value: defaults.object(forKey: "enableLSD") == nil ? true : defaults.bool(forKey: "enableLSD")),
+            "enableUPnP": NSNumber(value: defaults.object(forKey: "enableUPnP") == nil ? true : defaults.bool(forKey: "enableUPnP")),
+            "enableNatPMP": NSNumber(value: defaults.object(forKey: "enableNatPMP") == nil ? true : defaults.bool(forKey: "enableNatPMP")),
+            "anonymousMode": NSNumber(value: defaults.bool(forKey: "anonymousMode")),
+            "listenPort": NSNumber(value: defaults.object(forKey: "listenPort") == nil ? 6881 : defaults.integer(forKey: "listenPort")),
+        ]
+        let currentSession = session
+        queue.async { currentSession?.applySettingsDictionary(settings) }
     }
 
     private static func resumeDataDirectory() -> String {
@@ -223,7 +247,18 @@ public final class TorrentEngine: ObservableObject {
         }
         let hash = h.infoHash
         metadataCallbacks[hash, default: []].append { files in
-            DispatchQueue.main.async { onFiles(files) }
+            Task { @MainActor in onFiles(files) }
+        }
+        metadataErrors[hash, default: []].append {
+            Task { @MainActor in onError() }
+        }
+        Task { @MainActor [weak self, weak h] in
+            try? await Task.sleep(for: .seconds(45))
+            guard let self, let h, self.metadataCallbacks[hash] != nil else { return }
+            let failures = self.metadataErrors.removeValue(forKey: hash) ?? []
+            self.metadataCallbacks.removeValue(forKey: hash)
+            self.cancelMagnet(handle: h)
+            failures.forEach { $0() }
         }
         return h
     }
@@ -240,6 +275,7 @@ public final class TorrentEngine: ObservableObject {
 
     public func cancelMagnet(handle: LTTorrentHandle) {
         metadataCallbacks.removeValue(forKey: handle.infoHash)
+        metadataErrors.removeValue(forKey: handle.infoHash)
         let session = self.session
         queue.async {
             session?.cancelMagnet(handle)
@@ -249,6 +285,7 @@ public final class TorrentEngine: ObservableObject {
     // Called from drainAlerts when metadata_received_alert fires
     private func handleMetadataReceived(infoHash: String, handle: LTTorrentHandle) {
         guard let callbacks = metadataCallbacks.removeValue(forKey: infoHash) else { return }
+        metadataErrors.removeValue(forKey: infoHash)
         let count = Int(handle.fileCount)
         var files: [PendingFile] = []
         for i in 0..<count {
@@ -323,8 +360,11 @@ public final class TorrentEngine: ObservableObject {
 
     private func poll() {
         let session = self.session
+        let shouldSave = Date().timeIntervalSince(lastResumeSave) >= 60
+        if shouldSave { lastResumeSave = Date() }
         queue.async { [weak self] in
             guard let self, let session else { return }
+            if shouldSave { session.saveResumeDataAll() }
             let handles = session.allTorrents()
             let results = handles.map { TorrentStatus(from: $0) }
             DispatchQueue.main.async {
@@ -342,6 +382,14 @@ public final class TorrentEngine: ObservableObject {
                     let hash = h.infoHash
                     DispatchQueue.main.async {
                         self.handleMetadataReceived(infoHash: hash, handle: h)
+                    }
+                } else if type == LTAlertType.torrentError, let h {
+                    let hash = h.infoHash
+                    DispatchQueue.main.async {
+                        guard self.metadataCallbacks.removeValue(forKey: hash) != nil else { return }
+                        let failures = self.metadataErrors.removeValue(forKey: hash) ?? []
+                        failures.forEach { $0() }
+                        self.cancelMagnet(handle: h)
                     }
                 }
                 if type == LTAlertType.torrentRemoved, !msg.isEmpty {

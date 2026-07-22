@@ -1,11 +1,11 @@
-// SettingsView.swift
-
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("downloadDir") private var downloadDir = FileManager.default
-        .homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
+    let engine: TorrentEngine
+
+    @AppStorage("downloadDir") private var downloadDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads").path
     @AppStorage("downloadLimit") private var downloadLimit = 0
     @AppStorage("uploadLimit") private var uploadLimit = 0
     @AppStorage("maxActiveDown") private var maxActiveDown = 3
@@ -22,61 +22,62 @@ struct SettingsView: View {
             Form {
                 Section("Downloads") {
                     LabeledContent("Default save path") {
-                        TextField("Path", text: $downloadDir)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minWidth: 200)
+                        HStack {
+                            TextField("Path", text: $downloadDir).font(.system(.body, design: .monospaced))
+                            Button("Choose…", action: chooseDirectory)
+                        }.frame(minWidth: 300)
                     }
                 }
-
                 Section("Speed Limits") {
-                    LabeledContent("Download limit (KiB/s, 0=∞)") {
-                        TextField("", value: $downloadLimit, format: .number)
-                            .frame(width: 80)
-                    }
-                    LabeledContent("Upload limit (KiB/s, 0=∞)") {
-                        TextField("", value: $uploadLimit, format: .number)
-                            .frame(width: 80)
-                    }
+                    limitField("Download limit", value: $downloadLimit)
+                    limitField("Upload limit", value: $uploadLimit)
+                    Text("Use 0 for unlimited. Limits are applied in KiB/s.").font(.caption).foregroundStyle(.secondary)
                 }
-
                 Section("Queue") {
-                    Stepper(
-                        "Max active downloads: \(maxActiveDown)", value: $maxActiveDown, in: 1...99)
+                    Stepper("Max active downloads: \(maxActiveDown)", value: $maxActiveDown, in: 1...99)
                     Stepper("Max active seeds: \(maxActiveSeed)", value: $maxActiveSeed, in: 1...99)
                 }
-
                 Section("Connection") {
                     LabeledContent("Listen port") {
-                        TextField("", value: $listenPort, format: .number)
-                            .frame(width: 80)
+                        TextField("Port", value: $listenPort, format: .number).frame(width: 90)
                     }
-                    Toggle("Enable DHT", isOn: $enableDHT)
-                    Toggle("Enable Local Service Discovery", isOn: $enableLSD)
-                    Toggle("Enable UPnP", isOn: $enableUPnP)
-                    Toggle("Enable NAT-PMP", isOn: $enableNatPMP)
+                    Toggle("Distributed Hash Table (DHT)", isOn: $enableDHT)
+                    Toggle("Local Service Discovery (LSD)", isOn: $enableLSD)
+                    Toggle("Automatic router mapping (UPnP)", isOn: $enableUPnP)
+                    Toggle("Automatic router mapping (NAT-PMP)", isOn: $enableNatPMP)
                     Toggle("Anonymous mode", isOn: $anonymousMode)
                 }
-
                 Section("About") {
-                    LabeledContent("Version") {
-                        let version =
-                            Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-                            ?? "—"
-                        Text(version)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
+                    LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Development")
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("Preferences")
+            .navigationTitle("Settings")
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                        .keyboardShortcut(.defaultAction)
+                    Button("Apply") {
+                        listenPort = min(65535, max(1, listenPort))
+                        downloadLimit = max(0, downloadLimit)
+                        uploadLimit = max(0, uploadLimit)
+                        engine.applyPreferences()
+                        dismiss()
+                    }.keyboardShortcut(.defaultAction)
                 }
             }
-        }
-        .frame(minWidth: 480, minHeight: 540)
+        }.frame(minWidth: 560, minHeight: 600)
+    }
+
+    private func limitField(_ label: String, value: Binding<Int>) -> some View {
+        LabeledContent(label) { TextField("KiB/s", value: value, format: .number).frame(width: 100) }
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: (downloadDir as NSString).expandingTildeInPath)
+        if panel.runModal() == .OK, let url = panel.url { downloadDir = url.path }
     }
 }

@@ -13,7 +13,7 @@ struct TorrentRowView: View {
                 Text(torrent.name)
                     .font(.system(.body, design: .default, weight: .medium))
                     .lineLimit(1)
-                    .foregroundStyle(isSelected ? .white : .primary)
+                    .foregroundStyle(.primary)
 
                 Spacer()
 

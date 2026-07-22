@@ -1,12 +1,21 @@
 // swift-tools-version: 5.10
 
+import Foundation
 import PackageDescription
 
-let libtorrentPrefix = "/opt/homebrew/opt/libtorrent-rasterbar"
+let environment = ProcessInfo.processInfo.environment
+#if arch(arm64)
+let defaultHomebrewPrefix = "/opt/homebrew"
+#else
+let defaultHomebrewPrefix = "/usr/local"
+#endif
+let homebrewPrefix = environment["HOMEBREW_PREFIX"] ?? defaultHomebrewPrefix
+let libtorrentPrefix = "\(homebrewPrefix)/opt/libtorrent-rasterbar"
+let boostPrefix = "\(homebrewPrefix)/opt/boost"
 
 let package = Package(
     name: "Canopy",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v14)],
     products: [
         .executable(name: "Canopy", targets: ["Canopy"])
     ],
@@ -20,7 +29,7 @@ let package = Package(
                 .unsafeFlags([
                     "-std=c++17",
                     "-I\(libtorrentPrefix)/include",
-                    "-I/opt/homebrew/opt/boost/include",
+                    "-I\(boostPrefix)/include",
                 ]),
             ],
             linkerSettings: [

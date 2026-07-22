@@ -22,8 +22,23 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <chrono>
 
 namespace lt = libtorrent;
+
+static NSString *LTString(std::string const& value) {
+    NSString *result = [[NSString alloc] initWithBytes:value.data()
+                                                length:value.size()
+                                              encoding:NSUTF8StringEncoding];
+    return result ?: @"";
+}
+
+static std::string hashString(lt::info_hash_t const& hashes) {
+    std::ostringstream stream;
+    if (hashes.has_v1()) stream << hashes.v1;
+    else if (hashes.has_v2()) stream << hashes.v2;
+    return stream.str();
+}
 
 // ─── LTTorrentHandle ───────────────────────────────────────────────────────
 
@@ -74,7 +89,7 @@ static int mapState(lt::torrent_status::state_t s) {
     if (!_handle.is_valid()) return @"";
     auto ti = _handle.torrent_file();
     if (!ti) return @"";
-    return [NSString stringWithUTF8String:ti->name().c_str()];
+    return LTString(ti->name());
 }
 
 - (float)progress {
@@ -142,7 +157,7 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (NSString *)savePath {
     if (!_cached) [self refresh];
-    return [NSString stringWithUTF8String:_cachedStatus.save_path.c_str()];
+    return LTString(_cachedStatus.save_path);
 }
 
 - (LTTorrentState)state {
@@ -158,7 +173,7 @@ static int mapState(lt::torrent_status::state_t s) {
 - (NSString * _Nullable)errorMessage {
     if (!_cached) [self refresh];
     if (!_cachedStatus.errc) return nil;
-    return [NSString stringWithUTF8String:_cachedStatus.errc.message().c_str()];
+    return LTString(_cachedStatus.errc.message());
 }
 
 - (BOOL)hasMetadata {
@@ -204,7 +219,7 @@ static int mapState(lt::torrent_status::state_t s) {
     auto fs = ti->files();
     if (outSize)     *outSize     = fs.file_size(lt::file_index_t{index});
     if (outPriority) *outPriority = (int)_handle.file_priority(lt::file_index_t{index});
-    return [NSString stringWithUTF8String:fs.file_path(lt::file_index_t{index}).c_str()];
+    return LTString(fs.file_path(lt::file_index_t{index}));
 }
 
 - (void)setFilePriority:(int)priority atIndex:(int)index {
@@ -222,7 +237,7 @@ static int mapState(lt::torrent_status::state_t s) {
         if (index < 0 || index >= (int)trackers.size()) return nil;
         auto &t = trackers[index];
         return @{
-            @"url": [NSString stringWithUTF8String:t.url.c_str()],
+            @"url": LTString(t.url),
             @"tier": @(t.tier),
             @"working": @(t.is_working()),
             @"verified": @(t.verified),
@@ -245,9 +260,9 @@ static int mapState(lt::torrent_status::state_t s) {
         if (index < 0 || index >= (int)peers.size()) return nil;
         auto &p = peers[index];
         return @{
-            @"ip": [NSString stringWithUTF8String:p.ip.address().to_string().c_str()],
+            @"ip": LTString(p.ip.address().to_string()),
             @"port": @(p.ip.port()),
-            @"client": [NSString stringWithUTF8String:p.client.c_str()],
+            @"client": LTString(p.client),
             @"progress": @(p.progress),
             @"downSpeed": @(p.down_speed),
             @"upSpeed": @(p.up_speed),
@@ -260,8 +275,8 @@ static int mapState(lt::torrent_status::state_t s) {
 // ─── Piece map ────────────────────────────────────────────────────────────
 
 - (int)pieceCount {
-    if (!_cached) [self refresh];
-    return _cachedStatus.pieces.size();
+    if (!_handle.is_valid()) return 0;
+    return (int)_handle.status().pieces.size();
 }
 
 - (int64_t)pieceSize {
@@ -270,14 +285,13 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (NSData *)pieceDownloadedBits {
-    if (!_cached) [self refresh];
-    int count = _cachedStatus.pieces.size();
+    if (!_handle.is_valid()) return [NSData data];
+    auto status = _handle.status();
+    int count = (int)status.pieces.size();
     if (count <= 0) return [NSData data];
     NSMutableData *data = [NSMutableData dataWithLength:count];
     uint8_t *bytes = (uint8_t *)data.mutableBytes;
-    for (int i = 0; i < count; i++) {
-        bytes[i] = _cachedStatus.pieces.get_bit(i) ? 1 : 0;
-    }
+    for (int i = 0; i < count; i++) bytes[i] = status.pieces.get_bit(i) ? 1 : 0;
     return data;
 }
 
@@ -331,6 +345,8 @@ static int mapState(lt::torrent_status::state_t s) {
         if (ec) return nil;
         p.ti = ti;
         p.save_path = std::string(savePath.UTF8String);
+        if (p.save_path.empty()) return nil;
+        std::filesystem::create_directories(p.save_path);
 
         if (priorities && (int)priorities.count == ti->num_files()) {
             p.file_priorities.resize(ti->num_files());
@@ -360,7 +376,7 @@ static int mapState(lt::torrent_status::state_t s) {
         const auto &fs = ti.files();
         for (int i = 0; i < fs.num_files(); i++) {
             LTFileEntry *e = [[LTFileEntry alloc] init];
-            e.path  = [NSString stringWithUTF8String:fs.file_path(lt::file_index_t{i}).c_str()];
+            e.path  = LTString(fs.file_path(lt::file_index_t{i}));
             e.size  = fs.file_size(lt::file_index_t{i});
             e.index = i;
             [result addObject:e];
@@ -372,9 +388,10 @@ static int mapState(lt::torrent_status::state_t s) {
 - (nullable LTTorrentHandle *)addMagnetForMetadata:(NSString *)uri {
     try {
         auto params = lt::parse_magnet_uri(std::string(uri.UTF8String));
-        params.flags |= lt::torrent_flags::paused;
+        // Paused torrents never announce, so they cannot fetch magnet metadata.
+        // upload_mode prevents payload pieces while still allowing metadata traffic.
         params.flags |= lt::torrent_flags::upload_mode;
-        params.save_path = "/tmp";
+        params.save_path = std::filesystem::temp_directory_path().string();
         lt::torrent_handle h = _session->add_torrent(params);
         if (!h.is_valid()) return nil;
         auto *wrapper = [[LTTorrentHandle alloc] initWithHandle:h];
@@ -394,7 +411,11 @@ static int mapState(lt::torrent_status::state_t s) {
     NSLog(@"[Canopy-ObjC] commitMagnet: savePath=%s handles_before=%lu",
           savePath.UTF8String, (unsigned long)_handles.count);
 
-    h.move_storage(std::string(savePath.UTF8String));
+    std::string destination(savePath.UTF8String);
+    if (destination.empty()) return;
+    try { std::filesystem::create_directories(destination); }
+    catch (...) { return; }
+    h.move_storage(destination);
 
     if (priorities && priorities.count > 0) {
         std::vector<lt::download_priority_t> prios;
@@ -440,6 +461,8 @@ static int mapState(lt::torrent_status::state_t s) {
     try {
         lt::add_torrent_params p = lt::parse_magnet_uri(std::string(magnetURI.UTF8String));
         p.save_path = std::string(savePath.UTF8String);
+        if (p.save_path.empty()) return nil;
+        std::filesystem::create_directories(p.save_path);
 
         lt::torrent_handle h = _session->add_torrent(p);
         if (!h.is_valid()) return nil;
@@ -451,9 +474,11 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (NSArray<LTTorrentHandle *> *)allTorrents {
-    for (LTTorrentHandle *h in _handles) {
-        [h refresh];
-    }
+    NSIndexSet *invalid = [_handles indexesOfObjectsPassingTest:^BOOL(LTTorrentHandle *wrapper, NSUInteger idx, BOOL *stop) {
+        return ![wrapper cppHandle].is_valid();
+    }];
+    if (invalid.count) [_handles removeObjectsAtIndexes:invalid];
+    for (LTTorrentHandle *h in _handles) [h refresh];
     return [_handles copy];
 }
 
@@ -461,7 +486,7 @@ static int mapState(lt::torrent_status::state_t s) {
     NSLog(@"[Canopy-ObjC] removeTorrent called with deleteFiles=%d", deleteFiles);
     auto flags = deleteFiles
         ? (lt::session::delete_partfile | lt::session::delete_files)
-        : lt::remove_flags_t{lt::session::delete_partfile};
+        : lt::remove_flags_t{};
     _session->remove_torrent([handle cppHandle], flags);
     [_handles removeObject:handle];
 }
@@ -479,38 +504,44 @@ static int mapState(lt::torrent_status::state_t s) {
 }
 
 - (void)saveResumeDataAllAndWait {
-    [self saveResumeDataAll];
-    // libtorrent generates resume data asynchronously; poll alerts until
-    // all save_resume_data_alerts arrive, then write each to disk.
     NSString *dir = _resumeDataDir;
     if (!dir || dir.length == 0) return;
-    try {
-        std::filesystem::create_directories(std::string(dir.UTF8String));
-    } catch (...) { return; }
+    try { std::filesystem::create_directories(std::string(dir.UTF8String)); }
+    catch (...) { return; }
 
-    int remaining = (int)_handles.count;
-    while (remaining > 0) {
+    std::vector<lt::torrent_status> statuses;
+    _session->get_torrent_status(&statuses, [](const lt::torrent_status&){ return true; });
+    int remaining = 0;
+    for (auto &status : statuses) {
+        if (status.handle.is_valid() && status.has_metadata) {
+            status.handle.save_resume_data(lt::torrent_handle::save_info_dict);
+            remaining++;
+        }
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (remaining > 0 && std::chrono::steady_clock::now() < deadline) {
+        _session->wait_for_alert(lt::milliseconds(500));
         std::vector<lt::alert *> alerts;
-        _session->wait_for_alert(lt::seconds(3));
         _session->pop_alerts(&alerts);
-        bool any = false;
-        for (auto *a : alerts) {
-            if (auto *x = lt::alert_cast<lt::save_resume_data_alert>(a)) {
-                std::vector<char> buf = lt::write_resume_data_buf(x->params);
-                if (!buf.empty()) {
-                    auto const &hashes = x->handle.status().info_hashes;
-                    std::ostringstream hashStr;
-                    if (hashes.has_v1()) hashStr << hashes.v1;
-                    else if (hashes.has_v2()) hashStr << hashes.v2;
-                    std::string path = std::string(dir.UTF8String) + "/" + hashStr.str() + ".resume";
-                    std::ofstream out(path, std::ios::binary);
-                    out.write(buf.data(), buf.size());
+        for (auto *alert : alerts) {
+            if (auto *saved = lt::alert_cast<lt::save_resume_data_alert>(alert)) {
+                std::vector<char> buffer = lt::write_resume_data_buf(saved->params);
+                std::string hash = hashString(saved->handle.status().info_hashes);
+                if (!buffer.empty() && !hash.empty()) {
+                    std::string finalPath = std::string(dir.UTF8String) + "/" + hash + ".resume";
+                    std::string tempPath = finalPath + ".tmp";
+                    std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+                    out.write(buffer.data(), (std::streamsize)buffer.size());
+                    out.close();
+                    if (out) std::filesystem::rename(tempPath, finalPath);
+                    else std::filesystem::remove(tempPath);
                 }
                 remaining--;
-                any = true;
+            } else if (lt::alert_cast<lt::save_resume_data_failed_alert>(alert)) {
+                remaining--;
             }
         }
-        if (!any) break;
     }
 }
 
@@ -556,11 +587,7 @@ static int mapState(lt::torrent_status::state_t s) {
         }
         else if (auto *x = lt::alert_cast<lt::torrent_removed_alert>(a))  {
             type = LTAlertTypeTorrentRemoved;
-            if (x->info_hashes.has_v1()) {
-                std::ostringstream ss;
-                ss << x->info_hashes.v1;
-                removedHashMsg = [NSString stringWithUTF8String:ss.str().c_str()];
-            }
+            removedHashMsg = LTString(hashString(x->info_hashes));
         }
         else if (auto *x = lt::alert_cast<lt::torrent_finished_alert>(a)) {
             type = LTAlertTypeTorrentFinished;
@@ -579,6 +606,21 @@ static int mapState(lt::torrent_status::state_t s) {
         else if (auto *x = lt::alert_cast<lt::save_resume_data_alert>(a)) {
             type = LTAlertTypeSaveResumeData;
             wrapper = [[LTTorrentHandle alloc] initWithHandle:x->handle];
+            NSString *dir = _resumeDataDir;
+            std::string hash = hashString(x->handle.status().info_hashes);
+            if (dir.length > 0 && !hash.empty()) {
+                try {
+                    std::filesystem::create_directories(std::string(dir.UTF8String));
+                    std::vector<char> buffer = lt::write_resume_data_buf(x->params);
+                    std::string finalPath = std::string(dir.UTF8String) + "/" + hash + ".resume";
+                    std::string tempPath = finalPath + ".tmp";
+                    std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
+                    out.write(buffer.data(), (std::streamsize)buffer.size());
+                    out.close();
+                    if (out) std::filesystem::rename(tempPath, finalPath);
+                    else std::filesystem::remove(tempPath);
+                } catch (...) {}
+            }
         }
         else if (auto *x = lt::alert_cast<lt::state_changed_alert>(a))    {
             type = LTAlertTypeStateChanged;
@@ -593,7 +635,7 @@ static int mapState(lt::torrent_status::state_t s) {
         if (type == LTAlertTypeTorrentRemoved) {
             msg = removedHashMsg ?: @"";
         } else {
-            msg = [NSString stringWithUTF8String:a->message().c_str()];
+            msg = LTString(a->message());
         }
         callback(type, wrapper, msg, errorCode);
     }
@@ -650,6 +692,26 @@ static int mapState(lt::torrent_status::state_t s) {
                std::string("0.0.0.0:") + std::to_string(listenPort));
     _listenPort = listenPort;
     _session->apply_settings(sp);
+}
+
+- (void)applySettingsDictionary:(NSDictionary<NSString *, NSNumber *> *)settings {
+    int download = MAX(0, settings[@"downloadRate"].intValue);
+    int upload = MAX(0, settings[@"uploadRate"].intValue);
+    int activeDownloads = MAX(1, settings[@"activeDownloads"].intValue);
+    int activeSeeds = MAX(1, settings[@"activeSeeds"].intValue);
+    int activeLimit = MAX(activeDownloads + activeSeeds, settings[@"activeLimit"].intValue);
+    int port = MIN(65535, MAX(1, settings[@"listenPort"].intValue));
+    [self applySettingsWithDownloadRate:download
+                            uploadRate:upload
+                       activeDownloads:activeDownloads
+                           activeSeeds:activeSeeds
+                           activeLimit:activeLimit
+                             enableDHT:settings[@"enableDHT"].boolValue
+                             enableLSD:settings[@"enableLSD"].boolValue
+                            enableUPnP:settings[@"enableUPnP"].boolValue
+                          enableNatPMP:settings[@"enableNatPMP"].boolValue
+                         anonymousMode:settings[@"anonymousMode"].boolValue
+                            listenPort:port];
 }
 
 @end

@@ -68,10 +68,17 @@ struct PreAddSheet: View {
             // ── Spinner or tree
             if pending.isMagnet && pending.files.isEmpty {
                 VStack(spacing: 12) {
-                    ProgressView()
-                    Text("Fetching metadata\u{2026}")
-                        .font(.caption)
-                        .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    if let error = model.errorMessage {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 32)).foregroundStyle(.orange)
+                        Text("Metadata unavailable").font(.headline)
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center).frame(maxWidth: 360)
+                    } else {
+                        ProgressView()
+                        Text("Fetching metadata\u{2026}")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

@@ -17,7 +17,8 @@ public final class FileNode: Identifiable, ObservableObject {
     public var isFolder: Bool { children != nil }
 
     public var progress: Double {
-        size > 0 ? Double(downloaded) / Double(size) : 0
+        guard size > 0 else { return 0 }
+        return min(1, max(0, Double(downloaded) / Double(size)))
     }
 
     public var checkState: CheckState {

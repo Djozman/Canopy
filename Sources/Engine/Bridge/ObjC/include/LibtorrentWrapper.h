@@ -126,6 +126,8 @@ typedef NS_ENUM(int, LTAlertType) {
                          enableNatPMP:(BOOL)enableNatPMP
                         anonymousMode:(BOOL)anonymousMode
                            listenPort:(int)listenPort;
+/// Swift-friendly settings entry point. Values are bytes/s and validated by the bridge.
+- (void)applySettingsDictionary:(NSDictionary<NSString *, NSNumber *> *)settings;
 @end
 
 NS_ASSUME_NONNULL_END
