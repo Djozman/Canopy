@@ -32,7 +32,7 @@ struct AddTorrentSheet: View {
                 }
                 .pickerStyle(.segmented)
                 .listRowBackground(Color.clear)
-                .onChange(of: tab) { newTab in
+                .onChange(of: tab) { _, newTab in
                     if newTab == 0 { checkClipboard() }
                 }
 

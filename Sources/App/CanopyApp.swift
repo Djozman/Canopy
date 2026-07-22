@@ -75,6 +75,7 @@ struct CanopyApp: App {
                 }
                 .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
+        .defaultSize(width: 1_220, height: 760)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Add Torrent\u{2026}") {

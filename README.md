@@ -7,13 +7,15 @@ Canopy keeps the interface small and Mac-native while exposing the controls that
 matter: magnet links, `.torrent` files, file priorities, live transfer details,
 peers, trackers, piece progress, queue limits, and persistent sessions.
 
-> **Version 3.0.0** — bridge reliability, magnet download flow, resume
-> persistence, working settings, UI cleanup, and build-system fixes.
+> **Version 3.0.0** — a qBittorrent-inspired transfer workspace, visible Canopy
+> branding, reliable downloads, persistent sessions, and Homebrew libtorrent
+> 2.1 compatibility.
 
 ## Highlights
 
-- **Native macOS interface** — SwiftUI navigation, keyboard shortcuts, system
-  controls, light/dark mode, and native file panels.
+- **qBittorrent-inspired native interface** — compact transfer columns, status
+  filters, a draggable lower inspector, aggregate speed bar, keyboard shortcuts,
+  light/dark mode, and native macOS controls.
 - **libtorrent 2.x engine** — BitTorrent v1/v2, DHT, LSD, UPnP, NAT-PMP,
   trackers, peers, recheck, and reannounce.
 - **Safe pre-add flow** — inspect files, choose a destination, skip files, and
@@ -30,6 +32,31 @@ peers, trackers, piece progress, queue limits, and persistent sessions.
   libtorrent.
 - **Browser integration** — registers for `magnet:` links and `.torrent`
   documents.
+
+## Interface
+
+Canopy 3.0.0 uses a dense transfer-management layout inspired by qBittorrent
+while remaining a native SwiftUI macOS app:
+
+- The top-left brand panel shows the Canopy logo and exact `3.0.0` version.
+- The sidebar filters transfer states and displays live counts.
+- The table keeps progress, state, swarm counts, speeds, ETA, and ratio visible.
+- A draggable lower inspector exposes General, Trackers, Peers, Files, and Pieces.
+- The toolbar provides add, pause/resume, remove, reannounce, update, and settings.
+- The bottom status bar shows aggregate download and upload rates.
+
+The first window opens at `1220 × 760` points and remains fully resizable.
+
+### Controls
+
+| Action | Control |
+| --- | --- |
+| Add torrent | `⌘N` |
+| Select transfer | Click a row |
+| Transfer actions | Right-click a row |
+| Filter transfers | Choose a sidebar status |
+| Search | Use **Filter torrent list** |
+| Resize inspector | Drag the horizontal divider |
 
 ## Requirements
 
@@ -162,8 +189,11 @@ build_app.sh
 - Preserved multi-magnet metadata that arrives before its window is ready.
 - Corrected release builds, deployment targets, bundle identifiers, and version
   metadata.
-- Updated the interface naming, adaptive piece grid, empty states, and settings
-  layout.
+- Rebuilt the main window as a qBittorrent-inspired workspace with a branded
+  sidebar, dense transfer table, draggable inspector, and aggregate status bar.
+- Added the Canopy logo and exact 3.0.0 version to the top-left brand panel.
+- Matched Homebrew libtorrent 2.1 ABI version 2 and shared OpenSSL flags.
+- Updated interface naming, adaptive piece grid, empty states, and settings.
 
 ## Development
 

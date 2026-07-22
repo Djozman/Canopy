@@ -1,4 +1,4 @@
-// ContentView.swift — root NavigationSplitView
+// ContentView.swift — qBittorrent-inspired transfer workspace
 
 import AppKit
 import ClibtorrentBridge
@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var showAddSheet = false
     @State private var showSettings = false
     @State private var showUpdateSheet = false
+    @State private var ctrlClickMonitor: Any?
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -17,70 +18,64 @@ struct ContentView: View {
         _vm = StateObject(wrappedValue: TorrentListViewModel(engine: engine))
     }
 
-    // Suppress Ctrl+Click from triggering the context menu so that
-    // keyboard shortcuts using the Ctrl modifier don't accidentally
-    // show the menu when the user presses Ctrl before the second key.
-    @State private var ctrlClickMonitor: Any?
-
     var body: some View {
         NavigationSplitView {
             SidebarView(vm: vm)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-        } content: {
+                .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
+        } detail: {
             VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                    TextField("Search torrents\u{2026}", text: $vm.searchText)
-                        .textFieldStyle(.plain)
-                }
-                .padding(8)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-
+                listHeader
                 Divider()
-
-                if vm.filtered.isEmpty {
-                    emptyState
-                } else {
-                    List(vm.filtered, selection: $vm.selectedTorrentID) { torrent in
-                        TorrentRowView(
-                            torrent: torrent,
-                            isSelected: vm.selectedTorrentID == torrent.id
-                        )
-                        .tag(torrent.id)
-                        .contextMenu { contextMenu(for: torrent) }
+                VSplitView {
+                    VStack(spacing: 0) {
+                        TorrentTableHeader()
+                        Divider()
+                        if vm.filtered.isEmpty {
+                            emptyState
+                        } else {
+                            List(vm.filtered, selection: $vm.selectedTorrentID) { torrent in
+                                TorrentRowView(
+                                    torrent: torrent,
+                                    isSelected: vm.selectedTorrentID == torrent.id
+                                )
+                                .tag(torrent.id)
+                                .contextMenu { contextMenu(for: torrent) }
+                            }
+                            .listStyle(.inset)
+                            .environment(\.defaultMinListRowHeight, 36)
+                        }
                     }
-                    .listStyle(.inset)
-                }
+                    .frame(minHeight: 260, idealHeight: 410)
+                    .background(Color(nsColor: .textBackgroundColor))
 
+                    Group {
+                        if let torrent = vm.selectedTorrent {
+                            TorrentDetailView(torrent: torrent, engine: engine)
+                                .id(torrent.id)
+                        } else {
+                            VStack(spacing: 12) {
+                                Image(systemName: "rectangle.split.3x1")
+                                    .font(.system(size: 32, weight: .light))
+                                    .foregroundStyle(.tertiary)
+                                Text("Select a torrent").font(.headline)
+                                Text("Transfer details, trackers, peers, files, and pieces appear here.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
+                    .frame(minHeight: 245, idealHeight: 330)
+                }
                 Divider()
                 StatusBarView(
                     downloadRate: vm.totalDownloadRate,
                     uploadRate: vm.totalUploadRate,
                     torrentCount: vm.torrents.count)
             }
-            .navigationTitle(vm.selectedFilter.rawValue)
             .toolbar { listToolbar }
-            .navigationSplitViewColumnWidth(min: 380, ideal: 520)
-        } detail: {
-            if let t = vm.selectedTorrent {
-                TorrentDetailView(torrent: t, engine: engine)
-            } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a torrent")
-                        .font(.title2)
-                    Text("Pick a torrent from the list to see details.")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
         }
+        .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $showAddSheet) {
             AddTorrentSheet(
                 engine: engine,
@@ -90,23 +85,12 @@ struct ContentView: View {
                         magnetIndex: 0, isStub: true)
                 })
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(engine: engine)
-        }
-        .sheet(isPresented: $showUpdateSheet) {
-            UpdateSheet(updater: updater)
-        }
+        .sheet(isPresented: $showSettings) { SettingsView(engine: engine) }
+        .sheet(isPresented: $showUpdateSheet) { UpdateSheet(updater: updater) }
         .onAppear {
             Task { await updater.checkForUpdate() }
-            // Install monitor to suppress Ctrl+Click context menu
-            ctrlClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) {
-                event in
-                if event.modifierFlags.contains(.control) {
-                    // Ctrl+Click — suppress the context menu so keyboard shortcuts
-                    // using Ctrl don't accidentally trigger it
-                    return nil
-                }
-                return event
+            ctrlClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { event in
+                event.modifierFlags.contains(.control) ? nil : event
             }
         }
         .onDisappear {
@@ -118,14 +102,46 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openAddTorrent)) { _ in
             showAddSheet = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notif in
-            guard let pending = notif.userInfo?["pending"] as? PendingTorrent else { return }
-            let handle = (notif.userInfo?["handle"] as? LTTorrentHandle) ?? nil
-            let magnetIndex = notif.userInfo?["magnetIndex"] as? Int ?? 0
+        .onReceive(NotificationCenter.default.publisher(for: .showPreAdd)) { notification in
+            guard let pending = notification.userInfo?["pending"] as? PendingTorrent else { return }
+            let handle = notification.userInfo?["handle"] as? LTTorrentHandle
+            let index = notification.userInfo?["magnetIndex"] as? Int ?? 0
             showPreAddWindow(
                 pending: pending, magnetHandle: handle,
-                magnetIndex: magnetIndex, isStub: true)
+                magnetIndex: index, isStub: true)
         }
+    }
+
+    private var listHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(vm.selectedFilter.rawValue).font(.headline)
+                Text("\(vm.filtered.count) shown · \(vm.torrents.count) total")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Filter torrent list", text: $vm.searchText)
+                    .textFieldStyle(.plain)
+                if !vm.searchText.isEmpty {
+                    Button { vm.searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(width: 270, height: 30)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.bar)
     }
 
     private func showPreAddWindow(

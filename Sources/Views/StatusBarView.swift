@@ -1,38 +1,29 @@
-// StatusBarView.swift — thin bottom status bar
+// StatusBarView.swift — global transfer status
 
 import SwiftUI
 
 struct StatusBarView: View {
     let downloadRate: Int
-    let uploadRate:   Int
+    let uploadRate: Int
     let torrentCount: Int
 
     var body: some View {
-        HStack(spacing: 16) {
-            Text("\(torrentCount) torrent\(torrentCount == 1 ? "" : "s")")
+        HStack(spacing: 18) {
+            Label("\(torrentCount) torrent\(torrentCount == 1 ? "" : "s")", systemImage: "square.stack.3d.up")
                 .foregroundStyle(.secondary)
-
+            Label("Session active", systemImage: "network").foregroundStyle(.secondary)
             Spacer()
-
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.down")
-                    .foregroundStyle(.blue)
-                    .imageScale(.small)
-                Text(formatSpeed(downloadRate))
-                    .monospacedDigit()
-            }
-
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up")
-                    .foregroundStyle(.green)
-                    .imageScale(.small)
-                Text(formatSpeed(uploadRate))
-                    .monospacedDigit()
-            }
+            metric("Download", "arrow.down", downloadRate, .blue)
+            metric("Upload", "arrow.up", uploadRate, .green)
         }
-        .font(.caption)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .font(.caption.monospacedDigit()).padding(.horizontal, 12).frame(height: 29).background(.bar)
+    }
+
+    private func metric(_ label: String, _ icon: String, _ value: Int, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).foregroundStyle(color)
+            Text(label).foregroundStyle(.secondary)
+            Text(formatSpeed(value)).fontWeight(.medium)
+        }
     }
 }

@@ -24,13 +24,28 @@ struct TorrentDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: torrent.isPaused ? "pause.circle.fill" : "arrow.down.circle.fill")
+                    .font(.title3).foregroundStyle(torrent.statusColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(torrent.name).font(.headline).lineLimit(1)
+                    Text("\(torrent.statusLabel) · \(String(format: "%.1f%%", torrent.progress * 100))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("↓ \(formatSpeed(torrent.downloadRate))").foregroundStyle(.blue)
+                Text("↑ \(formatSpeed(torrent.uploadRate))").foregroundStyle(.green)
+            }
+            .font(.caption.monospacedDigit()).padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
+            Divider()
             Picker("Tab", selection: $tab) {
                 ForEach(DetailTab.allCases, id: \.self) {
                     Text($0.rawValue).tag($0)
                 }
             }
             .pickerStyle(.segmented)
-            .padding()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
 
             Divider()
 
@@ -47,8 +62,6 @@ struct TorrentDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationTitle(torrent.name)
-        .navigationSubtitle(torrent.statusLabel)
     }
 }
 
