@@ -167,7 +167,7 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (BOOL)paused {
     if (!_cached) [self refresh];
-    return (_cachedStatus.flags & lt::torrent_flags::paused);
+    return static_cast<bool>(_cachedStatus.flags & lt::torrent_flags::paused);
 }
 
 - (NSString * _Nullable)errorMessage {
@@ -218,7 +218,10 @@ static int mapState(lt::torrent_status::state_t s) {
     if (!ti || index < 0 || index >= ti->num_files()) return nil;
     auto const& fs = ti->layout();
     if (outSize)     *outSize     = fs.file_size(lt::file_index_t{index});
-    if (outPriority) *outPriority = (int)_handle.file_priority(lt::file_index_t{index});
+    if (outPriority) {
+        *outPriority = static_cast<std::uint8_t>(
+            _handle.file_priority(lt::file_index_t{index}));
+    }
     return LTString(fs.file_path(lt::file_index_t{index}));
 }
 
@@ -292,7 +295,9 @@ static int mapState(lt::torrent_status::state_t s) {
     if (count <= 0) return [NSData data];
     NSMutableData *data = [NSMutableData dataWithLength:count];
     uint8_t *bytes = (uint8_t *)data.mutableBytes;
-    for (int i = 0; i < count; i++) bytes[i] = status.pieces.get_bit(i) ? 1 : 0;
+    for (int i = 0; i < count; i++) {
+        bytes[i] = status.pieces.get_bit(lt::piece_index_t{i}) ? 1 : 0;
+    }
     return data;
 }
 
@@ -341,7 +346,8 @@ static int mapState(lt::torrent_status::state_t s) {
                                   priorities:(nullable NSArray<NSNumber *> *)priorities {
     try {
         lt::error_code ec;
-        lt::add_torrent_params p = lt::load_torrent_file(std::string(path.UTF8String), ec);
+        lt::add_torrent_params p = lt::load_torrent_file(
+            std::string(path.UTF8String), ec, lt::load_torrent_limits{});
         if (ec || !p.ti) return nil;
         auto ti = p.ti;
         p.save_path = std::string(savePath.UTF8String);
@@ -370,7 +376,7 @@ static int mapState(lt::torrent_status::state_t s) {
     try {
         lt::error_code ec;
         lt::add_torrent_params params = lt::load_torrent_file(
-            std::string(torrentPath.UTF8String), ec);
+            std::string(torrentPath.UTF8String), ec, lt::load_torrent_limits{});
         if (ec || !params.ti) return nil;
 
         NSMutableArray *result = [NSMutableArray array];
