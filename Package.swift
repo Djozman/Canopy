@@ -12,6 +12,7 @@ let defaultHomebrewPrefix = "/usr/local"
 let homebrewPrefix = environment["HOMEBREW_PREFIX"] ?? defaultHomebrewPrefix
 let libtorrentPrefix = "\(homebrewPrefix)/opt/libtorrent-rasterbar"
 let boostPrefix = "\(homebrewPrefix)/opt/boost"
+let opensslPrefix = "\(homebrewPrefix)/opt/openssl@3"
 
 let package = Package(
     name: "Canopy",
@@ -26,15 +27,22 @@ let package = Package(
             sources: ["LibtorrentWrapper.mm"],
             publicHeadersPath: "include",
             cxxSettings: [
+                // Homebrew libtorrent 2.1 enables WebTorrent/RTC and is built
+                // against OpenSSL. Consumers must compile with the same backend.
+                .define("TORRENT_USE_OPENSSL", to: "1"),
                 .unsafeFlags([
                     "-std=c++17",
                     "-I\(libtorrentPrefix)/include",
                     "-I\(boostPrefix)/include",
+                    "-I\(opensslPrefix)/include",
                 ]),
             ],
             linkerSettings: [
                 .unsafeFlags([
                     "-lc++",
+                    "-L\(opensslPrefix)/lib",
+                    "-lssl",
+                    "-lcrypto",
                     "\(libtorrentPrefix)/lib/libtorrent-rasterbar.dylib",
                 ]),
             ]
