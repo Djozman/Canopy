@@ -30,12 +30,24 @@ let package = Package(
             sources: ["LibtorrentWrapper.mm"],
             publicHeadersPath: "include",
             cxxSettings: [
-                // Homebrew libtorrent 2.1 enables WebTorrent/RTC and is built
-                // against OpenSSL. Consumers must compile with the same backend.
+                // Match the exact feature and ABI flags exported by Homebrew's
+                // libtorrent-rasterbar.pc file.
+                .define("TORRENT_LINKING_SHARED"),
+                .define("BOOST_ASIO_ENABLE_CANCELIO"),
+                .define("BOOST_ASIO_NO_DEPRECATED"),
+                .define("BOOST_SYSTEM_USE_UTF8"),
+                .define("_SILENCE_CXX17_ALLOCATOR_VOID_DEPRECATION_WARNING"),
+                .define("TORRENT_ABI_VERSION", to: "2"),
                 .define("TORRENT_USE_OPENSSL", to: "1"),
-                // Homebrew 2.1 is built without pre-1.2 deprecated ABI exports.
-                .define("TORRENT_ABI_VERSION", to: "4"),
+                .define("TORRENT_USE_LIBCRYPTO", to: "1"),
+                .define("TORRENT_SSL_PEERS", to: "1"),
+                .define("OPENSSL_NO_SSL2", to: "1"),
+                .define("OPENSSL_NO_SSL3", to: "1"),
+                .define("OPENSSL_NO_TLS1", to: "1"),
+                .define("OPENSSL_NO_TLS1_1", to: "1"),
+                .define("OPENSSL_NO_DTLS1", to: "1"),
                 .unsafeFlags([
+                    "-fexceptions",
                     "-std=c++17",
                     "-I\(libtorrentPrefix)/include",
                     "-I\(boostPrefix)/include",
@@ -45,10 +57,12 @@ let package = Package(
             linkerSettings: [
                 .unsafeFlags([
                     "-lc++",
+                    "-L\(libtorrentPrefix)/lib",
+                    "-ltorrent-rasterbar",
+                    "-L\(homebrewPrefix)/lib",
                     "-L\(opensslPrefix)/lib",
                     "-lssl",
                     "-lcrypto",
-                    "\(libtorrentPrefix)/lib/libtorrent-rasterbar.dylib",
                 ]),
             ]
         ),
