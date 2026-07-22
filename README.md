@@ -98,8 +98,39 @@ open Canopy.app
 ```
 
 The generated app is ad-hoc and not notarized. On first launch, macOS may
-require **Control-click → Open**. For public distribution, use a Developer ID
-certificate, notarize the app, and package the required runtime libraries.
+require **Control-click → Open**.
+
+For a distributable ZIP and DMG with Homebrew runtime libraries bundled inside
+the app, run:
+
+```bash
+./package_release.sh
+```
+
+Release files are written to `dist/`. The package is ad-hoc signed; public
+releases should eventually use a Developer ID certificate and notarization.
+
+## Publish version 3.0.0 with GitHub Actions
+
+The release workflow runs when the `v3.0.0` tag is pushed. It verifies both
+bundle versions, runs the tests, builds the app, bundles libtorrent and OpenSSL,
+creates ZIP and DMG packages, generates SHA-256 checksums, and publishes a
+GitHub Release.
+
+```bash
+git switch main
+git pull --ff-only
+git status
+swift test
+git push origin main
+git tag -a v3.0.0 -m "Canopy 3.0.0"
+git push origin v3.0.0
+```
+
+Monitor the **Release** workflow in the repository's Actions tab. When it
+finishes, the GitHub Releases page contains the ZIP, DMG, and checksum file.
+If the tag must be corrected before a release is published, delete it locally
+and remotely, fix the commit, and create the tag again.
 
 ## Using Canopy
 
@@ -192,7 +223,10 @@ build_app.sh
 - Rebuilt the main window as a qBittorrent-inspired workspace with a branded
   sidebar, dense transfer table, draggable inspector, and aggregate status bar.
 - Added the Canopy logo and exact 3.0.0 version to the top-left brand panel.
-- Matched Homebrew libtorrent 2.1 ABI version 2 and shared OpenSSL flags.
+- Matched Homebrew libtorrent 2.1 ABI version 2, its compatibility API surface,
+  and shared OpenSSL flags.
+- Added tag-driven release CI that tests, bundles runtime libraries, produces
+  ZIP and DMG packages, and publishes SHA-256 checksums.
 - Updated interface naming, adaptive piece grid, empty states, and settings.
 
 ## Development

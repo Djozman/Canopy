@@ -216,7 +216,7 @@ static int mapState(lt::torrent_status::state_t s) {
                               priority:(int *)outPriority {
     auto ti = _handle.torrent_file();
     if (!ti || index < 0 || index >= ti->num_files()) return nil;
-    auto const& fs = ti->layout();
+    auto const& fs = ti->files();
     if (outSize)     *outSize     = fs.file_size(lt::file_index_t{index});
     if (outPriority) {
         *outPriority = static_cast<std::uint8_t>(
@@ -262,7 +262,7 @@ static int mapState(lt::torrent_status::state_t s) {
         _handle.get_peer_info(peers);
         if (index < 0 || index >= (int)peers.size()) return nil;
         auto &p = peers[index];
-        auto endpoint = p.remote_endpoint();
+        auto const& endpoint = p.ip;
         return @{
             @"ip": LTString(endpoint.address().to_string()),
             @"port": @(endpoint.port()),
@@ -347,7 +347,7 @@ static int mapState(lt::torrent_status::state_t s) {
     try {
         lt::error_code ec;
         lt::add_torrent_params p = lt::load_torrent_file(
-            std::string(path.UTF8String), ec, lt::load_torrent_limits{});
+            std::string(path.UTF8String), ec);
         if (ec || !p.ti) return nil;
         auto ti = p.ti;
         p.save_path = std::string(savePath.UTF8String);
@@ -376,11 +376,11 @@ static int mapState(lt::torrent_status::state_t s) {
     try {
         lt::error_code ec;
         lt::add_torrent_params params = lt::load_torrent_file(
-            std::string(torrentPath.UTF8String), ec, lt::load_torrent_limits{});
+            std::string(torrentPath.UTF8String), ec);
         if (ec || !params.ti) return nil;
 
         NSMutableArray *result = [NSMutableArray array];
-        const auto &fs = params.ti->layout();
+        const auto &fs = params.ti->files();
         for (int i = 0; i < fs.num_files(); i++) {
             LTFileEntry *e = [[LTFileEntry alloc] init];
             e.path  = LTString(fs.file_path(lt::file_index_t{i}));

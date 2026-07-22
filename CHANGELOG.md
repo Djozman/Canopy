@@ -12,6 +12,10 @@
 ### Engine and build
 
 - Repaired magnet metadata flow, removal behavior, and resume persistence.
-- Ported the bridge to libtorrent 2.1 APIs and strict bridge types.
-- Matched Homebrew libtorrent 2.1 ABI version 2 and OpenSSL flags.
+- Ported the bridge to libtorrent 2.1 and strict bridge types.
+- Matched the ABI version 2 compatibility surface used by Homebrew and CI,
+  including `torrent_info::files()`, `peer_info::ip`, and two-argument torrent
+  loading.
+- Added tag-driven release CI with bundled runtime libraries, ZIP and DMG
+  packages, and SHA-256 checksums.
 - Kept application and bundle versions at 3.0.0.
