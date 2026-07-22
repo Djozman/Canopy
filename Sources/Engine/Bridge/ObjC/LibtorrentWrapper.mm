@@ -15,6 +15,7 @@
 #include <libtorrent/bencode.hpp>
 #include <libtorrent/write_resume_data.hpp>
 #include <libtorrent/read_resume_data.hpp>
+#include <libtorrent/load_torrent.hpp>
 
 #include <vector>
 #include <string>
@@ -78,7 +79,6 @@ static int mapState(lt::torrent_status::state_t s) {
         case lt::torrent_status::downloading:           return 2;
         case lt::torrent_status::finished:              return 3;
         case lt::torrent_status::seeding:               return 4;
-        case lt::torrent_status::allocating:            return 5;
         case lt::torrent_status::checking_resume_data:  return 6;
         default:                                         return 2;
     }
@@ -192,7 +192,7 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (int)fileCount {
     auto ti = _handle.torrent_file();
-    return ti ? (int)ti->files().num_files() : 0;
+    return ti ? ti->num_files() : 0;
 }
 
 - (NSArray<NSNumber *> *)fileProgressAll {
@@ -215,8 +215,8 @@ static int mapState(lt::torrent_status::state_t s) {
                                   size:(int64_t *)outSize
                               priority:(int *)outPriority {
     auto ti = _handle.torrent_file();
-    if (!ti || index < 0 || index >= ti->files().num_files()) return nil;
-    auto fs = ti->files();
+    if (!ti || index < 0 || index >= ti->num_files()) return nil;
+    auto const& fs = ti->layout();
     if (outSize)     *outSize     = fs.file_size(lt::file_index_t{index});
     if (outPriority) *outPriority = (int)_handle.file_priority(lt::file_index_t{index});
     return LTString(fs.file_path(lt::file_index_t{index}));
@@ -239,7 +239,7 @@ static int mapState(lt::torrent_status::state_t s) {
         return @{
             @"url": LTString(t.url),
             @"tier": @(t.tier),
-            @"working": @(t.is_working()),
+            @"working": @(t.verified),
             @"verified": @(t.verified),
         };
     } catch (...) { return nil; }
@@ -259,9 +259,10 @@ static int mapState(lt::torrent_status::state_t s) {
         _handle.get_peer_info(peers);
         if (index < 0 || index >= (int)peers.size()) return nil;
         auto &p = peers[index];
+        auto endpoint = p.remote_endpoint();
         return @{
-            @"ip": LTString(p.ip.address().to_string()),
-            @"port": @(p.ip.port()),
+            @"ip": LTString(endpoint.address().to_string()),
+            @"port": @(endpoint.port()),
             @"client": LTString(p.client),
             @"progress": @(p.progress),
             @"downSpeed": @(p.down_speed),
@@ -339,11 +340,10 @@ static int mapState(lt::torrent_status::state_t s) {
                                     savePath:(NSString *)savePath
                                   priorities:(nullable NSArray<NSNumber *> *)priorities {
     try {
-        lt::add_torrent_params p;
         lt::error_code ec;
-        auto ti = std::make_shared<lt::torrent_info>(std::string(path.UTF8String), ec);
-        if (ec) return nil;
-        p.ti = ti;
+        lt::add_torrent_params p = lt::load_torrent_file(std::string(path.UTF8String), ec);
+        if (ec || !p.ti) return nil;
+        auto ti = p.ti;
         p.save_path = std::string(savePath.UTF8String);
         if (p.save_path.empty()) return nil;
         std::filesystem::create_directories(p.save_path);
@@ -369,11 +369,12 @@ static int mapState(lt::torrent_status::state_t s) {
 - (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath {
     try {
         lt::error_code ec;
-        lt::torrent_info ti(std::string(torrentPath.UTF8String), ec);
-        if (ec) return nil;
+        lt::add_torrent_params params = lt::load_torrent_file(
+            std::string(torrentPath.UTF8String), ec);
+        if (ec || !params.ti) return nil;
 
         NSMutableArray *result = [NSMutableArray array];
-        const auto &fs = ti.files();
+        const auto &fs = params.ti->layout();
         for (int i = 0; i < fs.num_files(); i++) {
             LTFileEntry *e = [[LTFileEntry alloc] init];
             e.path  = LTString(fs.file_path(lt::file_index_t{i}));
@@ -494,8 +495,8 @@ static int mapState(lt::torrent_status::state_t s) {
 - (void)resume { _session->resume(); }
 
 - (void)saveResumeDataAll {
-    std::vector<lt::torrent_status> statuses;
-    _session->get_torrent_status(&statuses, [](const lt::torrent_status&){ return true; });
+    auto statuses = _session->get_torrent_status(
+        [](const lt::torrent_status&){ return true; });
     for (auto &st : statuses) {
         if (st.handle.is_valid() && st.has_metadata) {
             st.handle.save_resume_data(lt::torrent_handle::save_info_dict);
@@ -509,8 +510,8 @@ static int mapState(lt::torrent_status::state_t s) {
     try { std::filesystem::create_directories(std::string(dir.UTF8String)); }
     catch (...) { return; }
 
-    std::vector<lt::torrent_status> statuses;
-    _session->get_torrent_status(&statuses, [](const lt::torrent_status&){ return true; });
+    auto statuses = _session->get_torrent_status(
+        [](const lt::torrent_status&){ return true; });
     int remaining = 0;
     for (auto &status : statuses) {
         if (status.handle.is_valid() && status.has_metadata) {

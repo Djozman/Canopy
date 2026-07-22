@@ -13,10 +13,13 @@ let homebrewPrefix = environment["HOMEBREW_PREFIX"] ?? defaultHomebrewPrefix
 let libtorrentPrefix = "\(homebrewPrefix)/opt/libtorrent-rasterbar"
 let boostPrefix = "\(homebrewPrefix)/opt/boost"
 let opensslPrefix = "\(homebrewPrefix)/opt/openssl@3"
+let hostMajorVersion = max(14, ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
 
 let package = Package(
     name: "Canopy",
-    platforms: [.macOS(.v14)],
+    // Homebrew bottles are built for the host macOS release. Match that
+    // deployment target to avoid linking a newer bottle into an older target.
+    platforms: [.macOS("\(hostMajorVersion).0")],
     products: [
         .executable(name: "Canopy", targets: ["Canopy"])
     ],
@@ -30,6 +33,8 @@ let package = Package(
                 // Homebrew libtorrent 2.1 enables WebTorrent/RTC and is built
                 // against OpenSSL. Consumers must compile with the same backend.
                 .define("TORRENT_USE_OPENSSL", to: "1"),
+                // Homebrew 2.1 is built without pre-1.2 deprecated ABI exports.
+                .define("TORRENT_ABI_VERSION", to: "4"),
                 .unsafeFlags([
                     "-std=c++17",
                     "-I\(libtorrentPrefix)/include",
