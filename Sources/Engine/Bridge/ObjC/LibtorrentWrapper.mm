@@ -345,10 +345,11 @@ static int mapState(lt::torrent_status::state_t s) {
                                     savePath:(NSString *)savePath
                                   priorities:(nullable NSArray<NSNumber *> *)priorities {
     try {
-        lt::error_code ec;
+        // The single-argument overload is shared by Homebrew's libtorrent
+        // 2.0 and 2.1 headers. Parse failures throw and are handled below.
         lt::add_torrent_params p = lt::load_torrent_file(
-            std::string(path.UTF8String), ec);
-        if (ec || !p.ti) return nil;
+            std::string(path.UTF8String));
+        if (!p.ti) return nil;
         auto ti = p.ti;
         p.save_path = std::string(savePath.UTF8String);
         if (p.save_path.empty()) return nil;
@@ -374,10 +375,9 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath {
     try {
-        lt::error_code ec;
         lt::add_torrent_params params = lt::load_torrent_file(
-            std::string(torrentPath.UTF8String), ec);
-        if (ec || !params.ti) return nil;
+            std::string(torrentPath.UTF8String));
+        if (!params.ti) return nil;
 
         NSMutableArray *result = [NSMutableArray array];
         const auto &fs = params.ti->files();
