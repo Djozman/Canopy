@@ -495,18 +495,30 @@ struct ContentView: View {
 
 // MARK: - Smart open helper
 
-/// Returns the download folder URL for a torrent.
+/// Returns the URL to open for a completed torrent: the single file for a
+/// single-file torrent, or the torrent's containing folder for a multi-file
+/// (folder) torrent. Returns nil only for incomplete torrents so the handler
+/// falls back to the generic save path.
 func bestFileToOpen(_ torrent: TorrentStatus) -> URL? {
     let saveURL = URL(fileURLWithPath: torrent.savePath)
-    // Only completed torrents open a specific file.
+    // Only completed torrents open a specific location.
     let isComplete = (torrent.state == .finished || torrent.state == .seeding)
-    guard isComplete, let handle = torrent.handle, handle.fileCount == 1 else {
+    guard isComplete, let handle = torrent.handle, handle.fileCount > 0 else {
         return nil
     }
     var outSize: Int64 = 0
     var outPriority: Int32 = 0
-    let filePath = handle.filePath(at: 0, size: &outSize, priority: &outPriority)
-    return filePath.map { saveURL.appendingPathComponent($0) }
+    guard let firstPath = handle.filePath(at: 0, size: &outSize, priority: &outPriority) else {
+        return nil
+    }
+    if handle.fileCount == 1 {
+        return saveURL.appendingPathComponent(firstPath)
+    }
+    // Multi-file torrent: the top-level path component of the file layout is
+    // the torrent's own folder (e.g. "MyFolder/movie.mkv" → "MyFolder").
+    let topLevel = firstPath.split(separator: "/").map(String.init).first ?? ""
+    guard !topLevel.isEmpty else { return nil }
+    return saveURL.appendingPathComponent(topLevel)
 }
 
 // MARK: - Window holder

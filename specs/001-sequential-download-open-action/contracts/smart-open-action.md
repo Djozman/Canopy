@@ -5,21 +5,22 @@
 ## Function Signature
 
 ```swift
-/// Determines the best file to open for a completed single-file torrent.
-/// Returns nil if the torrent is incomplete or multi-file (fall back to
-/// reveal-in-Finder).
-func bestFileToOpen(
-    torrent: TorrentStatus, engine: TorrentEngine
-) -> URL?
+/// Returns the URL to open for a completed torrent:
+/// - Single-file torrent → the file itself
+/// - Multi-file (folder) torrent → the torrent's own folder
+///   (savePath + top-level path component of the file layout)
+/// Returns nil only for incomplete torrents, so the handler falls back to
+/// the generic save path (reveal-in-Finder).
+func bestFileToOpen(_ torrent: TorrentStatus) -> URL?
 ```
 
 ## Behavior
 
 | Torrent State | File Count | Result |
 |---------------|-----------|--------|
-| Incomplete | Any | `nil` (reveal savePath in Finder) |
+| Incomplete | Any | `nil` (fallback: reveal savePath in Finder) |
 | Complete | 1 | URL to that file |
-| Complete | >1 | `nil` (reveal savePath in Finder) |
+| Complete | >1 | URL to the torrent's own folder (`savePath` + root folder name) |
 
 ## NSWorkspace Usage
 
@@ -38,12 +39,11 @@ NSWorkspace.shared.activateFileViewerSelecting([folderURL])
 
 ```swift
 TorrentNameCell(torrent: torrent) {
-    if let fileURL = bestFileToOpen(torrent: torrent, engine: engine) {
-        NSWorkspace.shared.open(fileURL)
-    } else {
-        NSWorkspace.shared.open(
-            URL(fileURLWithPath: torrent.savePath)
-        )
+    let saveURL = URL(fileURLWithPath: torrent.savePath)
+    if let url = bestFileToOpen(torrent), NSWorkspace.shared.open(url) {
+        return
     }
+    // nil (incomplete) or open failure (no default app): reveal savePath.
+    NSWorkspace.shared.open(saveURL)
 }
 ```
