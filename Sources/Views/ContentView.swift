@@ -172,7 +172,12 @@ struct ContentView: View {
                 Table(sortedTorrents, selection: $vm.selectedTorrentID, sortOrder: $sortOrder) {
                     TableColumn("Name", value: \.name) { torrent in
                         TorrentNameCell(torrent: torrent) {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: torrent.savePath))
+                            let saveURL = URL(fileURLWithPath: torrent.savePath)
+                            if let fileURL = bestFileToOpen(torrent),
+                               NSWorkspace.shared.open(fileURL) {
+                                return
+                            }
+                            NSWorkspace.shared.open(saveURL)
                         }
                     }
                     .width(min: 180, ideal: 280, max: 520)
@@ -468,6 +473,10 @@ struct ContentView: View {
             Divider()
             Button("Force Re-check") { engine.recheck(torrent) }
             Button("Force Re-announce") { engine.reannounce(torrent) }
+            Toggle("Download in Order", isOn: Binding(
+                get: { torrent.isSequentialDownload },
+                set: { engine.setSequentialDownload(torrent, enabled: $0) }
+            ))
             Divider()
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([
@@ -482,6 +491,22 @@ struct ContentView: View {
             Button("Remove…", role: .destructive) { pendingRemoval = torrent }
         }
     }
+}
+
+// MARK: - Smart open helper
+
+/// Returns the download folder URL for a torrent.
+func bestFileToOpen(_ torrent: TorrentStatus) -> URL? {
+    let saveURL = URL(fileURLWithPath: torrent.savePath)
+    // Only completed torrents open a specific file.
+    let isComplete = (torrent.state == .finished || torrent.state == .seeding)
+    guard isComplete, let handle = torrent.handle, handle.fileCount == 1 else {
+        return nil
+    }
+    var outSize: Int64 = 0
+    var outPriority: Int32 = 0
+    let filePath = handle.filePath(at: 0, size: &outSize, priority: &outPriority)
+    return filePath.map { saveURL.appendingPathComponent($0) }
 }
 
 // MARK: - Window holder

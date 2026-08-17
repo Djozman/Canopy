@@ -187,6 +187,17 @@ static int mapState(lt::torrent_status::state_t s) {
 - (void)reannounce { _handle.force_reannounce(); }
 - (void)setDownloadLimit:(int)limit { _handle.set_download_limit(limit); }
 - (void)setUploadLimit:(int)limit   { _handle.set_upload_limit(limit); }
+- (BOOL)sequentialDownload {
+    if (!_cached) [self refresh];
+    return static_cast<bool>(_cachedStatus.flags & lt::torrent_flags::sequential_download);
+}
+- (void)setSequentialDownload:(BOOL)sequential {
+    if (sequential) {
+        _handle.set_flags(lt::torrent_flags::sequential_download);
+    } else {
+        _handle.unset_flags(lt::torrent_flags::sequential_download);
+    }
+}
 
 // ─── File tree ────────────────────────────────────────────────────────────
 

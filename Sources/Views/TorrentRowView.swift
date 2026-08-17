@@ -21,9 +21,18 @@ struct TorrentNameCell: View {
                 .foregroundStyle(torrent.statusColor)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
-                Text(torrent.name)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(torrent.name)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                    if torrent.isSequentialDownload {
+                        Image(systemName: "arrow.down.to.line.compact")
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                            .font(.caption2)
+                            .help("Download in order")
+                    }
+                }
                 if let error = torrent.errorMessage, !error.isEmpty {
                     Text(error)
                         .font(.caption2)

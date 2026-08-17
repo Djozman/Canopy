@@ -24,6 +24,7 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
     public let state: TorrentState
     public let isPaused: Bool
     public let errorMessage: String?
+    public let isSequentialDownload: Bool
 
     internal let handle: LTTorrentHandle?
 
@@ -31,7 +32,8 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
         id: String, name: String, savePath: String, totalSize: Int64, totalDone: Int64,
         totalUploaded: Int64, downloadRate: Int, uploadRate: Int, progress: Float,
         numSeeds: Int, numPeers: Int, etaSeconds: Int64, state: TorrentState,
-        isPaused: Bool, errorMessage: String?, handle: LTTorrentHandle?
+        isPaused: Bool, errorMessage: String?, isSequentialDownload: Bool,
+        handle: LTTorrentHandle?
     ) {
         self.id = id
         self.name = name
@@ -48,6 +50,7 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
         self.state = state
         self.isPaused = isPaused
         self.errorMessage = errorMessage
+        self.isSequentialDownload = isSequentialDownload
         self.handle = handle
     }
 
@@ -67,6 +70,7 @@ public struct TorrentStatus: Identifiable, @unchecked Sendable {
         self.state = TorrentState(rawValue: Int(h.state.rawValue)) ?? .downloading
         self.isPaused = h.paused
         self.errorMessage = h.errorMessage
+        self.isSequentialDownload = h.sequentialDownload
         self.handle = h
     }
 }
@@ -343,6 +347,14 @@ public final class TorrentEngine: ObservableObject {
         }
         NSLog("[Canopy] reannounce(\(torrent.name))")
         queue.async { h.reannounce() }
+    }
+    public func setSequentialDownload(_ torrent: TorrentStatus, enabled: Bool) {
+        guard let h = torrent.handle else {
+            NSLog("[Canopy] setSequentialDownload: no handle for \(torrent.name)")
+            return
+        }
+        NSLog("[Canopy] setSequentialDownload(\(torrent.name), enabled=\(enabled))")
+        queue.async { h.sequentialDownload = enabled }
     }
     public func pauseSession() {
         let s = session

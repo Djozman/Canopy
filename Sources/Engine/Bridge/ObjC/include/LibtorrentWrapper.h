@@ -48,6 +48,7 @@ typedef NS_ENUM(int, LTAlertType) {
 - (void)reannounce;
 - (void)setDownloadLimit:(int)limit;
 - (void)setUploadLimit:(int)limit;
+@property (nonatomic, assign) BOOL sequentialDownload;
 
 // File tree support
 @property (readonly) int fileCount;
