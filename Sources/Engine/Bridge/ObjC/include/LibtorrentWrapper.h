@@ -1,0 +1,133 @@
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(int, LTTorrentState) {
+    LTTorrentStateCheckingFiles       = 0,
+    LTTorrentStateDownloadingMetadata = 1,
+    LTTorrentStateDownloading         = 2,
+    LTTorrentStateFinished            = 3,
+    LTTorrentStateSeeding             = 4,
+    LTTorrentStateAllocating          = 5,
+    LTTorrentStateCheckingResumeData  = 6,
+};
+
+typedef NS_ENUM(int, LTAlertType) {
+    LTAlertTypeTorrentAdded     = 0,
+    LTAlertTypeTorrentRemoved   = 1,
+    LTAlertTypeTorrentFinished  = 2,
+    LTAlertTypeTorrentError     = 3,
+    LTAlertTypeTrackerError     = 4,
+    LTAlertTypeSaveResumeData   = 5,
+    LTAlertTypeStateChanged     = 6,
+    LTAlertTypeMetadataReceived = 7,
+    LTAlertTypeUnknown          = 99,
+};
+
+@interface LTTorrentHandle : NSObject
+@property (readonly) NSString *name;
+@property (readonly) float     progress;
+@property (readonly) int64_t   downloadRate;
+@property (readonly) int64_t   uploadRate;
+@property (readonly) int64_t   totalDone;
+@property (readonly) int64_t   totalSize;
+@property (readonly) int64_t   totalUploaded;
+@property (readonly) int       numSeeds;
+@property (readonly) int       numPeers;
+@property (readonly) int64_t   etaSeconds;
+@property (readonly) NSString *infoHash;
+@property (readonly) NSString *savePath;
+@property (readonly) LTTorrentState state;
+@property (readonly) BOOL      paused;
+@property (readonly, nullable) NSString *errorMessage;
+@property (readonly) BOOL      hasMetadata;
+
+- (void)pause;
+- (void)resume;
+- (void)recheck;
+- (void)reannounce;
+- (void)setDownloadLimit:(int)limit;
+- (void)setUploadLimit:(int)limit;
+
+// File tree support
+@property (readonly) int fileCount;
+- (NSArray<NSNumber *> *)fileProgressAll;
+- (nullable NSString *)filePathAtIndex:(int)index
+                                  size:(int64_t *)outSize
+                              priority:(int *)outPriority;
+- (void)setFilePriority:(int)priority atIndex:(int)index;
+
+@property (readonly) int trackerCount;
+- (nullable NSDictionary *)trackerInfoAtIndex:(int)index;
+@property (readonly) int peerCount;
+- (nullable NSDictionary *)peerInfoAtIndex:(int)index;
+
+// Piece map support
+@property (readonly) int pieceCount;
+@property (readonly) int64_t pieceSize;
+/// Returns NSData of length pieceCount where each byte is 0 or 1.
+- (NSData *)pieceDownloadedBits;
+@end
+
+@interface LTFileEntry : NSObject
+@property (nonatomic, copy)   NSString *path;
+@property (nonatomic, assign) int64_t   size;
+@property (nonatomic, assign) int       index;
+@end
+
+@interface LibtorrentSession : NSObject
+- (instancetype)init;
+- (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
+                                    savePath:(NSString *)savePath
+                                  priorities:(nullable NSArray<NSNumber *> *)priorities;
+- (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
+                                  savePath:(NSString *)savePath;
+- (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath;
+
+// Magnet metadata-first mode: add paused in upload-only mode, commit later
+- (nullable LTTorrentHandle *)addMagnetForMetadata:(NSString *)uri;
+- (void)commitMagnet:(LTTorrentHandle *)handle
+            savePath:(NSString *)savePath
+          priorities:(nullable NSArray<NSNumber *> *)priorities;
+- (void)cancelMagnet:(LTTorrentHandle *)handle;
+
+// Alert-driven wakeup: called when libtorrent has new alerts, avoids CPU-wasting timer
+- (void)setAlertNotify:(void (^)(void))block;
+- (NSArray<LTTorrentHandle *> *)allTorrents;
+- (void)removeTorrent:(LTTorrentHandle *)handle deleteFiles:(BOOL)deleteFiles;
+- (void)pause;
+- (void)resume;
+- (void)saveResumeDataAll;
+- (void)saveResumeDataAllAndWait;
+/// Directory where .resume files are stored. Must be set before loading.
+@property (nonatomic, copy) NSString *resumeDataDir;
+/// Load previously saved torrents from the resume data directory.
+- (void)loadResumeTorrentsFromDir:(NSString *)dir;
+- (void)popAlerts:(void (^)(LTAlertType type, LTTorrentHandle * _Nullable handle, NSString *message, int errorCode))callback;
+- (void)getSettingsWithDownloadRate:(int *)downloadRate
+                         uploadRate:(int *)uploadRate
+                    activeDownloads:(int *)activeDownloads
+                        activeSeeds:(int *)activeSeeds
+                        activeLimit:(int *)activeLimit
+                          enableDHT:(BOOL *)enableDHT
+                          enableLSD:(BOOL *)enableLSD
+                         enableUPnP:(BOOL *)enableUPnP
+                       enableNatPMP:(BOOL *)enableNatPMP
+                      anonymousMode:(BOOL *)anonymousMode
+                         listenPort:(int *)listenPort;
+- (void)applySettingsWithDownloadRate:(int)downloadRate
+                           uploadRate:(int)uploadRate
+                      activeDownloads:(int)activeDownloads
+                          activeSeeds:(int)activeSeeds
+                          activeLimit:(int)activeLimit
+                            enableDHT:(BOOL)enableDHT
+                            enableLSD:(BOOL)enableLSD
+                           enableUPnP:(BOOL)enableUPnP
+                         enableNatPMP:(BOOL)enableNatPMP
+                        anonymousMode:(BOOL)anonymousMode
+                           listenPort:(int)listenPort;
+/// Swift-friendly settings entry point. Values are bytes/s and validated by the bridge.
+- (void)applySettingsDictionary:(NSDictionary<NSString *, NSNumber *> *)settings;
+@end
+
+NS_ASSUME_NONNULL_END

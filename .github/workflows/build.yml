@@ -1,0 +1,31 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libtorrent-rasterbar boost
+
+      - name: Show libtorrent configuration
+        run: |
+          pkg-config --modversion libtorrent-rasterbar
+          pkg-config --cflags libtorrent-rasterbar
+          pkg-config --libs libtorrent-rasterbar
+
+      - name: Test
+        run: swift test
+
+      - name: Build
+        run: swift build -c release
