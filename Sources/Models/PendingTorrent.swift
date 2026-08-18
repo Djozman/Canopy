@@ -22,7 +22,7 @@ public struct PendingTorrent {
 
 public struct PendingFile: Identifiable {
     public let id: Int
-    public let path: String
+    public var path: String
     public let size: Int64
     public var priority: FilePriority = .normal
 

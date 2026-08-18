@@ -7,9 +7,9 @@ Canopy keeps the interface small and Mac-native while exposing the controls that
 matter: magnet links, `.torrent` files, file priorities, live transfer details,
 peers, trackers, piece progress, queue limits, and persistent sessions.
 
-> **Version 3.0.0** — a qBittorrent-inspired transfer workspace, visible Canopy
-> branding, reliable downloads, persistent sessions, and Homebrew libtorrent
-> 2.1 compatibility.
+> **Version 3.1.0** — rename torrents before install, plus the
+> qBittorrent-inspired transfer workspace, reliable downloads, persistent
+> sessions, and Homebrew libtorrent 2.x compatibility.
 
 ## Highlights
 
@@ -20,6 +20,8 @@ peers, trackers, piece progress, queue limits, and persistent sessions.
   trackers, peers, recheck, and reannounce.
 - **Safe pre-add flow** — inspect files, choose a destination, skip files, and
   set priorities before payload data is downloaded.
+- **Rename before install** — rename the root folder, any subfolder, or any
+  file on the pre-add screen; downloaded content lands under the new names.
 - **Reliable magnet handling** — metadata is fetched without pausing the
   torrent, payload transfer remains disabled until confirmation, and stalled
   metadata requests time out cleanly.
@@ -35,10 +37,10 @@ peers, trackers, piece progress, queue limits, and persistent sessions.
 
 ## Interface
 
-Canopy 3.0.0 uses a dense transfer-management layout inspired by qBittorrent
+Canopy 3.1.0 uses a dense transfer-management layout inspired by qBittorrent
 while remaining a native SwiftUI macOS app:
 
-- The top-left brand panel shows the Canopy logo and exact `3.0.0` version.
+- The top-left brand panel shows the Canopy logo and exact `3.1.0` version.
 - The sidebar filters transfer states and displays live counts.
 - The table keeps progress, state, swarm counts, speeds, ETA, and ratio visible.
 - A draggable lower inspector exposes General, Trackers, Peers, Files, and Pieces.
@@ -112,9 +114,9 @@ the app, run:
 Release files are written to `dist/`. The package is ad-hoc signed; public
 releases should eventually use a Developer ID certificate and notarization.
 
-## Publish version 3.0.0 with GitHub Actions
+## Publish version 3.1.0 with GitHub Actions
 
-The release workflow runs when the `v3.0.0` tag is pushed. It verifies both
+The release workflow runs when the `v3.1.0` tag is pushed. It verifies both
 bundle versions, runs the tests, builds the app, bundles libtorrent and OpenSSL,
 creates ZIP and DMG packages, generates SHA-256 checksums, and publishes a
 GitHub Release.
@@ -125,8 +127,8 @@ git pull --ff-only
 git status
 swift test
 git push origin main
-git tag -a v3.0.0 -m "Canopy 3.0.0"
-git push origin v3.0.0
+git tag -a v3.1.0 -m "Canopy 3.1.0"
+git push origin v3.1.0
 ```
 
 Monitor the **Release** workflow in the repository's Actions tab. When it
@@ -224,7 +226,8 @@ build_app.sh
   metadata.
 - Rebuilt the main window as a qBittorrent-inspired workspace with a branded
   sidebar, dense transfer table, draggable inspector, and aggregate status bar.
-- Added the Canopy logo and exact 3.0.0 version to the top-left brand panel.
+- Added the Canopy logo and exact 3.0.0 version to the top-left brand panel. In
+  3.1.0 that badge reads 3.1.0.
 - Removed the hard-coded libtorrent ABI. SwiftPM now consumes the exact compiler
   and linker flags from the installed `libtorrent-rasterbar.pc`, preventing
   namespace mismatches across macOS 14, macOS 15, and local Homebrew bottles.

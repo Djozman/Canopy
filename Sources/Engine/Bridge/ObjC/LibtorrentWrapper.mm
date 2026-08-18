@@ -354,7 +354,8 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
                                     savePath:(NSString *)savePath
-                                  priorities:(nullable NSArray<NSNumber *> *)priorities {
+                                  priorities:(nullable NSArray<NSNumber *> *)priorities
+                                renamedFiles:(nullable NSArray<NSString *> *)renamedFiles {
     try {
         // The single-argument overload is shared by Homebrew's libtorrent
         // 2.0 and 2.1 headers. Parse failures throw and are handled below.
@@ -372,6 +373,15 @@ static int mapState(lt::torrent_status::state_t s) {
                 p.file_priorities[i] = lt::download_priority_t{
                     (std::uint8_t)[priorities[i] intValue]
                 };
+            }
+        }
+
+        if (renamedFiles) {
+            for (NSUInteger i = 0; i < renamedFiles.count; i++) {
+                NSString *newPath = renamedFiles[i];
+                if (newPath.length == 0) continue;
+                p.renamed_files[lt::file_index_t{ (int)i }] =
+                    std::string(newPath.UTF8String);
             }
         }
 
@@ -420,7 +430,8 @@ static int mapState(lt::torrent_status::state_t s) {
 
 - (void)commitMagnet:(LTTorrentHandle *)handle
             savePath:(NSString *)savePath
-          priorities:(nullable NSArray<NSNumber *> *)priorities {
+          priorities:(nullable NSArray<NSNumber *> *)priorities
+        renamedFiles:(nullable NSArray<NSString *> *)renamedFiles {
     auto h = [handle cppHandle];
     if (!h.is_valid()) {
         NSLog(@"[Canopy-ObjC] commitMagnet: handle invalid");
@@ -434,6 +445,15 @@ static int mapState(lt::torrent_status::state_t s) {
     try { std::filesystem::create_directories(destination); }
     catch (...) { return; }
     h.move_storage(destination);
+
+    if (renamedFiles) {
+        for (NSUInteger i = 0; i < renamedFiles.count; i++) {
+            NSString *newPath = renamedFiles[i];
+            if (newPath.length == 0) continue;
+            h.rename_file(lt::file_index_t{ (int)i },
+                          std::string(newPath.UTF8String));
+        }
+    }
 
     if (priorities && priorities.count > 0) {
         std::vector<lt::download_priority_t> prios;

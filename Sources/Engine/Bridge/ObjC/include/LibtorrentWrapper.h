@@ -80,7 +80,8 @@ typedef NS_ENUM(int, LTAlertType) {
 - (instancetype)init;
 - (nullable LTTorrentHandle *)addTorrentFile:(NSString *)path
                                     savePath:(NSString *)savePath
-                                  priorities:(nullable NSArray<NSNumber *> *)priorities;
+                                  priorities:(nullable NSArray<NSNumber *> *)priorities
+                                renamedFiles:(nullable NSArray<NSString *> *)renamedFiles;
 - (nullable LTTorrentHandle *)addMagnetURI:(NSString *)magnetURI
                                   savePath:(NSString *)savePath;
 - (nullable NSArray<LTFileEntry *> *)parseFileList:(NSString *)torrentPath;
@@ -89,7 +90,8 @@ typedef NS_ENUM(int, LTAlertType) {
 - (nullable LTTorrentHandle *)addMagnetForMetadata:(NSString *)uri;
 - (void)commitMagnet:(LTTorrentHandle *)handle
             savePath:(NSString *)savePath
-          priorities:(nullable NSArray<NSNumber *> *)priorities;
+          priorities:(nullable NSArray<NSNumber *> *)priorities
+        renamedFiles:(nullable NSArray<NSString *> *)renamedFiles;
 - (void)cancelMagnet:(LTTorrentHandle *)handle;
 
 // Alert-driven wakeup: called when libtorrent has new alerts, avoids CPU-wasting timer

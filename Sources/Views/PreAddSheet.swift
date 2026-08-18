@@ -63,7 +63,40 @@ struct PreAddSheet: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            Divider()
+            // ── Rename validation error (shown for any rename)
+            if let err = model.renameErrorMessage {
+                Text(err)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.vertical, 2)
+            }
+
+            // ── Root folder rename (multi-file only)
+            if !pending.isMagnet && !model.isSingleFile {
+                HStack {
+                    Text("Folder:")
+                        .font(.caption)
+                        .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    SheetRenameField(
+                        text: model.treeRootName,
+                        errorMessage: $model.renameErrorMessage
+                    ) { newName in
+                        if let err = model.renameRootFolder(to: newName) {
+                            model.renameErrorMessage = err.localizedDescription
+                        } else {
+                            model.renameErrorMessage = nil
+                        }
+                    }
+                    .frame(maxWidth: 240)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+
+                Divider()
+            }
 
             // ── Spinner or tree
             if pending.isMagnet && pending.files.isEmpty {
@@ -132,7 +165,12 @@ struct PreAddSheet: View {
                 Button("Cancel", role: .cancel) { onCancel() }
                     .keyboardShortcut(.escape)
 
-                Button("Add Torrent") { onConfirm(pending) }
+                Button("Add Torrent") {
+                        // Ensure renamed paths are fully synced into
+                        // pending.files before handing off to the engine.
+                        model.buildRenamedFiles()
+                        onConfirm(pending)
+                    }
                     .keyboardShortcut(.return)
                     .buttonStyle(.borderedProminent)
                     .disabled(pending.isMagnet && pending.files.isEmpty)
@@ -188,10 +226,19 @@ private struct PreAddTreeRow: View {
                 .foregroundColor(CanopyPalette.warning)
                 .font(.system(size: 12))
 
-            Text(node.name)
-                .font(.caption)
-                .foregroundColor(Color(nsColor: .labelColor))
-                .lineLimit(1)
+            SheetRenameField(
+                text: node.name,
+                errorMessage: Binding(
+                    get: { model.renameErrorMessage },
+                    set: { model.renameErrorMessage = $0 }
+                )
+            ) { newName in
+                if let err = model.rename(node: node, to: newName) {
+                    model.renameErrorMessage = err.localizedDescription
+                } else {
+                    model.renameErrorMessage = nil
+                }
+            }
 
             Spacer()
 
@@ -222,13 +269,19 @@ private struct PreAddTreeRow: View {
                 .foregroundColor(Color(nsColor: .secondaryLabelColor))
                 .font(.system(size: 12))
 
-            Text(node.name)
-                .font(.caption)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundColor(Color(nsColor: .labelColor))
-                .strikethrough(node.priority == .dontDownload,
-                               color: Color(nsColor: .secondaryLabelColor))
+            SheetRenameField(
+                text: node.name,
+                errorMessage: Binding(
+                    get: { model.renameErrorMessage },
+                    set: { model.renameErrorMessage = $0 }
+                )
+            ) { newName in
+                if let err = model.rename(node: node, to: newName) {
+                    model.renameErrorMessage = err.localizedDescription
+                } else {
+                    model.renameErrorMessage = nil
+                }
+            }
 
             Spacer()
 
@@ -262,5 +315,69 @@ private struct PreAddTreeRow: View {
 
     private var indentSpacer: some View {
         Color.clear.frame(width: CGFloat(depth) * 16 + 4)
+    }
+}
+
+// MARK: - Rename field
+
+/// An inline text field with an edit (pencil) affordance. Swaps the label for
+/// an editable TextField on demand; commits on Enter and surfaces inline
+/// validation errors on reject.
+private struct SheetRenameField: View {
+    @State private var isEditing = false
+    @State private var draft = ""
+    let text: String
+    @Binding var errorMessage: String?
+    let onCommit: (String) -> Void
+
+    var body: some View {
+        Group {
+            if isEditing {
+                TextField("", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .onSubmit(commit)
+                    .onExitCommand { cancel() }
+            } else {
+                HStack(spacing: 4) {
+                    Text(text)
+                        .font(.caption)
+                        .foregroundColor(Color(nsColor: .labelColor))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button {
+                        startEditing()
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 9))
+                            .foregroundColor(Color(nsColor: .secondaryLabelColor))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Rename")
+                }
+            }
+        }
+        .onAppear { if isEditing, draft.isEmpty { draft = text } }
+        .onChange(of: text) { _, newValue in
+            if !isEditing { draft = newValue }
+        }
+    }
+
+    private func startEditing() {
+        draft = text
+        errorMessage = nil
+        isEditing = true
+    }
+
+    private func cancel() {
+        isEditing = false
+        errorMessage = nil
+    }
+
+    private func commit() {
+        let result = onCommit(draft)
+        // If onCommit returns an error, keep editing to allow correction.
+        // Result is surfaced via errorMessage binding by the caller.
+        isEditing = false
     }
 }

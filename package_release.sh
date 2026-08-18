@@ -6,8 +6,8 @@ cd "$(dirname "$0")"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Info.plist)"
 BUILD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Sources/Info.plist)"
 
-if [[ "$VERSION" != "3.0.0" || "$BUILD_VERSION" != "3.0.0" ]]; then
-    echo "Expected version 3.0.0, found $VERSION ($BUILD_VERSION)" >&2
+if [[ "$VERSION" != "3.1.0" || "$BUILD_VERSION" != "3.1.0" ]]; then
+    echo "Expected version 3.1.0, found $VERSION ($BUILD_VERSION)" >&2
     exit 1
 fi
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.1.0
+
+### Features
+
+- Added the ability to rename the torrent's root folder, any subfolder, and any
+  individual file on the pre-add review screen before the torrent is added.
+  Named paths are applied to libtorrent so downloaded content lands under the
+  new names on disk.
+- Name validation rejects empty names, names containing illegal characters
+  (`/`, `\`, `:`, control), and same-type sibling collisions, with inline
+  errors that preserve the original name.
+
+### Interface
+
+- The pre-add file tree rows and the root .folder now expose an inline rename
+  (pencil) control; single-file torrents hide the root-folder rename.
+
 ## 3.0.0
 
 ### Interface

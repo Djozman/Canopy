@@ -167,6 +167,7 @@ public final class TorrentEngine: ObservableObject {
 
     public func confirm(_ pending: PendingTorrent) {
         let priorities = pending.files.map { NSNumber(value: $0.priority.rawValue) }
+        let renamed = pending.files.map { $0.path }
         let savePath = (pending.savePath as NSString).expandingTildeInPath
         let session = self.session
         let source = pending.source
@@ -178,7 +179,8 @@ public final class TorrentEngine: ObservableObject {
             case .file(let path):
                 let result = session?.addTorrentFile(
                     path, savePath: savePath,
-                    priorities: priorities.isEmpty ? nil : priorities)
+                    priorities: priorities.isEmpty ? nil : priorities,
+                    renamedFiles: renamed.isEmpty ? nil : renamed)
                 NSLog(
                     "[Canopy] confirm: addTorrentFile(\(path)) -> \(result == nil ? "FAILED (nil)" : "ok handle=\(result!.infoHash)")"
                 )
@@ -264,11 +266,14 @@ public final class TorrentEngine: ObservableObject {
 
     public func commitMagnet(handle: LTTorrentHandle, savePath: String, files: [PendingFile]) {
         let priorities = files.map { NSNumber(value: $0.priority.rawValue) }
+        let renamed = files.map { $0.path }
         let expanded = (savePath as NSString).expandingTildeInPath
         let session = self.session
         queue.async {
             session?.commitMagnet(
-                handle, savePath: expanded, priorities: priorities.isEmpty ? nil : priorities)
+                handle, savePath: expanded,
+                priorities: priorities.isEmpty ? nil : priorities,
+                renamedFiles: renamed.isEmpty ? nil : renamed)
         }
     }
 
