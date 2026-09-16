@@ -9,7 +9,7 @@ struct FilesTab: View {
     @State private var expanded = false
     @State private var selectedNodeIDs: Set<UUID> = []
     @State private var renamingNodeID: UUID?
-    private let refreshTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,7 +38,7 @@ struct FilesTab: View {
                 .help(expanded ? "Collapse all folders" : "Expand all folders")
             }
             .padding(.horizontal, 10)
-            .frame(height: 34)
+            .frame(height: 30)
             .background(CanopyPalette.surface)
             Divider()
             if vm.roots.isEmpty {
@@ -110,8 +110,12 @@ private struct FileInspectorRow: View {
     private var isRenaming: Bool { renamingNodeID == node.id }
 
     var body: some View {
+        // Single-line row — like qBittorrent's QTreeView with uniform row heights
         HStack(spacing: 6) {
-            Color.clear.frame(width: CGFloat(depth) * 18)
+            // Indentation
+            Color.clear.frame(width: CGFloat(depth) * 16)
+
+            // Expand/collapse chevron
             if node.isFolder {
                 Button {
                     node.isExpanded.toggle()
@@ -119,67 +123,75 @@ private struct FileInspectorRow: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .rotationEffect(.degrees(node.isExpanded ? 90 : 0))
-                        .frame(width: 22, height: 28)
+                        .frame(width: 16, height: 20)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             } else {
-                Color.clear.frame(width: 22, height: 28)
+                Color.clear.frame(width: 16, height: 20)
             }
+
+            // Checkbox
             NativeCheckbox(state: node.checkState) {
                 vm.toggleCheck(node)
             }
+
+            // File/folder icon
             Image(systemName: node.isFolder ? "folder.fill" : fileIcon(node.name))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(node.isFolder ? CanopyPalette.warning : Color.secondary)
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    if isRenaming {
-                        TextField("Name", text: Binding(
-                            get: { node.name },
-                            set: { node.name = $0 }
-                        ))
-                        .textFieldStyle(.plain)
-                        .font(.caption.weight(node.isFolder ? .medium : .regular))
-                        .focused($renameFocused)
-                        .onSubmit { commitRename() }
-                        .onExitCommand { cancelRename() }
-                    } else {
-                        Text(node.name)
-                            .font(.caption.weight(node.isFolder ? .medium : .regular))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 4)
-                    if !isRenaming {
-                        Text(formatBytes(node.size))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                HStack(spacing: 7) {
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.primary.opacity(0.10))
-                            Capsule()
-                                .fill(progressColor)
-                                .frame(width: geometry.size.width * node.progress)
-                        }
-                    }
-                    .frame(height: 5)
-                    Text(String(format: "%.1f%%", node.progress * 100))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 39, alignment: .trailing)
-                    if !node.isFolder {
-                        priorityMenu
-                    }
-                }
+                .frame(width: 14)
+
+            // Name (with inline rename)
+            if isRenaming {
+                TextField("Name", text: Binding(
+                    get: { node.name },
+                    set: { node.name = $0 }
+                ))
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .focused($renameFocused)
+                .onSubmit { commitRename() }
+                .onExitCommand { cancelRename() }
+            } else {
+                Text(node.name)
+                    .font(.caption.weight(node.isFolder ? .medium : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 4)
+
+            // Progress bar (compact, fixed width)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.10))
+                Capsule()
+                    .fill(progressColor)
+                    .frame(width: 60 * node.progress)
+            }
+            .frame(width: 60, height: 4)
+
+            // Progress percentage
+            Text(String(format: "%.0f%%", node.progress * 100))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .trailing)
+
+            // Size
+            Text(formatBytes(node.size))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 60, alignment: .trailing)
+
+            // Priority (files only)
+            if !node.isFolder {
+                priorityMenu
+            } else {
+                Color.clear.frame(width: 50)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .frame(height: 24)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowBackground)
         .contentShape(Rectangle())
@@ -217,9 +229,15 @@ private struct FileInspectorRow: View {
                         NSWorkspace.shared.open(url)
                     }
                 }
+                Divider()
+                Button("Rename") {
+                    selectedNodeIDs = [node.id]
+                    renamingNodeID = node.id
+                    renameFocused = true
+                }
             }
         }
-        Divider().opacity(0.35)
+        Divider().opacity(0.3)
         if node.isFolder, node.isExpanded, let children = node.children {
             ForEach(children) { child in
                 FileInspectorRow(
@@ -289,6 +307,7 @@ private struct FileInspectorRow: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .frame(width: 50)
     }
 
     private var progressColor: Color {

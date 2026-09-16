@@ -12,11 +12,7 @@ public enum FileSortOrder: Equatable {
 public final class FileTreeViewModel: ObservableObject {
     @Published public private(set) var roots: [FileNode] = []
     @Published public var sortOrder: FileSortOrder = .nameAsc
-
     private var torrent: TorrentStatus
-    /// Whether the tree has been built at least once. On first build we
-    /// replace roots entirely; on subsequent refreshes we patch in-place
-    /// so user-toggled isExpanded states are preserved.
     private var treeBuilt = false
 
     public init(torrent: TorrentStatus) {
@@ -29,9 +25,6 @@ public final class FileTreeViewModel: ObservableObject {
         refreshFiles()
     }
 
-    /// Refresh using the most recent handle. FilesTab calls this on a short
-    /// timer so per-file progress remains live even when aggregate progress
-    /// has not changed enough to trigger a visible torrent-row update.
     public func refresh() {
         refreshFiles()
     }
@@ -60,30 +53,89 @@ public final class FileTreeViewModel: ObservableObject {
     }
 
     public func fileURL(for node: FileNode) -> URL? {
-    guard let handle = torrent.handle, let idx = node.fileIndex else { return nil }
-    var size: Int64 = 0
-    var priority: Int32 = 0
-    guard let relPath = handle.filePath(at: Int32(idx), size: &size, priority: &priority) else { return nil }
-    return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
-}
+        guard let handle = torrent.handle, let idx = node.fileIndex else { return nil }
+        var size: Int64 = 0
+        var priority: Int32 = 0
+        guard let relPath = handle.filePath(at: Int32(idx), size: &size, priority: &priority) else { return nil }
+        return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
+    }
 
-public func renameFile(_ newName: String, on node: FileNode) {
-    guard let handle = torrent.handle, let idx = node.fileIndex else { return }
-    let oldName = node.name
-    handle.renameFile(newName, at: Int32(idx))
-    node.name = newName
-    // Also rename on disk immediately as a fallback
-    if let oldURL = fileURL(for: node) {
-        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(newName)
-        if oldURL.path != newURL.path {
-            try? FileManager.default.moveItem(at: oldURL, to: newURL)
+    /// Build the full relative path for a node by walking up its parent chain
+    private func fullPath(for node: FileNode) -> String {
+        // We need to find this node's path in the tree
+        // Since FileNode doesn't have a parent reference, we search the tree
+        func findPath(_ nodes: [FileNode], target: FileNode, prefix: String) -> String? {
+            for n in nodes {
+                let currentPath = prefix.isEmpty ? n.name : prefix + "/" + n.name
+                if n.id == target.id { return currentPath }
+                if let children = n.children {
+                    if let found = findPath(children, target: target, prefix: currentPath) {
+                        return found
+                    }
+                }
+            }
+            return nil
+        }
+        return findPath(roots, target: node, prefix: "") ?? node.name
+    }
+
+    public func renameFile(_ newName: String, on node: FileNode) {
+        guard let handle = torrent.handle else { return }
+
+        if let idx = node.fileIndex {
+            // File rename: pass FULL relative path, not just filename
+            // libtorrent's rename_file expects the complete path relative to save dir
+            let currentPath = fullPath(for: node)
+            let parentDir = (currentPath as NSString).deletingLastPathComponent
+            let fullNewPath = parentDir.isEmpty ? newName : parentDir + "/" + newName
+
+            handle.renameFile(fullNewPath, at: Int32(idx))
+            node.name = newName
+        } else if node.isFolder {
+            // Folder rename: rename every file inside this folder
+            let oldFolderPath = fullPath(for: node)
+            let parentDir = (oldFolderPath as NSString).deletingLastPathComponent
+            let newFolderPath = parentDir.isEmpty ? newName : parentDir + "/" + newName
+
+            func renameAll(_ nodes: [FileNode]) {
+                for n in nodes {
+                    if let idx = n.fileIndex {
+                        let currentPath = fullPath(for: n)
+                        // Replace old folder prefix with new folder prefix
+                        let relPath = currentPath.replacingOccurrences(of: oldFolderPath, with: newFolderPath)
+                        handle.renameFile(relPath, at: Int32(idx))
+                    }
+                    if let children = n.children {
+                        renameAll(children)
+                    }
+                }
+            }
+
+            // Find children of this node
+            if let children = node.children {
+                for child in children {
+                    renameAll([child])
+                }
+            }
+            node.name = newName
+        }
+
+        objectWillChange.send()
+    }
+
+    private func applyPriority(_ priority: FilePriority, to node: FileNode) {
+        node.priority = priority
+        guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+        handle.setFilePriority(Int32(priority.rawValue), at: Int32(idx))
+        // Propagate to children if folder
+        if let children = node.children {
+            for child in children {
+                applyPriority(priority, to: child)
+            }
         }
     }
-    _ = oldName
-    objectWillChange.send()
-}
 
-public func setPriority(_ priority: FilePriority, on node: FileNode) {
+    public func setPriority(_ priority: FilePriority, on node: FileNode) {
         applyPriority(priority, to: node)
         objectWillChange.send()
     }
@@ -96,100 +148,62 @@ public func setPriority(_ priority: FilePriority, on node: FileNode) {
         guard count > 0 else { return }
 
         let progress = handle.fileProgressAll() as [AnyObject]
+
+        // If tree is already built, just patch progress — don't rebuild structure
+        // This prevents expand/collapse state from being lost
+        if treeBuilt {
+            patchProgress(roots, progress: progress)
+            return
+        }
+
         var infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)] = []
 
         for i in 0..<count {
-            var outSize: Int64 = 0
-            var outPriority: Int32 = 0
-            guard let path = handle.filePath(at: Int32(i), size: &outSize, priority: &outPriority)
-            else { continue }
-            let down: Int64 = i < progress.count ? (progress[i] as? NSNumber)?.int64Value ?? 0 : 0
-            infos.append((i, path, outSize, down, Int(outPriority)))
+            var size: Int64 = 0
+            var priority: Int32 = 0
+            guard let path = handle.filePath(at: Int32(i), size: &size, priority: &priority) else { continue }
+            let downloaded = i < progress.count ? Int64(progress[i].int64Value) : 0
+            infos.append((index: i, path: path, size: size, downloaded: downloaded, priority: Int(priority)))
         }
 
-        if !treeBuilt {
-            // First build: create all nodes fresh
-            roots = buildTree(infos)
-            var r = roots
-            applySort(&r, order: sortOrder)
-            roots = r
-            treeBuilt = true
-        } else {
-            // Subsequent refreshes: patch existing nodes in-place so
-            // isExpanded / user interactions survive the timer tick.
-            patchTree(&roots, infos: infos)
-            // Re-compute folder sizes without replacing nodes
-            for node in roots { computeFolderSize(node) }
-            var sortedRoots = roots
-            applySort(&sortedRoots, order: sortOrder)
-            roots = sortedRoots
-        }
+        let newRoots = buildTree(from: infos)
+        roots = newRoots
+        treeBuilt = true
     }
 
-    /// Walk the existing tree and update mutable data (progress, priority).
-    /// Nodes are matched by fileIndex for leaves. We never replace a node
-    /// object — only mutate its properties — so isExpanded survives polls.
-    private func patchTree(
-        _ nodes: inout [FileNode],
-        infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
-    ) {
-        // Build a flat index → info map for O(1) lookup
-        var byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)] = [:]
-        for info in infos {
-            byIndex[info.index] = (info.size, info.downloaded, info.priority)
-        }
-        patchNodes(&nodes, byIndex: byIndex)
-    }
-
-    /// Recurse into the tree, patching leaves that match the byIndex map.
-    /// Folder nodes are never replaced — their children array is mutated in
-    /// place so SwiftUI diffing sees identity stability.
-    private func patchNodes(
-        _ nodes: inout [FileNode],
-        byIndex: [Int: (size: Int64, downloaded: Int64, priority: Int)]
-    ) {
+    /// Patch progress values in-place without rebuilding tree structure
+    private func patchProgress(_ nodes: [FileNode], progress: [AnyObject]) {
         for node in nodes {
-            if let idx = node.fileIndex, let info = byIndex[idx] {
-                // Leaf: update live data only, never touch isExpanded
-                node.downloaded = info.downloaded
-                // Only sync priority if libtorrent disagrees (e.g. after re-check)
-                if let p = FilePriority(rawValue: info.priority), p != node.priority {
-                    node.priority = p
+            if let idx = node.fileIndex, idx < progress.count {
+                node.downloaded = Int64(progress[idx].int64Value)
+            }
+            if let children = node.children {
+                patchProgress(children, progress: progress)
+                // Recompute folder aggregate
+                var totalSize: Int64 = 0
+                var totalDone: Int64 = 0
+                for child in children {
+                    totalSize += child.size
+                    totalDone += child.downloaded
                 }
-            } else if node.isFolder, var children = node.children {
-                // Folder: recurse, keep the same node object
-                patchNodes(&children, byIndex: byIndex)
-                node.children = children
+                node.size = totalSize
+                node.downloaded = totalDone
             }
         }
     }
 
-    private func applyPriority(_ priority: FilePriority, to node: FileNode) {
-        if let children = node.children {
-            for child in children { applyPriority(priority, to: child) }
-        } else {
-            node.priority = priority
-            if let idx = node.fileIndex, let handle = torrent.handle {
-                handle.setFilePriority(Int32(priority.rawValue), at: Int32(idx))
-            }
-        }
-    }
-
-    // MARK: - Tree construction (first build only)
-
-    private func buildTree(
-        _ infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]
-    ) -> [FileNode] {
+    private func buildTree(from infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]) -> [FileNode] {
         var rootDict: [String: FileNode] = [:]
         var rootOrder: [String] = []
 
         for info in infos {
             var comps = info.path.split(separator: "/").map(String.init)
             let fileName = comps.removeLast()
-
             let leaf = FileNode(
-                name: fileName, size: info.size,
-                downloaded: info.downloaded, fileIndex: info.index,
+                name: fileName,
+                size: info.size,
+                downloaded: info.downloaded,
+                fileIndex: info.index,
                 priority: FilePriority(rawValue: info.priority) ?? .normal,
                 children: nil)
 
