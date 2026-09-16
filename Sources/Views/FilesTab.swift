@@ -9,7 +9,7 @@ struct FilesTab: View {
     @State private var expanded = false
     @State private var selectedNodeIDs: Set<UUID> = []
     @State private var renamingNodeID: UUID?
-    private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+    private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {

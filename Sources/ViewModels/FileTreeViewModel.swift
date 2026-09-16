@@ -14,6 +14,8 @@ public final class FileTreeViewModel: ObservableObject {
     @Published public var sortOrder: FileSortOrder = .nameAsc
     private var torrent: TorrentStatus
     private var treeBuilt = false
+    private var renamedFiles: [Int: String] = [:]
+    private var lastTorrentId: String = ""
 
     public init(torrent: TorrentStatus) {
         self.torrent = torrent
@@ -21,6 +23,11 @@ public final class FileTreeViewModel: ObservableObject {
     }
 
     public func refresh(torrent: TorrentStatus) {
+        if torrent.id != lastTorrentId {
+            lastTorrentId = torrent.id
+            treeBuilt = false
+            renamedFiles.removeAll()
+        }
         self.torrent = torrent
         refreshFiles()
     }
@@ -192,6 +199,17 @@ public final class FileTreeViewModel: ObservableObject {
         }
     }
 
+    private func applyRenames(to nodes: [FileNode]) {
+        for node in nodes {
+            if let idx = node.fileIndex, let renamed = renamedFiles[idx] {
+                node.name = (renamed as NSString).lastPathComponent
+            }
+            if let children = node.children {
+                applyRenames(to: children)
+            }
+        }
+    }
+
     private func buildTree(from infos: [(index: Int, path: String, size: Int64, downloaded: Int64, priority: Int)]) -> [FileNode] {
         var rootDict: [String: FileNode] = [:]
         var rootOrder: [String] = []
@@ -222,6 +240,8 @@ public final class FileTreeViewModel: ObservableObject {
         }
 
         let result = rootOrder.compactMap { rootDict[$0] }
+        // Apply any tracked renames
+        applyRenames(to: result)
         for node in result { computeFolderSize(node) }
         return result
     }
