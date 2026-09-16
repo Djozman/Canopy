@@ -342,7 +342,14 @@ static int mapState(lt::torrent_status::state_t s) {
                    lt::alert_category::storage  |
                    lt::alert_category::tracker);
         _listenPort = 6881;
-        _session = new lt::session(std::move(sp));
+        sp.set_str(lt::settings_pack::dht_bootstrap_nodes,
+    "router.bittorrent.com:6881,"
+    "router.utorrent.com:6881,"
+    "dht.transmissionbt.com:6881,"
+    "dht.libtorrent.org:6881,"
+    "router.silotis.org:6881,"
+    "dht.aelitis.com:6881");
+_session = new lt::session(std::move(sp));
         _handles = [NSMutableArray new];
     }
     return self;
@@ -419,6 +426,7 @@ static int mapState(lt::torrent_status::state_t s) {
         // Paused torrents never announce, so they cannot fetch magnet metadata.
         // upload_mode prevents payload pieces while still allowing metadata traffic.
         params.flags |= lt::torrent_flags::upload_mode;
+params.flags |= lt::torrent_flags::auto_managed;
         params.save_path = std::filesystem::temp_directory_path().string();
         lt::torrent_handle h = _session->add_torrent(params);
         if (!h.is_valid()) return nil;
@@ -729,7 +737,14 @@ static int mapState(lt::torrent_status::state_t s) {
     sp.set_str(lt::settings_pack::listen_interfaces,
                std::string("0.0.0.0:") + std::to_string(listenPort));
     _listenPort = listenPort;
-    _session->apply_settings(sp);
+    sp.set_str(lt::settings_pack::dht_bootstrap_nodes,
+    "router.bittorrent.com:6881,"
+    "router.utorrent.com:6881,"
+    "dht.transmissionbt.com:6881,"
+    "dht.libtorrent.org:6881,"
+    "router.silotis.org:6881,"
+    "dht.aelitis.com:6881");
+_session->apply_settings(sp);
 }
 
 - (void)applySettingsDictionary:(NSDictionary<NSString *, NSNumber *> *)settings {
