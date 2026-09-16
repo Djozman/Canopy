@@ -8,7 +8,6 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Brand
             HStack(spacing: 10) {
                 Image(nsImage: NSApplication.shared.applicationIconImage)
                     .resizable()
@@ -28,7 +27,6 @@ struct SidebarView: View {
 
             Divider().opacity(0.4)
 
-            // Filters
             List(selection: $vm.selectedFilter) {
                 Section("Transfers") {
                     ForEach(FilterCategory.allCases, id: \.self) { category in
@@ -64,7 +62,6 @@ struct SidebarView: View {
 
             Divider().opacity(0.4)
 
-            // Session status
             HStack(spacing: 7) {
                 Circle()
                     .fill(CanopyPalette.positive)

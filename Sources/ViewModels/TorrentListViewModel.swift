@@ -44,13 +44,11 @@ final class TorrentListViewModel: ObservableObject {
         }
     }
 
-    /// First selected torrent (for inspector display)
     var selectedTorrent: TorrentStatus? {
         guard let id = selectedTorrentIDs.first else { return nil }
         return torrents.first { $0.id == id }
     }
 
-    /// All selected torrents
     var selectedTorrents: [TorrentStatus] {
         torrents.filter { selectedTorrentIDs.contains($0.id) }
     }
@@ -58,7 +56,6 @@ final class TorrentListViewModel: ObservableObject {
     var hasSelection: Bool { !selectedTorrentIDs.isEmpty }
     var selectionCount: Int { selectedTorrentIDs.count }
 
-    // Aggregate stats for status bar
     var totalDownloadRate: Int { torrents.reduce(0) { $0 + $1.downloadRate } }
     var totalUploadRate: Int { torrents.reduce(0) { $0 + $1.uploadRate } }
 

@@ -204,6 +204,7 @@ private struct FileInspectorRow: View {
         }
     }
 
+
     private var priorityMenu: some View {
         Menu {
             ForEach(FilePriority.allCases, id: \.self) { priority in

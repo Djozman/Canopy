@@ -1,4 +1,109 @@
-// ContentView.swift — modern minimal transfer workspace
+#!/usr/bin/env python3
+"""
+Canopy Complete Patch — ALL changes in one script.
+Run from: /Users/amm/Canopy-main
+Usage:    python3 canopy_complete.py
+"""
+import os, re
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+def read(path):
+    with open(os.path.join(BASE, path)) as f:
+        return f.read()
+
+def write(path, content):
+    full = os.path.join(BASE, path)
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    with open(full, 'w') as f:
+        f.write(content)
+    print(f"  ✅ {path}")
+
+print("\n🔧 Canopy Complete Patch\n")
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. FULL REWRITE: TorrentListViewModel.swift — multi-selection
+# ══════════════════════════════════════════════════════════════════════
+print("Writing TorrentListViewModel.swift:")
+write("Sources/ViewModels/TorrentListViewModel.swift", r'''// TorrentListViewModel.swift
+
+import Combine
+import SwiftUI
+
+enum FilterCategory: String, CaseIterable {
+    case all = "All"
+    case downloading = "Downloading"
+    case seeding = "Seeding"
+    case paused = "Paused"
+    case finished = "Finished"
+    case error = "Errored"
+}
+
+@MainActor
+final class TorrentListViewModel: ObservableObject {
+    @Published var torrents: [TorrentStatus] = []
+
+    private var cancellables = Set<AnyCancellable>()
+
+    init(engine: TorrentEngine) {
+        engine.$torrents
+            .receive(on: RunLoop.main)
+            .assign(to: &$torrents)
+        engine.startPolling()
+    }
+
+    @Published var selectedFilter: FilterCategory = .all
+    @Published var searchText: String = ""
+    @Published var selectedTorrentIDs: Set<String> = []
+
+    var filtered: [TorrentStatus] {
+        let base = torrents.filter { t in
+            guard !searchText.isEmpty else { return true }
+            return t.name.localizedCaseInsensitiveContains(searchText)
+        }
+        switch selectedFilter {
+        case .all: return base
+        case .downloading: return base.filter { !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata) }
+        case .seeding: return base.filter { !$0.isPaused && $0.state == .seeding }
+        case .paused: return base.filter { $0.isPaused }
+        case .finished: return base.filter { $0.state == .finished || $0.state == .seeding }
+        case .error: return base.filter { $0.errorMessage != nil }
+        }
+    }
+
+    var selectedTorrent: TorrentStatus? {
+        guard let id = selectedTorrentIDs.first else { return nil }
+        return torrents.first { $0.id == id }
+    }
+
+    var selectedTorrents: [TorrentStatus] {
+        torrents.filter { selectedTorrentIDs.contains($0.id) }
+    }
+
+    var hasSelection: Bool { !selectedTorrentIDs.isEmpty }
+    var selectionCount: Int { selectedTorrentIDs.count }
+
+    var totalDownloadRate: Int { torrents.reduce(0) { $0 + $1.downloadRate } }
+    var totalUploadRate: Int { torrents.reduce(0) { $0 + $1.uploadRate } }
+
+    func filterCount(_ cat: FilterCategory) -> Int {
+        switch cat {
+        case .all: return torrents.count
+        case .downloading: return torrents.filter { !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata) }.count
+        case .seeding: return torrents.filter { !$0.isPaused && $0.state == .seeding }.count
+        case .paused: return torrents.filter { $0.isPaused }.count
+        case .finished: return torrents.filter { $0.state == .finished || $0.state == .seeding }.count
+        case .error: return torrents.filter { $0.errorMessage != nil }.count
+        }
+    }
+}
+''')
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. FULL REWRITE: ContentView.swift — multi-select + bottom panel
+# ══════════════════════════════════════════════════════════════════════
+print("Writing ContentView.swift:")
+write("Sources/Views/ContentView.swift", r'''// ContentView.swift — modern minimal transfer workspace
 
 import AppKit
 import ClibtorrentBridge
@@ -755,3 +860,362 @@ private struct UpdateSheet: View {
         }
     }
 }
+''')
+
+# ══════════════════════════════════════════════════════════════════════
+# 3. FULL REWRITE: SidebarView.swift
+# ══════════════════════════════════════════════════════════════════════
+print("Writing SidebarView.swift:")
+write("Sources/Views/SidebarView.swift", r'''// SidebarView.swift — modern minimal navigation
+
+import AppKit
+import SwiftUI
+
+struct SidebarView: View {
+    @ObservedObject var vm: TorrentListViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Canopy")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("BitTorrent client")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+
+            Divider().opacity(0.4)
+
+            List(selection: $vm.selectedFilter) {
+                Section("Transfers") {
+                    ForEach(FilterCategory.allCases, id: \.self) { category in
+                        Label {
+                            HStack(spacing: 8) {
+                                Text(category.rawValue)
+                                    .font(.system(size: 13))
+                                Spacer()
+                                let count = vm.filterCount(category)
+                                if count > 0 {
+                                    Text("\(count)")
+                                        .font(.system(size: 11).monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Color.secondary.opacity(0.12),
+                                            in: Capsule()
+                                        )
+                                }
+                            }
+                        } icon: {
+                            Image(systemName: iconName(for: category))
+                                .symbolRenderingMode(.hierarchical)
+                                .font(.system(size: 14))
+                        }
+                        .tag(category)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+
+            Divider().opacity(0.4)
+
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(CanopyPalette.positive)
+                    .frame(width: 6, height: 6)
+                Text("Session active")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+        }
+        .background(.bar)
+    }
+
+    private func iconName(for category: FilterCategory) -> String {
+        switch category {
+        case .all: return "square.stack.3d.up"
+        case .downloading: return "arrow.down.circle"
+        case .seeding: return "arrow.up.circle"
+        case .paused: return "pause.circle"
+        case .finished: return "checkmark.circle"
+        case .error: return "exclamationmark.triangle"
+        }
+    }
+}
+''')
+
+# ══════════════════════════════════════════════════════════════════════
+# 4. FULL REWRITE: StatusBarView.swift
+# ══════════════════════════════════════════════════════════════════════
+print("Writing StatusBarView.swift:")
+write("Sources/Views/StatusBarView.swift", r'''// StatusBarView.swift — modern minimal session summary
+
+import SwiftUI
+
+struct StatusBarView: View {
+    let downloadRate: Int
+    let uploadRate: Int
+    let torrentCount: Int
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Label(
+                "\(torrentCount) torrent\(torrentCount == 1 ? "" : "s")",
+                systemImage: "square.stack.3d.up"
+            )
+            .foregroundStyle(.secondary)
+            .font(.system(size: 11).monospacedDigit())
+
+            Spacer()
+
+            metric(icon: "arrow.down", value: downloadRate, color: CanopyPalette.download)
+            metric(icon: "arrow.up", value: uploadRate, color: CanopyPalette.upload)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .background(.bar)
+    }
+
+    private func metric(icon: String, value: Int, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .foregroundStyle(value > 0 ? color : Color.secondary)
+                .font(.system(size: 10))
+            Text(formatSpeed(value))
+                .foregroundStyle(value > 0 ? Color.primary : Color.secondary)
+                .font(.system(size: 11).monospacedDigit())
+        }
+    }
+}
+''')
+
+# ══════════════════════════════════════════════════════════════════════
+# 5. PATCH: TorrentEngine.swift — add batch ops + file ops
+# ══════════════════════════════════════════════════════════════════════
+print("Patching TorrentEngine.swift:")
+path = "Sources/Engine/TorrentEngine.swift"
+c = read(path)
+if "pauseSelected" not in c:
+    # Find the last closing brace of the class
+    last_brace = c.rfind("}")
+    insert_at = c.rfind("}", 0, last_brace)
+    c = c[:insert_at] + """
+    // MARK: - File operations
+
+    public func renameFile(_ newName: String, at index: Int, on torrent: TorrentStatus) {
+        guard let handle = torrent.handle else { return }
+        DispatchQueue.global(qos: .utility).async {
+            handle.renameFile(newName, at: Int32(index))
+        }
+    }
+
+    public func fileURL(forFileIndex index: Int, in torrent: TorrentStatus) -> URL? {
+        guard let handle = torrent.handle else { return nil }
+        var size: Int64 = 0
+        var priority: Int32 = 0
+        guard let relPath = handle.filePath(at: Int32(index), size: &size, priority: &priority) else { return nil }
+        return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
+    }
+
+    // MARK: - Batch operations
+
+    func pauseSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { pause(t) }
+    }
+    func resumeSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { resume(t) }
+    }
+    func recheckSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { recheck(t) }
+    }
+    func reannounceSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { reannounce(t) }
+    }
+    func removeSelected(_ torrents: [TorrentStatus], deleteFiles: Bool) {
+        for t in torrents { remove(t, deleteFiles: deleteFiles) }
+    }
+""" + c[insert_at:]
+    write(path, c)
+else:
+    print(f"  ⏭️  TorrentEngine.swift (already has batch ops)")
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. PATCH: LibtorrentWrapper.h — add renameFile
+# ══════════════════════════════════════════════════════════════════════
+print("Patching LibtorrentWrapper.h:")
+path = "Sources/Engine/Bridge/ObjC/include/LibtorrentWrapper.h"
+c = read(path)
+if "renameFile" not in c:
+    c = c.replace(
+        "- (void)setFilePriority:(int)priority atIndex:(int)index;",
+        "- (void)setFilePriority:(int)priority atIndex:(int)index;\n- (void)renameFile:(NSString *)newName atIndex:(int)index;",
+        1)
+    write(path, c)
+else:
+    print(f"  ⏭️  LibtorrentWrapper.h (already has renameFile)")
+
+# ══════════════════════════════════════════════════════════════════════
+# 7. PATCH: LibtorrentWrapper.mm — add renameFile impl
+# ══════════════════════════════════════════════════════════════════════
+print("Patching LibtorrentWrapper.mm:")
+path = "Sources/Engine/Bridge/ObjC/LibtorrentWrapper.mm"
+c = read(path)
+if "renameFile" not in c:
+    c = c.replace(
+        """- (void)setFilePriority:(int)priority atIndex:(int)index {
+    _handle.file_priority(lt::file_index_t{index},
+                          lt::download_priority_t{(std::uint8_t)priority});
+}""",
+        """- (void)setFilePriority:(int)priority atIndex:(int)index {
+    _handle.file_priority(lt::file_index_t{index},
+                          lt::download_priority_t{(std::uint8_t)priority});
+}
+
+- (void)renameFile:(NSString *)newName atIndex:(int)index {
+    if (index < 0 || !_handle.is_valid()) return;
+    _handle.rename_file(lt::file_index_t{index},
+                        std::string(newName.UTF8String));
+}""",
+        1)
+    write(path, c)
+else:
+    print(f"  ⏭️  LibtorrentWrapper.mm (already has renameFile)")
+
+# ══════════════════════════════════════════════════════════════════════
+# 8. PATCH: FileTreeViewModel.swift — add fileURL + renameFile
+# ══════════════════════════════════════════════════════════════════════
+print("Patching FileTreeViewModel.swift:")
+path = "Sources/ViewModels/FileTreeViewModel.swift"
+c = read(path)
+if "func fileURL(for node" not in c:
+    c = c.replace(
+        "public func setPriority(_ priority: FilePriority, on node: FileNode) {",
+        """public func fileURL(for node: FileNode) -> URL? {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return nil }
+    var size: Int64 = 0
+    var priority: Int32 = 0
+    guard let relPath = handle.filePath(at: Int32(idx), size: &size, priority: &priority) else { return nil }
+    return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
+}
+
+public func renameFile(_ newName: String, on node: FileNode) {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+    handle.renameFile(newName, at: Int32(idx))
+    node.name = newName
+    objectWillChange.send()
+}
+
+public func setPriority(_ priority: FilePriority, on node: FileNode) {""",
+        1)
+    write(path, c)
+else:
+    print(f"  ⏭️  FileTreeViewModel.swift (already has fileURL)")
+
+# ══════════════════════════════════════════════════════════════════════
+# 9. PATCH: FilesTab.swift — add AppKit import + context menu + rename dialog
+# ══════════════════════════════════════════════════════════════════════
+print("Patching FilesTab.swift:")
+path = "Sources/Views/FilesTab.swift"
+c = read(path)
+
+# Add AppKit import
+if "import AppKit" not in c:
+    c = c.replace(
+        "import Combine\nimport SwiftUI",
+        "import AppKit\nimport Combine\nimport SwiftUI",
+        1)
+
+# Add context menu + rename dialog
+if ".contextMenu" not in c:
+    # Insert context menu before the Divider that follows onTapGesture
+    old = """        .onTapGesture(count: 2) {
+            guard node.isFolder else { return }
+            withAnimation(.easeInOut(duration: 0.14)) {
+                node.isExpanded.toggle()
+            }
+        }
+        Divider().opacity(0.35)"""
+
+    new = """        .onTapGesture(count: 2) {
+            guard node.isFolder else { return }
+            withAnimation(.easeInOut(duration: 0.14)) {
+                node.isExpanded.toggle()
+            }
+        }
+        .contextMenu {
+            if !node.isFolder, node.fileIndex != nil {
+                Button("Open") {
+                    if let url = vm.fileURL(for: node) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("Open in Finder") {
+                    if let url = vm.fileURL(for: node) {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                }
+                Divider()
+                Button("Rename\\u{2026}") {
+                    showRenameDialog(for: node)
+                }
+            } else if node.isFolder {
+                Button("Open in Finder") {
+                    if let url = vm.fileURL(for: node) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        }
+        Divider().opacity(0.35)"""
+
+    c = c.replace(old, new, 1)
+
+    # Add rename dialog method — insert before priorityMenu
+    old2 = "    private var priorityMenu: some View {"
+    new2 = """    private func showRenameDialog(for node: FileNode) {
+        let alert = NSAlert()
+        alert.messageText = "Rename File"
+        alert.informativeText = "Enter a new name for \\\"\\(node.name)\\\""
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.stringValue = node.name
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newName.isEmpty, newName != node.name else { return }
+            vm.renameFile(newName, on: node)
+        }
+    }
+
+    private var priorityMenu: some View {"""
+
+    c = c.replace(old2, new2, 1)
+    write(path, c)
+else:
+    print(f"  ⏭️  FilesTab.swift (already has context menu)")
+
+print("\n📋 All changes applied:")
+print("  • Multi-selection (Set<String>) + bulk operations")
+print("  • Bottom inspector panel with smooth draggable divider")
+print("  • Widened column resize ranges")
+print("  • Modern minimal sidebar/statusbar")
+print("  • File context menu: Open, Open in Finder, Rename")
+print("  • Rename via libtorrent rename_file bridge")
+print("\nBuild with: swift build && open Canopy.app")
