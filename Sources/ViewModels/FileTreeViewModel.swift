@@ -69,8 +69,17 @@ public final class FileTreeViewModel: ObservableObject {
 
 public func renameFile(_ newName: String, on node: FileNode) {
     guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+    let oldName = node.name
     handle.renameFile(newName, at: Int32(idx))
     node.name = newName
+    // Also rename on disk immediately as a fallback
+    if let oldURL = fileURL(for: node) {
+        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(newName)
+        if oldURL.path != newURL.path {
+            try? FileManager.default.moveItem(at: oldURL, to: newURL)
+        }
+    }
+    _ = oldName
     objectWillChange.send()
 }
 

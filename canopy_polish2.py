@@ -1,4 +1,84 @@
-// FilesTab.swift — compact live file inspector
+#!/usr/bin/env python3
+"""
+Canopy UI Polish 2 — expand delay, divider width, selection, rename persistence
+Run from: /Users/amm/Canopy-main
+"""
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+def read(p):
+    with open(os.path.join(BASE, p)) as f:
+        return f.read()
+
+def write(p, c):
+    with open(os.path.join(BASE, p), 'w') as f:
+        f.write(c)
+    print(f"  ✅ {p}")
+
+print("\n🔧 Canopy UI Polish 2\n")
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. ContentView.swift — divider 3px, wider hit area
+# ══════════════════════════════════════════════════════════════════════
+c = read('Sources/Views/ContentView.swift')
+# Change divider height from 1 to 3
+c = c.replace(
+    "heightAnchor.constraint(equalToConstant: 1).isActive = true",
+    "heightAnchor.constraint(equalToConstant: 3).isActive = true"
+)
+# Wider hit area
+c = c.replace(
+    "let hitRect = NSRect(x: 0, y: -5, width: bounds.width, height: 11)",
+    "let hitRect = NSRect(x: 0, y: -6, width: bounds.width, height: 15)"
+)
+write('Sources/Views/ContentView.swift', c)
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. FileTreeViewModel.swift — fix rename to actually rename on disk
+# ══════════════════════════════════════════════════════════════════════
+c = read('Sources/ViewModels/FileTreeViewModel.swift')
+
+old_rename = """public func renameFile(_ newName: String, on node: FileNode) {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+    handle.renameFile(newName, at: Int32(idx))
+    node.name = newName
+    objectWillChange.send()
+}"""
+
+new_rename = """public func renameFile(_ newName: String, on node: FileNode) {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+    let oldName = node.name
+    handle.renameFile(newName, at: Int32(idx))
+    node.name = newName
+    // Also rename on disk immediately as a fallback
+    if let oldURL = fileURL(for: node) {
+        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(newName)
+        if oldURL.path != newURL.path {
+            try? FileManager.default.moveItem(at: oldURL, to: newURL)
+        }
+    }
+    _ = oldName
+    objectWillChange.send()
+}"""
+
+if old_rename in c:
+    c = c.replace(old_rename, new_rename, 1)
+    write('Sources/ViewModels/FileTreeViewModel.swift', c)
+else:
+    print("  ⏭️  FileTreeViewModel.swift renameFile (pattern not found, trying alternate)")
+    # Try a simpler match
+    c = c.replace(
+        'handle.renameFile(newName, at: Int32(idx))\n    node.name = newName\n    objectWillChange.send()',
+        'handle.renameFile(newName, at: Int32(idx))\n    node.name = newName\n    if let oldURL = fileURL(for: node) {\n        let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(newName)\n        if oldURL.path != newURL.path {\n            try? FileManager.default.moveItem(at: oldURL, to: newURL)\n        }\n    }\n    objectWillChange.send()'
+    )
+    write('Sources/ViewModels/FileTreeViewModel.swift', c)
+
+# ══════════════════════════════════════════════════════════════════════
+# 3. FilesTab.swift — full rewrite with multi-select, instant expand,
+#    native selection colors, 3s refresh, proper row width
+# ══════════════════════════════════════════════════════════════════════
+write('Sources/Views/FilesTab.swift', r'''// FilesTab.swift — compact live file inspector
 
 import AppKit
 import Combine
@@ -297,3 +377,12 @@ private struct FileInspectorRow: View {
         return Color.secondary.opacity(0.45)
     }
 }
+''')
+
+print("\n📋 Changes:")
+print("  1. Divider: 3px height, 15px hit area")
+print("  2. Expand delay: refresh timer 1s → 3s, no animation on toggle")
+print("  3. Selection: Set<UUID> multi-select, cmd-click, accent blue")
+print("  4. Row width: .frame(maxWidth: .infinity) — full width like torrent table")
+print("  5. Rename: FileManager.moveItem fallback to rename on disk immediately")
+print("\nBuild with: swift build")

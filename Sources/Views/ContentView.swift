@@ -655,11 +655,11 @@ final class DividerNSView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
         translatesAutoresizingMaskIntoConstraints = false
-        heightAnchor.constraint(equalToConstant: 1).isActive = true
+        heightAnchor.constraint(equalToConstant: 3).isActive = true
     }
 
     override func resetCursorRects() {
-        let hitRect = NSRect(x: 0, y: -5, width: bounds.width, height: 11)
+        let hitRect = NSRect(x: 0, y: -6, width: bounds.width, height: 15)
         addCursorRect(hitRect, cursor: .resizeUpDown)
     }
 
