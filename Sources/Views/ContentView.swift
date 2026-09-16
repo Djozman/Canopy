@@ -308,7 +308,6 @@ struct ContentView: View {
                 .background(.bar)
                 Divider().opacity(0.4)
                 TorrentDetailView(torrent: torrent, engine: engine)
-                    .id(torrent.id)
             }
         } else {
             VStack(spacing: 12) {
