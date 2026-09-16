@@ -1,4 +1,45 @@
-// FilesTab.swift — compact live file inspector
+#!/usr/bin/env python3
+"""
+Canopy UI Polish — divider, file rows, instant expand, inline rename, selection
+Run from: /Users/amm/Canopy-main
+"""
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+def read(p):
+    with open(os.path.join(BASE, p)) as f:
+        return f.read()
+
+def write(p, c):
+    with open(os.path.join(BASE, p), 'w') as f:
+        f.write(c)
+    print(f"  ✅ {p}")
+
+print("\n🔧 Canopy UI Polish\n")
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. ContentView.swift — remove visible divider line, use invisible drag bar
+# ══════════════════════════════════════════════════════════════════════
+c = read('Sources/Views/ContentView.swift')
+
+# Make divider invisible (no gray line)
+c = c.replace(
+    "layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor",
+    "layer?.backgroundColor = NSColor.clear.cgColor"
+)
+# Increase drag hit area
+c = c.replace(
+    "let hitRect = NSRect(x: 0, y: -4.5, width: bounds.width, height: 10)",
+    "let hitRect = NSRect(x: 0, y: -5, width: bounds.width, height: 11)"
+)
+
+write('Sources/Views/ContentView.swift', c)
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. FilesTab.swift — full rewrite: instant expand, selection, inline rename
+# ══════════════════════════════════════════════════════════════════════
+write('Sources/Views/FilesTab.swift', r'''// FilesTab.swift — compact live file inspector
 
 import AppKit
 import Combine
@@ -283,3 +324,13 @@ private struct FileInspectorRow: View {
         return Color.secondary.opacity(0.45)
     }
 }
+''')
+
+print("\n📋 Changes:")
+print("  1. Divider: invisible (no gray line), 11px drag hit area")
+print("  2. Expand/collapse: instant (no withAnimation)")
+print("  3. Indentation: 18px per depth (like Finder list view)")
+print("  4. Selection: click to select, accent blue highlight")
+print("  5. Inline rename: text field replaces name in-place")
+print("  6. Double-click file: opens it directly")
+print("\nBuild with: swift build")
