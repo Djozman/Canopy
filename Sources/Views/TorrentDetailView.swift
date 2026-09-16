@@ -27,7 +27,6 @@ struct TorrentDetailView: View {
         VStack(spacing: 0) {
             inspectorHeader
             Divider()
-
             Picker("Section", selection: $tab) {
                 ForEach(DetailTab.allCases, id: \.self) { tab in
                     Text(tab.rawValue).tag(tab)
@@ -37,16 +36,13 @@ struct TorrentDetailView: View {
             .labelsHidden()
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-
             Divider()
-
             Group {
                 switch tab {
                 case .overview:
                     OverviewTab(torrent: torrent)
                 case .files:
                     FilesTab(vm: fileTreeVM)
-                        
                 case .peers:
                     PeersTab(torrent: torrent)
                 case .trackers:
@@ -68,7 +64,6 @@ struct TorrentDetailView: View {
                     .foregroundStyle(torrent.statusColor)
                     .font(.system(size: 18))
                     .frame(width: 26, height: 26)
-
                 VStack(alignment: .leading, spacing: 2) {
                     Text(torrent.name)
                         .font(.headline)
@@ -78,9 +73,7 @@ struct TorrentDetailView: View {
                         .foregroundStyle(torrent.statusColor)
                         .lineLimit(1)
                 }
-
                 Spacer(minLength: 4)
-
                 Button {
                     torrent.isPaused ? engine.resume(torrent) : engine.pause(torrent)
                 } label: {
@@ -89,7 +82,6 @@ struct TorrentDetailView: View {
                 }
                 .buttonStyle(.borderless)
                 .help(torrent.isPaused ? "Resume" : "Pause")
-
                 Button {
                     NSWorkspace.shared.open(URL(fileURLWithPath: torrent.savePath))
                 } label: {
@@ -99,7 +91,6 @@ struct TorrentDetailView: View {
                 .buttonStyle(.borderless)
                 .help("Open save folder")
             }
-
             HStack(spacing: 8) {
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
@@ -110,12 +101,10 @@ struct TorrentDetailView: View {
                     }
                 }
                 .frame(height: 6)
-
                 Text(String(format: "%.1f%%", clampedProgress * 100))
                     .font(.caption.monospacedDigit().weight(.medium))
                     .frame(width: 46, alignment: .trailing)
             }
-
             HStack(spacing: 14) {
                 Label(formatSpeed(torrent.downloadRate), systemImage: "arrow.down")
                     .foregroundStyle(torrent.downloadRate > 0 ? CanopyPalette.download : .secondary)
@@ -142,8 +131,7 @@ struct TorrentDetailView: View {
         case .downloading, .downloadingMetadata: return "arrow.down.circle.fill"
         case .seeding: return "arrow.up.circle.fill"
         case .finished: return "checkmark.circle.fill"
-        case .checkingFiles, .checkingResumeData, .allocating:
-            return "arrow.triangle.2.circlepath.circle.fill"
+        case .checkingFiles, .checkingResumeData, .allocating: return "arrow.triangle.2.circlepath.circle.fill"
         }
     }
 }
@@ -164,17 +152,14 @@ private struct OverviewTab: View {
                         InspectorRow("Remaining", formatETA(torrent.etaSeconds))
                     }
                 }
-
                 InspectorSection(title: "Connections") {
                     InspectorRow("Seeds", "\(torrent.numSeeds)")
                     InspectorRow("Peers", "\(torrent.numPeers)")
                 }
-
                 InspectorSection(title: "Location") {
                     InspectorRow("Save path", torrent.savePath, selectable: true)
                     InspectorRow("Info hash", torrent.id, selectable: true)
                 }
-
                 if let error = torrent.errorMessage {
                     InspectorSection(title: "Error") {
                         Text(error)
@@ -203,13 +188,15 @@ private struct InspectorSection<Content: View>: View {
             Text(title.uppercased())
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-            VStack(spacing: 8) { content }
-                .padding(10)
-                .background(CanopyPalette.surface, in: RoundedRectangle(cornerRadius: 8))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(CanopyPalette.border.opacity(0.6), lineWidth: 1)
-                }
+            VStack(spacing: 8) {
+                content
+            }
+            .padding(10)
+            .background(CanopyPalette.surface, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(CanopyPalette.border.opacity(0.6), lineWidth: 1)
+            }
         }
     }
 }
@@ -295,12 +282,12 @@ private struct TrackersTab: View {
 
     private func refresh() {
         guard let handle = torrent.handle else { rows = []; return }
-        rows = (0..<Int(handle.trackerCount)).compactMap { index in
-            guard let info = handle.trackerInfo(at: Int32(index)) else { return nil }
+        rows = (0..<handle.trackerCount).map { i in
+            let info = handle.trackerInfo(at: i) ?? [:]
             return TrackerRow(
-                id: index,
+                id: Int(i),
                 url: info["url"] as? String ?? "",
-                tier: (info["tier"] as? NSNumber)?.intValue ?? 0,
+                tier: info["tier"] as? Int ?? 0,
                 working: info["working"] as? Bool ?? false
             )
         }
@@ -378,16 +365,16 @@ private struct PeersTab: View {
 
     private func refresh() {
         guard let handle = torrent.handle else { rows = []; return }
-        rows = (0..<Int(handle.peerCount)).compactMap { index in
-            guard let info = handle.peerInfo(at: Int32(index)) else { return nil }
+        rows = (0..<handle.peerCount).map { i in
+            let info = handle.peerInfo(at: i) ?? [:]
             return PeerRow(
-                id: index,
+                id: Int(i),
                 ip: info["ip"] as? String ?? "",
-                port: (info["port"] as? NSNumber)?.intValue ?? 0,
+                port: info["port"] as? Int ?? 0,
                 client: info["client"] as? String ?? "",
-                progress: (info["progress"] as? NSNumber)?.doubleValue ?? 0,
-                downSpeed: (info["downSpeed"] as? NSNumber)?.intValue ?? 0,
-                upSpeed: (info["upSpeed"] as? NSNumber)?.intValue ?? 0
+                progress: info["progress"] as? Double ?? 0,
+                downSpeed: info["downSpeed"] as? Int ?? 0,
+                upSpeed: info["upSpeed"] as? Int ?? 0
             )
         }
     }
@@ -405,56 +392,35 @@ private struct PeerRow: Identifiable {
 
 private struct PiecesTab: View {
     let torrent: TorrentStatus
-    @State private var pieceSize: Int64 = 0
     @State private var bits: [Bool] = []
-    @State private var timer: Timer?
+    @State private var pieceSize: Int64 = 0
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if bits.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "square.grid.3x3").font(.title2).foregroundStyle(.tertiary)
-                        Text("Piece map unavailable").font(.caption).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 40)
-                } else {
-                    let complete = bits.filter { $0 }.count
-                    Text("\(complete) of \(bits.count) pieces · \(formatBytes(pieceSize)) each")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 9, maximum: 9), spacing: 2)],
-                        spacing: 2
-                    ) {
-                        ForEach(bits.indices, id: \.self) { index in
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(bits[index] ? CanopyPalette.positive : Color.primary.opacity(0.10))
-                                .frame(width: 9, height: 9)
+        Group {
+            if bits.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "square.grid.3x3").font(.title2).foregroundStyle(.tertiary)
+                    Text("No piece data").font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.adaptive(minimum: 12), spacing: 2), count: 30), spacing: 2) {
+                        ForEach(bits.indices, id: \.self) { i in
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(bits[i] ? CanopyPalette.positive : Color.secondary.opacity(0.2))
+                                .frame(width: 10, height: 10)
                         }
                     }
+                    .padding(10)
                 }
             }
-            .padding(12)
         }
-        .onAppear { start() }
-        .onDisappear { timer?.invalidate(); timer = nil }
-    }
-
-    private func start() {
-        refresh()
-        timer?.invalidate()
-        let newTimer = Timer(timeInterval: 4, repeats: true) { _ in refresh() }
-        RunLoop.main.add(newTimer, forMode: .common)
-        timer = newTimer
+        .onAppear { refresh() }
     }
 
     private func refresh() {
-        guard let handle = torrent.handle, handle.pieceCount > 0 else {
-            bits = []
-            return
-        }
+        guard let handle = torrent.handle, handle.pieceCount > 0 else { bits = []; return }
         pieceSize = handle.pieceSize
         bits = handle.pieceDownloadedBits().map { $0 != 0 }
     }
