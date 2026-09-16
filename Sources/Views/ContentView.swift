@@ -611,6 +611,7 @@ struct ResizeDividerView: NSViewRepresentable {
         let v = DividerNSView()
         v.minHeight = minHeight
         v.maxHeight = maxHeight
+        v.currentHeight = height
         v.onHeightChange = { newHeight in
             var t = Transaction()
             t.animation = nil
@@ -618,7 +619,6 @@ struct ResizeDividerView: NSViewRepresentable {
                 height = newHeight
             }
         }
-        v.onDragStart = { startHeight = height }
         v.onDragEnd = {
             UserDefaults.standard.set(Double(height), forKey: "canopyInspectorHeight")
         }
@@ -628,65 +628,50 @@ struct ResizeDividerView: NSViewRepresentable {
     func updateNSView(_ nsView: DividerNSView, context: Context) {
         nsView.minHeight = minHeight
         nsView.maxHeight = maxHeight
+        nsView.currentHeight = height
     }
 }
 
 final class DividerNSView: NSView {
     var minHeight: CGFloat = 120
     var maxHeight: CGFloat = 700
+    var currentHeight: CGFloat = 280
     var onHeightChange: ((CGFloat) -> Void)?
-    var onDragStart: (() -> Void)?
     var onDragEnd: (() -> Void)?
     private var dragStartY: CGFloat = 0
-    private var startHeight: CGFloat = 0
+    private var dragStartHeight: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        setup()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        setup()
     }
 
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: 1)
+    private func setup() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        translatesAutoresizingMaskIntoConstraints = false
+        heightAnchor.constraint(equalToConstant: 1).isActive = true
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .resizeUpDown)
+        let hitRect = NSRect(x: 0, y: -4.5, width: bounds.width, height: 10)
+        addCursorRect(hitRect, cursor: .resizeUpDown)
     }
 
     override func mouseDown(with event: NSEvent) {
         dragStartY = NSEvent.mouseLocation.y
-        startHeight = 0
-        onDragStart?()
-        // Capture current height from the binding via the window
-        if window != nil {
-            // Find the inspector view below us
-            let ourFrameInWindow = convert(bounds, to: nil)
-            // The inspector is the view directly below us in the VStack
-            // We can get the height from our superview's subviews
-            if let sv = superview {
-                for sub in sv.subviews {
-                    if sub.frame.minY < ourFrameInWindow.minY {
-                        startHeight = sub.frame.height
-                        break
-                    }
-                }
-            }
-        }
-        if startHeight == 0 { startHeight = 280 }
+        dragStartHeight = currentHeight
     }
 
     override func mouseDragged(with event: NSEvent) {
         let currentY = NSEvent.mouseLocation.y
         let delta = currentY - dragStartY
-        // In macOS, dragging up (positive delta) should increase height
-        let newHeight = startHeight + delta
+        let newHeight = dragStartHeight + delta
         let clamped = max(minHeight, min(maxHeight, newHeight))
         onHeightChange?(clamped)
     }
