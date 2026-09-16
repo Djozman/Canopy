@@ -9,7 +9,7 @@ struct FilesTab: View {
     @State private var expanded = false
     @State private var selectedNodeIDs: Set<UUID> = []
     @State private var renamingNodeID: UUID?
-    private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+    // No timer — updates come from TorrentDetailView when torrent changes
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,7 +66,6 @@ struct FilesTab: View {
                 }
             }
         }
-        .onReceive(refreshTimer) { _ in vm.refresh() }
     }
 
     @ViewBuilder

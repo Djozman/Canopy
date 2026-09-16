@@ -26,13 +26,23 @@ public final class FileTreeViewModel: ObservableObject {
     }
 
     public func refresh(torrent: TorrentStatus) {
-        if torrent.id != lastTorrentId {
+        let isSameTorrent = torrent.id == lastTorrentId
+        if !isSameTorrent {
             lastTorrentId = torrent.id
             treeBuilt = false
             renamedPaths.removeAll()
         }
+        // Always update the torrent ref (for fresh handle), but only
+        // rebuild the tree structure if it's a different torrent
         self.torrent = torrent
-        refreshFiles()
+        if isSameTorrent {
+            // Same torrent: just patch progress, preserve tree + renames
+            if treeBuilt {
+                refreshFiles()
+            }
+        } else {
+            refreshFiles()
+        }
     }
 
     public func refresh() {
