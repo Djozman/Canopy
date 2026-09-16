@@ -46,7 +46,7 @@ struct TorrentDetailView: View {
                     OverviewTab(torrent: torrent)
                 case .files:
                     FilesTab(vm: fileTreeVM)
-                        .onAppear { fileTreeVM.refresh(torrent: torrent) }
+                        
                 case .peers:
                     PeersTab(torrent: torrent)
                 case .trackers:
