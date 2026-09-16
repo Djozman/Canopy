@@ -144,35 +144,7 @@ struct ContentView: View {
     // MARK: - Smooth resize divider
 
     private var resizeDivider: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor).opacity(0.5))
-            .frame(height: 1)
-            .overlay {
-                Rectangle()
-                    .fill(.clear)
-                    .frame(height: 10)
-                    .contentShape(Rectangle())
-                    .onHover { hovering in
-                        if hovering { NSCursor.resizeUpDown.set() }
-                        else { NSCursor.arrow.set() }
-                    }
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { value in
-                                let newHeight = dragStartHeight - value.translation.height
-                                let clamped = max(120, min(700, newHeight))
-                                var t = Transaction()
-                                t.animation = nil
-                                withTransaction(t) {
-                                    inspectorHeight = clamped
-                                }
-                            }
-                            .onEnded { _ in
-                                dragStartHeight = inspectorHeight
-                                UserDefaults.standard.set(Double(inspectorHeight), forKey: "canopyInspectorHeight")
-                            }
-                    )
-            }
+        ResizeDividerView(height: $inspectorHeight, startHeight: $dragStartHeight)
     }
 
     // MARK: - Header
@@ -624,6 +596,103 @@ struct ContentView: View {
                 pendingRemovals = [torrent]
             }
         }
+    }
+}
+
+// MARK: - Native resize divider (bypasses SwiftUI gestures for smooth dragging)
+
+struct ResizeDividerView: NSViewRepresentable {
+    @Binding var height: CGFloat
+    @Binding var startHeight: CGFloat
+    let minHeight: CGFloat = 120
+    let maxHeight: CGFloat = 700
+
+    func makeNSView(context: Context) -> DividerNSView {
+        let v = DividerNSView()
+        v.minHeight = minHeight
+        v.maxHeight = maxHeight
+        v.onHeightChange = { newHeight in
+            var t = Transaction()
+            t.animation = nil
+            withTransaction(t) {
+                height = newHeight
+            }
+        }
+        v.onDragStart = { startHeight = height }
+        v.onDragEnd = {
+            UserDefaults.standard.set(Double(height), forKey: "canopyInspectorHeight")
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: DividerNSView, context: Context) {
+        nsView.minHeight = minHeight
+        nsView.maxHeight = maxHeight
+    }
+}
+
+final class DividerNSView: NSView {
+    var minHeight: CGFloat = 120
+    var maxHeight: CGFloat = 700
+    var onHeightChange: ((CGFloat) -> Void)?
+    var onDragStart: (() -> Void)?
+    var onDragEnd: (() -> Void)?
+    private var dragStartY: CGFloat = 0
+    private var startHeight: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 1)
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeUpDown)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartY = NSEvent.mouseLocation.y
+        startHeight = 0
+        onDragStart?()
+        // Capture current height from the binding via the window
+        if window != nil {
+            // Find the inspector view below us
+            let ourFrameInWindow = convert(bounds, to: nil)
+            // The inspector is the view directly below us in the VStack
+            // We can get the height from our superview's subviews
+            if let sv = superview {
+                for sub in sv.subviews {
+                    if sub.frame.minY < ourFrameInWindow.minY {
+                        startHeight = sub.frame.height
+                        break
+                    }
+                }
+            }
+        }
+        if startHeight == 0 { startHeight = 280 }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let currentY = NSEvent.mouseLocation.y
+        let delta = currentY - dragStartY
+        // In macOS, dragging up (positive delta) should increase height
+        let newHeight = startHeight + delta
+        let clamped = max(minHeight, min(maxHeight, newHeight))
+        onHeightChange?(clamped)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onDragEnd?()
     }
 }
 

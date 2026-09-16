@@ -26,7 +26,6 @@ struct FilesTab: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-
                 Button {
                     expanded.toggle()
                     withAnimation(.easeInOut(duration: 0.16)) {
@@ -41,9 +40,7 @@ struct FilesTab: View {
             .padding(.horizontal, 10)
             .frame(height: 34)
             .background(CanopyPalette.surface)
-
             Divider()
-
             if vm.roots.isEmpty {
                 VStack(spacing: 8) {
                     ProgressView()
@@ -105,7 +102,6 @@ private struct FileInspectorRow: View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Color.clear.frame(width: CGFloat(depth) * 14)
-
                 if node.isFolder {
                     Button {
                         withAnimation(.easeInOut(duration: 0.14)) {
@@ -122,16 +118,13 @@ private struct FileInspectorRow: View {
                 } else {
                     Color.clear.frame(width: 22, height: 28)
                 }
-
                 NativeCheckbox(state: node.checkState) {
                     vm.toggleCheck(node)
                 }
-
                 Image(systemName: node.isFolder ? "folder.fill" : fileIcon(node.name))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(node.isFolder ? CanopyPalette.warning : Color.secondary)
                     .frame(width: 16)
-
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(node.name)
@@ -143,7 +136,6 @@ private struct FileInspectorRow: View {
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-
                     HStack(spacing: 7) {
                         GeometryReader { geometry in
                             ZStack(alignment: .leading) {
@@ -154,12 +146,10 @@ private struct FileInspectorRow: View {
                             }
                         }
                         .frame(height: 5)
-
                         Text(String(format: "%.1f%%", node.progress * 100))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(width: 39, alignment: .trailing)
-
                         if !node.isFolder {
                             priorityMenu
                         }
@@ -173,11 +163,35 @@ private struct FileInspectorRow: View {
             .onHover { hovering = $0 }
             .onTapGesture(count: 2) {
                 guard node.isFolder else { return }
-                withAnimation(.easeInOut(duration: 0.14)) { node.isExpanded.toggle() }
+                withAnimation(.easeInOut(duration: 0.14)) {
+                    node.isExpanded.toggle()
+                }
             }
-
+            .contextMenu {
+                if !node.isFolder, node.fileIndex != nil {
+                    Button("Open") {
+                        if let url = vm.fileURL(for: node) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    Button("Open in Finder") {
+                        if let url = vm.fileURL(for: node) {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                    }
+                    Divider()
+                    Button("Rename\u{2026}") {
+                        showRenameDialog(for: node)
+                    }
+                } else if node.isFolder {
+                    Button("Open in Finder") {
+                        if let url = vm.fileURL(for: node) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
             Divider().opacity(0.35)
-
             if node.isFolder, node.isExpanded, let children = node.children {
                 ForEach(children) { child in
                     FileInspectorRow(node: child, depth: depth + 1, vm: vm)
@@ -203,7 +217,6 @@ private struct FileInspectorRow: View {
             vm.renameFile(newName, on: node)
         }
     }
-
 
     private var priorityMenu: some View {
         Menu {
