@@ -58,9 +58,6 @@ struct TorrentDetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(CanopyPalette.canvas)
-        .onChange(of: torrent.totalDone) { _, _ in
-            fileTreeVM.refresh(torrent: torrent)
-        }
     }
 
     private var inspectorHeader: some View {
