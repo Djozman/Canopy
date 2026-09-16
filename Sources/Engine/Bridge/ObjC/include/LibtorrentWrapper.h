@@ -57,6 +57,7 @@ typedef NS_ENUM(int, LTAlertType) {
                                   size:(int64_t *)outSize
                               priority:(int *)outPriority;
 - (void)setFilePriority:(int)priority atIndex:(int)index;
+- (void)renameFile:(NSString *)newName atIndex:(int)index;
 
 @property (readonly) int trackerCount;
 - (nullable NSDictionary *)trackerInfoAtIndex:(int)index;

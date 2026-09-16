@@ -1,4 +1,4 @@
-// ContentView.swift — native macOS transfer workspace
+// ContentView.swift — modern minimal transfer workspace
 
 import AppKit
 import ClibtorrentBridge
@@ -11,10 +11,12 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showUpdateSheet = false
     @State private var showInspector = true
-    @State private var pendingRemoval: TorrentStatus?
+    @State private var inspectorHeight: CGFloat = 280
+    @State private var dragStartHeight: CGFloat = 280
+    @State private var pendingRemovals: [TorrentStatus] = []
+    @State private var deleteWithData = false
     @FocusState private var searchFocused: Bool
     @State private var sortOrder = [KeyPathComparator(\TorrentStatus.name)]
-
     let engine: TorrentEngine
 
     init(engine: TorrentEngine) {
@@ -29,9 +31,16 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 workspaceHeader
-                Divider()
+                Divider().opacity(0.4)
                 transferTable
-                Divider()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if showInspector {
+                    resizeDivider
+                    inspectorContent
+                        .frame(height: inspectorHeight)
+                        .animation(nil, value: inspectorHeight)
+                }
+                Divider().opacity(0.4)
                 StatusBarView(
                     downloadRate: vm.totalDownloadRate,
                     uploadRate: vm.totalUploadRate,
@@ -40,10 +49,6 @@ struct ContentView: View {
             }
             .background(CanopyPalette.canvas)
             .toolbar { workspaceToolbar }
-            .inspector(isPresented: $showInspector) {
-                inspectorContent
-                    .inspectorColumnWidth(min: 340, ideal: 430, max: 600)
-            }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1_100, minHeight: 680)
@@ -60,29 +65,44 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showSettings) { SettingsView(engine: engine) }
-        .sheet(isPresented: $showUpdateSheet) { UpdateSheet(updater: updater) }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(engine: engine)
+        }
+        .sheet(isPresented: $showUpdateSheet) {
+            UpdateSheet(updater: updater)
+        }
         .confirmationDialog(
-            "Remove \(pendingRemoval?.name ?? "torrent")?",
+            pendingRemovals.count == 1
+                ? "Remove \"\(pendingRemovals[0].name)\"?"
+                : "Remove \(pendingRemovals.count) torrents?",
             isPresented: Binding(
-                get: { pendingRemoval != nil },
-                set: { if !$0 { pendingRemoval = nil } }
+                get: { !pendingRemovals.isEmpty },
+                set: { if !$0 { pendingRemovals = [] } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Remove Torrent") {
-                if let torrent = pendingRemoval { engine.remove(torrent) }
-                pendingRemoval = nil
+            let label = pendingRemovals.count == 1 ? "Torrent" : "Torrents"
+            Button("Remove \(label)") {
+                engine.removeSelected(pendingRemovals, deleteFiles: false)
+                pendingRemovals = []
             }
-            Button("Remove Torrent and Data", role: .destructive) {
-                if let torrent = pendingRemoval { engine.remove(torrent, deleteFiles: true) }
-                pendingRemoval = nil
+            Button("Remove \(label) and Data", role: .destructive) {
+                engine.removeSelected(pendingRemovals, deleteFiles: true)
+                pendingRemovals = []
             }
-            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+            Button("Cancel", role: .cancel) {
+                pendingRemovals = []
+            }
         } message: {
-            Text("Removing downloaded data cannot be undone.")
+            if pendingRemovals.count == 1 {
+                Text("Removing downloaded data cannot be undone.")
+            } else {
+                Text("Removing \(pendingRemovals.count) torrents. Downloaded data deletion cannot be undone.")
+            }
         }
         .onAppear {
+            let saved = UserDefaults.standard.double(forKey: "canopyInspectorHeight")
+            if saved > 100 { inspectorHeight = saved; dragStartHeight = saved }
             Task { await updater.checkForUpdate() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openAddTorrent)) { _ in
@@ -102,14 +122,12 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .focusTorrentSearch)) { _ in
             searchFocused = true
         }
-        .onChange(of: vm.selectedTorrentID) { _, newValue in
-            if newValue != nil { showInspector = true }
+        .onChange(of: vm.selectedTorrentIDs) { _, newValue in
+            if !newValue.isEmpty { showInspector = true }
         }
         .onChange(of: vm.selectedFilter) { _, _ in
-            if let selected = vm.selectedTorrentID,
-               !vm.filtered.contains(where: { $0.id == selected }) {
-                vm.selectedTorrentID = nil
-            }
+            let filteredIDs = Set(vm.filtered.map { $0.id })
+            vm.selectedTorrentIDs = vm.selectedTorrentIDs.intersection(filteredIDs)
         }
         .onExitCommand {
             if searchFocused || !vm.searchText.isEmpty {
@@ -119,33 +137,85 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Sorted torrents
+
     private var sortedTorrents: [TorrentStatus] {
         guard !sortOrder.isEmpty else { return vm.filtered }
         return vm.filtered.sorted(using: sortOrder)
     }
 
+    // MARK: - Smooth resize divider
+
+    private var resizeDivider: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.5))
+            .frame(height: 1)
+            .overlay {
+                Rectangle()
+                    .fill(.clear)
+                    .frame(height: 10)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeUpDown.set() }
+                        else { NSCursor.arrow.set() }
+                    }
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let newHeight = dragStartHeight - value.translation.height
+                                let clamped = max(120, min(700, newHeight))
+                                var t = Transaction()
+                                t.animation = nil
+                                withTransaction(t) {
+                                    inspectorHeight = clamped
+                                }
+                            }
+                            .onEnded { _ in
+                                dragStartHeight = inspectorHeight
+                                UserDefaults.standard.set(Double(inspectorHeight), forKey: "canopyInspectorHeight")
+                            }
+                    )
+            }
+    }
+
+    // MARK: - Modern minimal header
+
     private var workspaceHeader: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(vm.selectedFilter.rawValue)
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold))
                 Text("\(vm.filtered.count) of \(vm.torrents.count) torrents")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            // Selection badge
+            if vm.hasSelection {
+                Text("\(vm.selectionCount) selected")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(CanopyPalette.accent, in: Capsule())
+                    .transition(.scale.combined(with: .opacity))
+            }
+            // Search
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
+                    .font(.system(size: 12))
                 TextField("Search", text: $vm.searchText)
                     .textFieldStyle(.plain)
+                    .font(.system(size: 13))
                     .focused($searchFocused)
                 if !vm.searchText.isEmpty {
                     Button {
                         vm.searchText = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                     .help("Clear search")
@@ -153,41 +223,42 @@ struct ContentView: View {
             }
             .padding(.horizontal, 10)
             .frame(width: 240, height: 30)
-            .background(CanopyPalette.surface, in: RoundedRectangle(cornerRadius: 7))
+            .background(CanopyPalette.surface, in: RoundedRectangle(cornerRadius: 10))
             .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(CanopyPalette.border.opacity(0.7), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(CanopyPalette.border.opacity(0.4), lineWidth: 0.5)
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 52)
+        .padding(.horizontal, 16)
+        .frame(height: 56)
         .background(.bar)
+        .animation(.easeInOut(duration: 0.2), value: vm.hasSelection)
     }
+
+    // MARK: - Transfer table (multi-select)
 
     private var transferTable: some View {
         Group {
             if vm.filtered.isEmpty {
                 emptyState
             } else {
-                Table(sortedTorrents, selection: $vm.selectedTorrentID, sortOrder: $sortOrder) {
+                Table(sortedTorrents, selection: $vm.selectedTorrentIDs, sortOrder: $sortOrder) {
                     TableColumn("Name", value: \.name) { torrent in
                         TorrentNameCell(torrent: torrent) {
                             let saveURL = URL(fileURLWithPath: torrent.savePath)
                             if let fileURL = bestFileToOpen(torrent),
-                               NSWorkspace.shared.open(fileURL) {
-                                return
-                            }
+                               NSWorkspace.shared.open(fileURL) { return }
                             NSWorkspace.shared.open(saveURL)
                         }
                     }
-                    .width(min: 180, ideal: 280, max: 520)
+                    .width(min: 120, ideal: 280, max: 1000)
 
                     TableColumn("Size", value: \.totalSize) { torrent in
                         Text(formatBytes(torrent.totalSize))
                             .font(.caption.monospacedDigit())
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .width(min: 70, ideal: 86, max: 110)
+                    .width(min: 60, ideal: 86, max: 300)
 
                     TableColumn("Progress", value: \.progress) { torrent in
                         TorrentProgressCell(
@@ -195,72 +266,94 @@ struct ContentView: View {
                             color: torrent.statusColor
                         )
                     }
-                    .width(min: 110, ideal: 135, max: 180)
+                    .width(min: 80, ideal: 135, max: 400)
 
                     TableColumn("Status", value: \.sortableStatus) { torrent in
                         TorrentStatusCell(torrent: torrent)
                     }
-                    .width(min: 86, ideal: 105, max: 160)
+                    .width(min: 60, ideal: 105, max: 300)
 
                     TableColumn("Seeds", value: \.numSeeds) { torrent in
                         numericCell(torrent.numSeeds)
                     }
-                    .width(48)
+                    .width(min: 36, ideal: 48, max: 150)
 
                     TableColumn("Peers", value: \.numPeers) { torrent in
                         numericCell(torrent.numPeers)
                     }
-                    .width(48)
+                    .width(min: 36, ideal: 48, max: 150)
 
                     TableColumn("Down", value: \.downloadRate) { torrent in
                         SpeedCell(value: torrent.downloadRate, direction: .download)
                     }
-                    .width(min: 72, ideal: 88, max: 110)
+                    .width(min: 60, ideal: 88, max: 250)
 
                     TableColumn("Up", value: \.uploadRate) { torrent in
                         SpeedCell(value: torrent.uploadRate, direction: .upload)
                     }
-                    .width(min: 72, ideal: 88, max: 110)
+                    .width(min: 60, ideal: 88, max: 250)
 
                     TableColumn("ETA", value: \.etaSeconds) { torrent in
                         Text(formatETA(torrent.etaSeconds))
                             .font(.caption.monospacedDigit())
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .width(min: 52, ideal: 66, max: 90)
+                    .width(min: 40, ideal: 66, max: 150)
 
                     TableColumn("Ratio", value: \.ratioValue) { torrent in
                         Text(formatRatio(uploaded: torrent.totalUploaded, downloaded: torrent.totalDone))
                             .font(.caption.monospacedDigit())
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    .width(min: 48, ideal: 60, max: 80)
+                    .width(min: 40, ideal: 60, max: 150)
                 }
                 .tableStyle(.inset(alternatesRowBackgrounds: true))
-                .contextMenu { selectedTorrentContextMenu }
+                .contextMenu { selectionContextMenu }
                 .onDeleteCommand {
-                    if let torrent = vm.selectedTorrent { pendingRemoval = torrent }
+                    if vm.hasSelection {
+                        pendingRemovals = vm.selectedTorrents
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Inspector content (bottom panel)
+
     @ViewBuilder
     private var inspectorContent: some View {
         if let torrent = vm.selectedTorrent {
-            TorrentDetailView(torrent: torrent, engine: engine)
-                .id(torrent.id)
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(torrent.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(.bar)
+                Divider().opacity(0.4)
+                TorrentDetailView(torrent: torrent, engine: engine)
+                    .id(torrent.id)
+            }
         } else {
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 Image(systemName: "sidebar.right")
-                    .font(.system(size: 28, weight: .light))
+                    .font(.system(size: 32, weight: .light))
                     .foregroundStyle(.tertiary)
                 Text("No Torrent Selected")
-                    .font(.headline)
-                Text("Select a torrent to inspect its activity, files, peers, and trackers.")
-                    .font(.caption)
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.secondary)
+                Text("Select a torrent to inspect its activity, files, peers, and trackers.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 240)
             }
@@ -269,20 +362,25 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Numeric cell
+
     private func numericCell(_ value: Int) -> some View {
         Text("\(value)")
             .font(.caption.monospacedDigit())
             .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
+    // MARK: - Pre-add window
+
     private func showPreAddWindow(
-        pending: PendingTorrent, magnetHandle: LTTorrentHandle?,
-        magnetIndex: Int, isStub: Bool
+        pending: PendingTorrent,
+        magnetHandle: LTTorrentHandle?,
+        magnetIndex: Int,
+        isStub: Bool
     ) {
         // For non-stub (metadata arrived), update the existing window
         if !isStub, let holder = PreAddCoordinator.shared.windowForIndex(magnetIndex),
-            let model = holder.model, let window = holder.window, window.isVisible
-        {
+           let model = holder.model, let window = holder.window, window.isVisible {
             model.pending = pending
             model.rebuildTree()
             if !pending.name.isEmpty { window.title = pending.name }
@@ -291,14 +389,9 @@ struct ContentView: View {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-
         // For index 0 stubs, reuse the existing single-holder window
-        if isStub, magnetIndex == 0,
-            let holder = PreAddCoordinator.shared.singleHolder,
-            let model = holder.model,
-            let window = holder.window,
-            window.isVisible
-        {
+        if isStub, magnetIndex == 0, let holder = PreAddCoordinator.shared.singleHolder,
+           let model = holder.model, let window = holder.window, window.isVisible {
             model.pending = pending
             model.rebuildTree()
             if !pending.name.isEmpty { window.title = pending.name }
@@ -307,13 +400,11 @@ struct ContentView: View {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-
         let holder = PreAddWindowHolder()
         holder.magnetIndex = magnetIndex
         let model = PreAddViewModel(pending: pending)
         holder.model = model
         holder.magnetHandle = magnetHandle
-
         let rootView = PreAddSheet(
             model: model,
             onConfirm: { confirmed in
@@ -328,20 +419,19 @@ struct ContentView: View {
                 holder.window?.close()
             },
             onCancel: {
-                if let handle = holder.magnetHandle { engine.cancelMagnet(handle: handle) }
+                if let handle = holder.magnetHandle {
+                    engine.cancelMagnet(handle: handle)
+                }
                 holder.window?.close()
             }
         )
-
         let hosting = NSHostingController(rootView: rootView)
         let window = NSWindow(contentViewController: hosting)
         window.title = pending.name
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-
         window.contentMinSize = NSSize(width: 680, height: 480)
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-
         let frameName = "Canopy.PreAddWindow.\(min(magnetIndex, 3))"
         if !window.setFrameUsingName(frameName) {
             window.setContentSize(NSSize(width: 860, height: 620))
@@ -357,11 +447,11 @@ struct ContentView: View {
             }
         }
         window.setFrameAutosaveName(frameName)
-
         let idx = magnetIndex
         let obs = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
-            object: window, queue: .main
+            object: window,
+            queue: .main
         ) { _ in
             Task { @MainActor in
                 PreAddCoordinator.shared.activeWindows.removeAll { $0.window === window }
@@ -372,67 +462,81 @@ struct ContentView: View {
             }
         }
         holder.closeObserver = obs
-
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         holder.window = window
         PreAddCoordinator.shared.activeWindows.append(holder)
         PreAddCoordinator.shared.indexedWindows[magnetIndex] = holder
-        if magnetIndex == 0 { PreAddCoordinator.shared.singleHolder = holder }
+        if magnetIndex == 0 {
+            PreAddCoordinator.shared.singleHolder = holder
+        }
         PreAddCoordinator.shared.consumeQueuedState(for: magnetIndex)
     }
 
+    // MARK: - Empty state
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             Image(systemName: vm.searchText.isEmpty ? "tray" : "magnifyingglass")
-                .font(.system(size: 34, weight: .light))
+                .font(.system(size: 36, weight: .light))
                 .foregroundStyle(.tertiary)
             Text(vm.searchText.isEmpty ? "No Torrents" : "No Results")
-                .font(.title3.weight(.medium))
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.secondary)
             Text(
                 vm.searchText.isEmpty
                     ? "Add a torrent file or magnet link to begin."
                     : "Try a different search term or status filter."
             )
-            .font(.callout)
-            .foregroundStyle(.secondary)
+            .font(.system(size: 13))
+            .foregroundStyle(.tertiary)
             if vm.searchText.isEmpty {
-                Button("Add Torrent…") { showAddSheet = true }
+                Button("Add Torrent\u{2026}") { showAddSheet = true }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // MARK: - Toolbar (multi-select aware)
+
     @ToolbarContentBuilder
     private var workspaceToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                showAddSheet = true
-            } label: {
+            Button { showAddSheet = true } label: {
                 Label("Add Torrent", systemImage: "plus")
             }
             .keyboardShortcut("n", modifiers: .command)
             .help("Add torrent")
 
-            if let torrent = vm.selectedTorrent {
-                Button {
-                    torrent.isPaused ? engine.resume(torrent) : engine.pause(torrent)
-                } label: {
-                    Label(
-                        torrent.isPaused ? "Resume" : "Pause",
-                        systemImage: torrent.isPaused ? "play.fill" : "pause.fill"
-                    )
+            if vm.hasSelection {
+                // Pause / Resume — adapt based on selection state
+                let selected = vm.selectedTorrents
+                let anyRunning = selected.contains { !$0.isPaused }
+
+                if anyRunning {
+                    Button {
+                        engine.pauseSelected(selected.filter { !$0.isPaused })
+                    } label: {
+                        Label("Pause", systemImage: "pause.fill")
+                    }
+                    .help("Pause \(selected.filter { !$0.isPaused }.count) torrent(s)")
+                } else {
+                    Button {
+                        engine.resumeSelected(selected)
+                    } label: {
+                        Label("Resume", systemImage: "play.fill")
+                    }
+                    .help("Resume \(selected.count) torrent(s)")
                 }
-                .help(torrent.isPaused ? "Resume selected torrent" : "Pause selected torrent")
 
                 Button {
-                    pendingRemoval = torrent
+                    pendingRemovals = selected
                 } label: {
                     Label("Remove", systemImage: "trash")
                 }
-                .help("Remove selected torrent")
+                .help("Remove \(selected.count) torrent(s)")
             }
 
             Button {
@@ -446,15 +550,22 @@ struct ContentView: View {
                 Button("Pause All") { engine.pauseSession() }
                 Button("Resume All") { engine.resumeSession() }
                 Divider()
-                Button("Settings…") { showSettings = true }
+                if vm.hasSelection {
+                    Button("Force Re-check Selected") {
+                        engine.recheckSelected(vm.selectedTorrents)
+                    }
+                    Button("Force Re-announce Selected") {
+                        engine.reannounceSelected(vm.selectedTorrents)
+                    }
+                    Divider()
+                }
+                Button("Settings\u{2026}") { showSettings = true }
             } label: {
                 Label("More", systemImage: "ellipsis.circle")
             }
 
             if updater.updateAvailable {
-                Button {
-                    showUpdateSheet = true
-                } label: {
+                Button { showUpdateSheet = true } label: {
                     Label("Update Available", systemImage: "arrow.down.circle.fill")
                 }
                 .help("Install update")
@@ -462,9 +573,45 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Context menu (multi-select aware)
+
     @ViewBuilder
-    private var selectedTorrentContextMenu: some View {
-        if let torrent = vm.selectedTorrent {
+    private var selectionContextMenu: some View {
+        if vm.selectedTorrents.count > 1 {
+            // ── Bulk context menu ──
+            let selected = vm.selectedTorrents
+            let anyRunning = selected.contains { !$0.isPaused }
+            if anyRunning {
+                Button("Pause All Selected") {
+                    engine.pauseSelected(selected.filter { !$0.isPaused })
+                }
+            }
+            if selected.contains(where: { $0.isPaused }) {
+                Button("Resume All Selected") {
+                    engine.resumeSelected(selected.filter { $0.isPaused })
+                }
+            }
+            Divider()
+            Button("Force Re-check All") {
+                engine.recheckSelected(selected)
+            }
+            Button("Force Re-announce All") {
+                engine.reannounceSelected(selected)
+            }
+            Divider()
+            Button("Reveal in Finder") {
+                for torrent in selected {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: torrent.savePath)]
+                    )
+                }
+            }
+            Divider()
+            Button("Remove \(selected.count) Selected\u{2026}", role: .destructive) {
+                pendingRemovals = selected
+            }
+        } else if let torrent = vm.selectedTorrent {
+            // ── Single-torrent context menu ──
             if torrent.isPaused {
                 Button("Resume") { engine.resume(torrent) }
             } else {
@@ -479,43 +626,34 @@ struct ContentView: View {
             ))
             Divider()
             Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([
-                    URL(fileURLWithPath: torrent.savePath)
-                ])
+                NSWorkspace.shared.activateFileViewerSelecting(
+                    [URL(fileURLWithPath: torrent.savePath)]
+                )
             }
             Button("Copy Info Hash") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(torrent.id, forType: .string)
             }
             Divider()
-            Button("Remove…", role: .destructive) { pendingRemoval = torrent }
+            Button("Remove\u{2026}", role: .destructive) {
+                pendingRemovals = [torrent]
+            }
         }
     }
 }
 
 // MARK: - Smart open helper
 
-/// Returns the URL to open for a completed torrent: the single file for a
-/// single-file torrent, or the torrent's containing folder for a multi-file
-/// (folder) torrent. Returns nil only for incomplete torrents so the handler
-/// falls back to the generic save path.
 func bestFileToOpen(_ torrent: TorrentStatus) -> URL? {
     let saveURL = URL(fileURLWithPath: torrent.savePath)
-    // Only completed torrents open a specific location.
     let isComplete = (torrent.state == .finished || torrent.state == .seeding)
-    guard isComplete, let handle = torrent.handle, handle.fileCount > 0 else {
-        return nil
-    }
+    guard isComplete, let handle = torrent.handle, handle.fileCount > 0 else { return nil }
     var outSize: Int64 = 0
     var outPriority: Int32 = 0
-    guard let firstPath = handle.filePath(at: 0, size: &outSize, priority: &outPriority) else {
-        return nil
-    }
+    guard let firstPath = handle.filePath(at: 0, size: &outSize, priority: &outPriority) else { return nil }
     if handle.fileCount == 1 {
         return saveURL.appendingPathComponent(firstPath)
     }
-    // Multi-file torrent: the top-level path component of the file layout is
-    // the torrent's own folder (e.g. "MyFolder/movie.mkv" → "MyFolder").
     let topLevel = firstPath.split(separator: "/").map(String.init).first ?? ""
     guard !topLevel.isEmpty else { return nil }
     return saveURL.appendingPathComponent(topLevel)
@@ -529,11 +667,8 @@ final class PreAddWindowHolder {
     var magnetHandle: LTTorrentHandle?
     var magnetIndex: Int = 0
     var closeObserver: NSObjectProtocol?
-
     deinit {
-        if let obs = closeObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
+        if let obs = closeObserver { NotificationCenter.default.removeObserver(obs) }
     }
 }
 
@@ -547,16 +682,11 @@ final class PreAddCoordinator {
     private var queuedErrors: [Int: String] = [:]
     private init() {}
 
-    func windowForIndex(_ index: Int) -> PreAddWindowHolder? {
-        indexedWindows[index]
-    }
+    func windowForIndex(_ index: Int) -> PreAddWindowHolder? { indexedWindows[index] }
 
     func updateWindow(at index: Int, pending: PendingTorrent, handle: LTTorrentHandle?) {
-        guard let holder = indexedWindows[index],
-            let model = holder.model,
-            let window = holder.window,
-            window.isVisible
-        else {
+        guard let holder = indexedWindows[index], let model = holder.model,
+              let window = holder.window, window.isVisible else {
             queuedUpdates[index] = (pending, handle)
             return
         }
@@ -618,9 +748,7 @@ private struct UpdateSheet: View {
                     .font(.body).foregroundStyle(.secondary)
                 HStack(spacing: 12) {
                     Button("Later") { dismiss() }.keyboardShortcut(.escape)
-                    Button {
-                        updater.downloadAndInstall()
-                    } label: {
+                    Button { updater.downloadAndInstall() } label: {
                         Text("Update Now")
                     }
                     .buttonStyle(.borderedProminent)

@@ -1,4 +1,4 @@
-// SidebarView.swift — quiet native navigation
+// SidebarView.swift — modern minimal navigation
 
 import AppKit
 import SwiftUI
@@ -8,59 +8,74 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 9) {
+            // Brand
+            HStack(spacing: 10) {
                 Image(nsImage: NSApplication.shared.applicationIconImage)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 0) {
+                    .frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 1) {
                     Text("Canopy")
-                        .font(.headline)
+                        .font(.system(size: 14, weight: .semibold))
                     Text("BitTorrent client")
-                        .font(.caption2)
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 11)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
 
-            Divider()
+            Divider().opacity(0.4)
 
+            // Filters
             List(selection: $vm.selectedFilter) {
                 Section("Transfers") {
                     ForEach(FilterCategory.allCases, id: \.self) { category in
                         Label {
                             HStack(spacing: 8) {
                                 Text(category.rawValue)
+                                    .font(.system(size: 13))
                                 Spacer()
-                                Text("\(vm.filterCount(category))")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                let count = vm.filterCount(category)
+                                if count > 0 {
+                                    Text("\(count)")
+                                        .font(.system(size: 11).monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Color.secondary.opacity(0.12),
+                                            in: Capsule()
+                                        )
+                                }
                             }
                         } icon: {
                             Image(systemName: iconName(for: category))
                                 .symbolRenderingMode(.hierarchical)
+                                .font(.system(size: 14))
                         }
                         .tag(category)
                     }
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
 
-            Divider()
+            Divider().opacity(0.4)
 
+            // Session status
             HStack(spacing: 7) {
                 Circle()
                     .fill(CanopyPalette.positive)
                     .frame(width: 6, height: 6)
                 Text("Session active")
-                    .font(.caption2)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
+            .padding(.horizontal, 14)
+            .frame(height: 32)
         }
         .background(.bar)
     }

@@ -414,3 +414,40 @@ public final class TorrentEngine: ObservableObject {
         }
     }
 }
+
+
+// MARK: - File operations
+
+public func renameFile(_ newName: String, at index: Int, on torrent: TorrentStatus) {
+    guard let handle = torrent.handle else { return }
+    DispatchQueue.global(qos: .utility).async {
+        handle.renameFile(newName, at: Int32(index))
+    }
+}
+
+public func fileURL(forFileIndex index: Int, in torrent: TorrentStatus) -> URL? {
+    guard let handle = torrent.handle else { return nil }
+    var size: Int64 = 0
+    var priority: Int32 = 0
+    guard let relPath = handle.filePath(at: Int32(index), size: &size, priority: &priority) else { return nil }
+    return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
+}
+
+// MARK: - Batch operations
+extension TorrentEngine {
+    func pauseSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { pause(t) }
+    }
+    func resumeSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { resume(t) }
+    }
+    func recheckSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { recheck(t) }
+    }
+    func reannounceSelected(_ torrents: [TorrentStatus]) {
+        for t in torrents { reannounce(t) }
+    }
+    func removeSelected(_ torrents: [TorrentStatus], deleteFiles: Bool) {
+        for t in torrents { remove(t, deleteFiles: deleteFiles) }
+    }
+}

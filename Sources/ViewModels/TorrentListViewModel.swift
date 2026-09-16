@@ -14,8 +14,8 @@ enum FilterCategory: String, CaseIterable {
 
 @MainActor
 final class TorrentListViewModel: ObservableObject {
-
     @Published var torrents: [TorrentStatus] = []
+
     private var cancellables = Set<AnyCancellable>()
 
     init(engine: TorrentEngine) {
@@ -27,7 +27,7 @@ final class TorrentListViewModel: ObservableObject {
 
     @Published var selectedFilter: FilterCategory = .all
     @Published var searchText: String = ""
-    @Published var selectedTorrentID: String? = nil
+    @Published var selectedTorrentIDs: Set<String> = []
 
     var filtered: [TorrentStatus] {
         let base = torrents.filter { t in
@@ -36,10 +36,7 @@ final class TorrentListViewModel: ObservableObject {
         }
         switch selectedFilter {
         case .all: return base
-        case .downloading:
-            return base.filter {
-                !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata)
-            }
+        case .downloading: return base.filter { !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata) }
         case .seeding: return base.filter { !$0.isPaused && $0.state == .seeding }
         case .paused: return base.filter { $0.isPaused }
         case .finished: return base.filter { $0.state == .finished || $0.state == .seeding }
@@ -47,10 +44,19 @@ final class TorrentListViewModel: ObservableObject {
         }
     }
 
+    /// First selected torrent (for inspector display)
     var selectedTorrent: TorrentStatus? {
-        guard let id = selectedTorrentID else { return nil }
+        guard let id = selectedTorrentIDs.first else { return nil }
         return torrents.first { $0.id == id }
     }
+
+    /// All selected torrents
+    var selectedTorrents: [TorrentStatus] {
+        torrents.filter { selectedTorrentIDs.contains($0.id) }
+    }
+
+    var hasSelection: Bool { !selectedTorrentIDs.isEmpty }
+    var selectionCount: Int { selectedTorrentIDs.count }
 
     // Aggregate stats for status bar
     var totalDownloadRate: Int { torrents.reduce(0) { $0 + $1.downloadRate } }
@@ -59,14 +65,10 @@ final class TorrentListViewModel: ObservableObject {
     func filterCount(_ cat: FilterCategory) -> Int {
         switch cat {
         case .all: return torrents.count
-        case .downloading:
-            return torrents.filter {
-                !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata)
-            }.count
+        case .downloading: return torrents.filter { !$0.isPaused && ($0.state == .downloading || $0.state == .downloadingMetadata) }.count
         case .seeding: return torrents.filter { !$0.isPaused && $0.state == .seeding }.count
         case .paused: return torrents.filter { $0.isPaused }.count
-        case .finished:
-            return torrents.filter { $0.state == .finished || $0.state == .seeding }.count
+        case .finished: return torrents.filter { $0.state == .finished || $0.state == .seeding }.count
         case .error: return torrents.filter { $0.errorMessage != nil }.count
         }
     }

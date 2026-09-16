@@ -1,5 +1,6 @@
 // FilesTab.swift — compact live file inspector
 
+import AppKit
 import Combine
 import SwiftUI
 
@@ -182,6 +183,24 @@ private struct FileInspectorRow: View {
                     FileInspectorRow(node: child, depth: depth + 1, vm: vm)
                 }
             }
+        }
+    }
+
+    private func showRenameDialog(for node: FileNode) {
+        let alert = NSAlert()
+        alert.messageText = "Rename File"
+        alert.informativeText = "Enter a new name for \"\(node.name)\""
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.stringValue = node.name
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            let newName = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newName.isEmpty, newName != node.name else { return }
+            vm.renameFile(newName, on: node)
         }
     }
 

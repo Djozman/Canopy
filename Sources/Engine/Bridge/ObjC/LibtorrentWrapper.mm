@@ -241,6 +241,12 @@ static int mapState(lt::torrent_status::state_t s) {
                           lt::download_priority_t{(std::uint8_t)priority});
 }
 
+- (void)renameFile:(NSString *)newName atIndex:(int)index {
+    if (index < 0 || !_handle.is_valid()) return;
+    _handle.rename_file(lt::file_index_t{index},
+                        std::string(newName.UTF8String));
+}
+
 - (int)trackerCount {
     try { return (int)_handle.trackers().size(); } catch (...) { return 0; }
 }

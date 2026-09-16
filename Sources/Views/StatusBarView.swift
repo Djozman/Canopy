@@ -1,4 +1,4 @@
-// StatusBarView.swift — quiet session summary
+// StatusBarView.swift — modern minimal session summary
 
 import SwiftUI
 
@@ -8,21 +8,21 @@ struct StatusBarView: View {
     let torrentCount: Int
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 16) {
             Label(
                 "\(torrentCount) torrent\(torrentCount == 1 ? "" : "s")",
                 systemImage: "square.stack.3d.up"
             )
             .foregroundStyle(.secondary)
+            .font(.system(size: 11).monospacedDigit())
 
             Spacer()
 
             metric(icon: "arrow.down", value: downloadRate, color: CanopyPalette.download)
             metric(icon: "arrow.up", value: uploadRate, color: CanopyPalette.upload)
         }
-        .font(.caption.monospacedDigit())
-        .padding(.horizontal, 12)
-        .frame(height: 28)
+        .padding(.horizontal, 14)
+        .frame(height: 30)
         .background(.bar)
     }
 
@@ -30,8 +30,10 @@ struct StatusBarView: View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .foregroundStyle(value > 0 ? color : Color.secondary)
+                .font(.system(size: 10))
             Text(formatSpeed(value))
                 .foregroundStyle(value > 0 ? Color.primary : Color.secondary)
+                .font(.system(size: 11).monospacedDigit())
         }
     }
 }

@@ -59,7 +59,22 @@ public final class FileTreeViewModel: ObservableObject {
         objectWillChange.send()
     }
 
-    public func setPriority(_ priority: FilePriority, on node: FileNode) {
+    public func fileURL(for node: FileNode) -> URL? {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return nil }
+    var size: Int64 = 0
+    var priority: Int32 = 0
+    guard let relPath = handle.filePath(at: Int32(idx), size: &size, priority: &priority) else { return nil }
+    return URL(fileURLWithPath: torrent.savePath).appendingPathComponent(relPath)
+}
+
+public func renameFile(_ newName: String, on node: FileNode) {
+    guard let handle = torrent.handle, let idx = node.fileIndex else { return }
+    handle.renameFile(newName, at: Int32(idx))
+    node.name = newName
+    objectWillChange.send()
+}
+
+public func setPriority(_ priority: FilePriority, on node: FileNode) {
         applyPriority(priority, to: node)
         objectWillChange.send()
     }
