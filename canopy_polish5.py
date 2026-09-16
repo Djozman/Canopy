@@ -1,4 +1,46 @@
-// FileTreeViewModel.swift — builds/sorts the file tree from bridge data
+#!/usr/bin/env python3
+"""
+Canopy Polish 5 — DEFINITIVE fix for rename revert + expand/select delay
+Run from: /Users/amm/Canopy-main
+"""
+import os
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+
+def read(p):
+    with open(os.path.join(BASE, p)) as f:
+        return f.read()
+
+def write(p, c):
+    with open(os.path.join(BASE, p), 'w') as f:
+        f.write(c)
+    print(f"  ✅ {p}")
+
+print("\n🔧 Canopy Polish 5 — definitive fix\n")
+
+# ══════════════════════════════════════════════════════════════════════
+# 1. TorrentDetailView.swift — remove ALL refresh triggers
+# ══════════════════════════════════════════════════════════════════════
+c = read('Sources/Views/TorrentDetailView.swift')
+
+# Remove .onChange(of: torrent.totalDone) entirely
+c = c.replace(
+    '.onChange(of: torrent.totalDone) { \\_, \\_ in fileTreeVM.refresh(torrent: torrent) }',
+    '// No refresh here — VM handles its own updates'
+)
+
+# Remove .onAppear refresh from FilesTab
+c = c.replace(
+    'case .files: FilesTab(vm: fileTreeVM) .onAppear { fileTreeVM.refresh(torrent: torrent) }',
+    'case .files: FilesTab(vm: fileTreeVM)'
+)
+
+write('Sources/Views/TorrentDetailView.swift', c)
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. FileTreeViewModel.swift — full rewrite with proper rename tracking
+# ══════════════════════════════════════════════════════════════════════
+write('Sources/ViewModels/FileTreeViewModel.swift', r'''// FileTreeViewModel.swift — builds/sorts the file tree from bridge data
 
 import ClibtorrentBridge
 import Foundation
@@ -295,3 +337,26 @@ public final class FileTreeViewModel: ObservableObject {
         }
     }
 }
+''')
+
+# ══════════════════════════════════════════════════════════════════════
+# 3. FilesTab.swift — stop timer from causing re-renders
+#    Only refresh when visible, and only progress (no structure rebuild)
+# ══════════════════════════════════════════════════════════════════════
+c = read('Sources/Views/FilesTab.swift')
+
+# Change timer to 10s
+c = c.replace(
+    'private let refreshTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()',
+    'private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()'
+)
+
+write('Sources/Views/FilesTab.swift', c)
+
+print("\n📋 Root cause and fix:")
+print("  1. Rename revert: TorrentDetailView had .onChange(of: torrent.totalDone)")
+print("     and .onAppear refresh — both rebuilt tree from libtorrent (async rename)")
+print("     Fixed: removed both. VM tracks renames in renamedPaths dict (like qBT m_filePaths)")
+print("  2. Expand/select slow: onChange fired every 2s causing mass @Published updates")
+print("     Fixed: removed onChange entirely. Timer raised to 10s.")
+print("\nBuild with: swift build")
